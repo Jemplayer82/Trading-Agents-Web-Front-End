@@ -21,7 +21,7 @@ services:
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
     ports:
-      - "8000:8000"
+      - "8080:8000"
     restart: unless-stopped
 
 volumes:
