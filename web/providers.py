@@ -23,18 +23,24 @@ def _is_ollama_cloud(url: str | None) -> bool:
 
 
 # Ollama Cloud catalog — names that actually resolve at https://ollama.com/v1.
-# Source: ollama.com/library filtered to cloud-hosted variants.
+# Order matters: the first entry is the default in the dropdown for a fresh
+# session (no saved preferences yet). We default to a deliberate mixed pair
+# — gpt-oss for quick + kimi-k2 for deep — to keep the analyst and
+# decision-maker stages on different model lineages.
 _OLLAMA_CLOUD_MODELS = {
     "quick": [
-        ("GPT-OSS 20B (cloud)", "gpt-oss:20b-cloud"),
+        ("GPT-OSS 20B (cloud) — default", "gpt-oss:20b-cloud"),
+        ("GPT-OSS 120B (cloud)", "gpt-oss:120b-cloud"),
+        ("Kimi K2 1T (cloud)", "kimi-k2:1t-cloud"),
         ("GLM-4.6 (cloud)", "glm-4.6:cloud"),
         ("Custom model ID", "custom"),
     ],
     "deep": [
+        ("Kimi K2 1T (cloud) — default", "kimi-k2:1t-cloud"),
         ("GPT-OSS 120B (cloud)", "gpt-oss:120b-cloud"),
-        ("Qwen3-Coder 480B (cloud)", "qwen3-coder:480b-cloud"),
+        ("GPT-OSS 20B (cloud)", "gpt-oss:20b-cloud"),
         ("DeepSeek V3.1 671B (cloud)", "deepseek-v3.1:671b-cloud"),
-        ("Kimi K2 1T (cloud)", "kimi-k2:1t-cloud"),
+        ("Qwen3-Coder 480B (cloud)", "qwen3-coder:480b-cloud"),
         ("GLM-4.6 (cloud)", "glm-4.6:cloud"),
         ("Custom model ID", "custom"),
     ],
