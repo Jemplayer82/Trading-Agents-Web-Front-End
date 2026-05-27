@@ -218,7 +218,7 @@ class OpenAIClient(BaseLLMClient):
                         f"(e.g. add {api_key_env}=your_key to your .env file)."
                     )
             else:
-                llm_kwargs["api_key"] = "ollama"
+                llm_kwargs["api_key"] = os.environ.get("OLLAMA_API_KEY", "ollama")
         elif self.base_url:
             llm_kwargs["base_url"] = self.base_url
 
