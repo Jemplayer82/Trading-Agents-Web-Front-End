@@ -1,28 +1,39 @@
 services:
+  # Interactive CLI — use via Portainer console attach.
   tradingagents:
     image: ghcr.io/jemplayer82/tradingagents:latest
     environment:
-      - LLM_PROVIDER=ollama
-      - TRADINGAGENTS_LLM_PROVIDER=ollama
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-https://ollama.com/v1}
-      - OLLAMA_API_KEY=${OLLAMA_API_KEY}
+      LLM_PROVIDER: ollama
+      TRADINGAGENTS_LLM_PROVIDER: ollama
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY}
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
     tty: true
     stdin_open: true
 
-  tradingagents-web:
-    image: ghcr.io/jemplayer82/tradingagents-web:latest
+  # FastAPI backend — same image as CLI, command override to run uvicorn.
+  # This is the only HTTP-facing process that needs the LLM API key.
+  tradingagents-api:
+    image: ghcr.io/jemplayer82/tradingagents:latest
+    command: ["uvicorn", "web.main:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
-      - LLM_PROVIDER=ollama
-      - TRADINGAGENTS_LLM_PROVIDER=ollama
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-https://ollama.com/v1}
-      - OLLAMA_API_KEY=${OLLAMA_API_KEY}
+      LLM_PROVIDER: ollama
+      TRADINGAGENTS_LLM_PROVIDER: ollama
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY}
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
+    restart: unless-stopped
+
+  # Pure nginx frontend — no secrets, just static files + reverse proxy.
+  tradingagents-web:
+    image: ghcr.io/jemplayer82/tradingagents-web:latest
     ports:
       - "8080:8000"
     restart: unless-stopped
+    depends_on:
+      - tradingagents-api
 
 volumes:
   tradingagents_data:
