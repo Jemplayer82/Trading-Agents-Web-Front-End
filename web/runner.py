@@ -1,0 +1,211 @@
+"""Bridge between TradingAgentsGraph (synchronous LangGraph stream) and the
+WebSocket async sender.
+
+The producer runs in a worker thread (asyncio.to_thread) and pushes frames
+to a queue. The WebSocket coroutine drains the queue and sends frames to
+the browser.
+"""
+
+from __future__ import annotations
+
+import os
+import queue
+import traceback
+from typing import Any, Iterable
+
+from cli.models import AssetType
+from cli.utils import detect_asset_type
+from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.graph.trading_graph import TradingAgentsGraph
+
+from . import db
+
+
+REPORT_KEYS = (
+    "market_report",
+    "sentiment_report",
+    "news_report",
+    "fundamentals_report",
+    "investment_plan",
+    "trader_investment_plan",
+    "final_trade_decision",
+)
+
+ALL_ANALYSTS = ["market", "social", "news", "fundamentals"]
+
+
+def build_config(params: dict[str, Any]) -> dict[str, Any]:
+    """Merge user params with DEFAULT_CONFIG to build the graph config."""
+    cfg = dict(DEFAULT_CONFIG)
+
+    provider = (params.get("provider") or "ollama").lower()
+    cfg["llm_provider"] = provider
+    cfg["deep_think_llm"] = params.get("deep_model") or cfg["deep_think_llm"]
+    cfg["quick_think_llm"] = params.get("quick_model") or cfg["quick_think_llm"]
+    cfg["output_language"] = params.get("language") or cfg.get("output_language", "English")
+
+    depth = int(params.get("research_depth") or 1)
+    cfg["max_debate_rounds"] = depth
+    cfg["max_risk_discuss_rounds"] = depth
+
+    if params.get("openai_reasoning_effort"):
+        cfg["openai_reasoning_effort"] = params["openai_reasoning_effort"]
+    if params.get("anthropic_effort"):
+        cfg["anthropic_effort"] = params["anthropic_effort"]
+    if params.get("google_thinking_level"):
+        cfg["google_thinking_level"] = params["google_thinking_level"]
+
+    if provider == "ollama":
+        cfg["backend_url"] = os.environ.get("OLLAMA_BASE_URL") or cfg.get("backend_url")
+    elif params.get("backend_url"):
+        cfg["backend_url"] = params["backend_url"]
+
+    return cfg
+
+
+def _normalize_analysts(requested: Iterable[str], asset_type: AssetType) -> list[str]:
+    keys = [a for a in requested if a in ALL_ANALYSTS]
+    if not keys:
+        keys = list(ALL_ANALYSTS)
+    if asset_type == AssetType.CRYPTO:
+        keys = [a for a in keys if a != "fundamentals"]
+    return keys
+
+
+def _diff_reports(prev: dict[str, str], new_state: dict[str, Any]) -> dict[str, str]:
+    """Return only the report fields whose content changed since `prev`."""
+    out: dict[str, str] = {}
+    for key in REPORT_KEYS:
+        val = new_state.get(key, "")
+        if not isinstance(val, str):
+            continue
+        if val and val != prev.get(key, ""):
+            out[key] = val
+    return out
+
+
+def _message_summary(msg: Any) -> dict[str, Any] | None:
+    if msg is None:
+        return None
+    msg_type = getattr(msg, "type", None) or msg.__class__.__name__.lower()
+    content = getattr(msg, "content", None)
+    if isinstance(content, list):
+        text = " ".join(
+            (c.get("text", "") if isinstance(c, dict) else str(c)) for c in content
+        ).strip()
+    else:
+        text = str(content) if content else ""
+
+    name = getattr(msg, "name", None)
+    tool_calls = getattr(msg, "tool_calls", None) or []
+    tool_summaries = []
+    for tc in tool_calls:
+        if isinstance(tc, dict):
+            tool_summaries.append({
+                "name": tc.get("name") or tc.get("function", {}).get("name"),
+                "args": tc.get("args") or tc.get("function", {}).get("arguments"),
+            })
+
+    return {
+        "type": msg_type,
+        "name": name,
+        "text": text[:500],
+        "tool_calls": tool_summaries,
+    }
+
+
+def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Queue) -> None:
+    """Run the graph and emit frames. Synchronous — call via asyncio.to_thread."""
+
+    def emit(frame: dict[str, Any]) -> None:
+        frames.put(frame)
+
+    try:
+        ticker = params["ticker"].strip().upper()
+        trade_date = params["trade_date"]
+        asset_type = detect_asset_type(ticker)
+        analysts = _normalize_analysts(params.get("analysts", []), asset_type)
+
+        emit({
+            "type": "status",
+            "message": f"Initializing {len(analysts)} analyst(s) for {ticker} on {trade_date}",
+            "analysts": analysts,
+        })
+
+        cfg = build_config(params)
+        graph = TradingAgentsGraph(
+            selected_analysts=analysts,
+            debug=False,
+            config=cfg,
+        )
+
+        emit({"type": "status", "message": "Graph compiled. Streaming chunks..."})
+
+        init_state = graph.propagator.create_initial_state(
+            ticker,
+            trade_date,
+            asset_type=asset_type.value,
+            past_context=graph.memory_log.get_past_context(ticker),
+        )
+        args = graph.propagator.get_graph_args()
+
+        seen_reports: dict[str, str] = {}
+        last_message_idx = 0
+        final_state: dict[str, Any] = {}
+
+        for chunk in graph.graph.stream(init_state, **args):
+            final_state = chunk
+
+            delta = _diff_reports(seen_reports, chunk)
+            if delta:
+                for key, val in delta.items():
+                    seen_reports[key] = val
+                emit({"type": "report_update", "reports": delta})
+
+            messages = chunk.get("messages") or []
+            if len(messages) > last_message_idx:
+                new_msgs = messages[last_message_idx:]
+                last_message_idx = len(messages)
+                summaries = [m for m in (_message_summary(m) for m in new_msgs) if m]
+                if summaries:
+                    emit({"type": "messages", "messages": summaries})
+
+            inv = chunk.get("investment_debate_state") or {}
+            risk = chunk.get("risk_debate_state") or {}
+            if isinstance(inv, dict) and inv.get("count"):
+                emit({"type": "debate", "scope": "investment", "rounds": inv.get("count"), "judge": inv.get("judge_decision", "")})
+            if isinstance(risk, dict) and risk.get("count"):
+                emit({"type": "debate", "scope": "risk", "rounds": risk.get("count"), "judge": risk.get("judge_decision", "")})
+
+        emit({"type": "status", "message": "Processing final signal..."})
+        signal = graph.process_signal(final_state.get("final_trade_decision", ""))
+
+        db.complete_analysis(analysis_id, final_state, signal)
+
+        try:
+            graph.curr_state = final_state
+            graph.ticker = ticker
+            graph._log_state(trade_date, final_state)
+            graph.memory_log.store_decision(
+                ticker=ticker,
+                trade_date=trade_date,
+                final_trade_decision=final_state.get("final_trade_decision", ""),
+            )
+        except Exception:
+            pass
+
+        emit({
+            "type": "done",
+            "analysis_id": analysis_id,
+            "signal": signal,
+            "final_decision": final_state.get("final_trade_decision", ""),
+        })
+    except Exception as exc:
+        tb = traceback.format_exc()
+        try:
+            db.fail_analysis(analysis_id, f"{exc}\n{tb}")
+        except Exception:
+            pass
+        emit({"type": "error", "message": str(exc), "traceback": tb})
+    finally:
+        frames.put(None)

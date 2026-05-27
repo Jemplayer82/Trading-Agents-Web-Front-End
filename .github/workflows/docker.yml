@@ -8,6 +8,14 @@ on:
 jobs:
   build-push:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dockerfile: Dockerfile
+            image: ghcr.io/jemplayer82/tradingagents
+          - dockerfile: Dockerfile.web
+            image: ghcr.io/jemplayer82/tradingagents-web
     steps:
       - uses: actions/checkout@v4
 
@@ -25,9 +33,10 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           push: true
           tags: |
-            ghcr.io/jemplayer82/tradingagents:latest
-            ghcr.io/jemplayer82/tradingagents:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            ${{ matrix.image }}:latest
+            ${{ matrix.image }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}

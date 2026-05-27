@@ -11,5 +11,18 @@ services:
     tty: true
     stdin_open: true
 
+  tradingagents-web:
+    image: ghcr.io/jemplayer82/tradingagents-web:latest
+    environment:
+      - LLM_PROVIDER=ollama
+      - TRADINGAGENTS_LLM_PROVIDER=ollama
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-https://ollama.com/v1}
+      - OLLAMA_API_KEY=${OLLAMA_API_KEY}
+    volumes:
+      - tradingagents_data:/home/appuser/.tradingagents
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
 volumes:
   tradingagents_data:
