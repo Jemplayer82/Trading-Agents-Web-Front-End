@@ -131,6 +131,14 @@ async function loadPreferences() {
   });
 }
 
+function formatTimestamp(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 async function loadHistory() {
   const resp = await fetch("/api/analyses");
   const { analyses } = await resp.json();
@@ -138,7 +146,7 @@ async function loadHistory() {
   ul.innerHTML = "";
   if (!analyses.length) {
     const li = document.createElement("li");
-    li.className = "dim";
+    li.className = "dim empty";
     li.textContent = "(no runs yet)";
     li.style.cursor = "default";
     ul.appendChild(li);
@@ -150,13 +158,20 @@ async function loadHistory() {
     if (String(a.id) === String(activeHistoryId)) li.classList.add("active");
     const sig = (a.processed_signal || "—").toUpperCase();
     li.innerHTML = `
-      <span>
-        <span class="h-tk">${escapeHtml(a.ticker)}</span>
-        <span class="h-dt">${a.trade_date}</span>
+      <span class="h-main">
+        <span class="h-top">
+          <span class="h-tk">${escapeHtml(a.ticker)}</span>
+          <span class="h-sig ${sig}">${sig}</span>
+        </span>
+        <span class="h-ts">${formatTimestamp(a.created_at)}</span>
       </span>
-      <span class="h-sig ${sig}">${sig}</span>
+      <button class="h-del" title="Delete this run" aria-label="Delete">×</button>
     `;
-    li.addEventListener("click", () => loadHistoryItem(a.id));
+    li.querySelector(".h-main").addEventListener("click", () => loadHistoryItem(a.id));
+    li.querySelector(".h-del").addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      deleteHistoryItem(a.id, a.ticker);
+    });
     ul.appendChild(li);
   });
 }
@@ -174,9 +189,29 @@ async function loadHistoryItem(id) {
   });
   refreshReportTabs();
   if (a.processed_signal || a.final_decision) {
-    showDecision(a.processed_signal, a.final_decision, `${a.ticker} • ${a.trade_date}`);
+    showDecision(a.processed_signal, a.final_decision, `${a.ticker} • ${a.trade_date} • ${formatTimestamp(a.created_at)}`);
   }
   setStatus("done", `loaded #${a.id}`);
+}
+
+async function deleteHistoryItem(id, ticker) {
+  if (!confirm(`Delete saved analysis for ${ticker} (#${id})?`)) return;
+  const resp = await fetch(`/api/analyses/${id}`, { method: "DELETE" });
+  if (!resp.ok) {
+    alert("Delete failed.");
+    return;
+  }
+  // If the deleted entry was loaded, clear the main panel.
+  if (String(activeHistoryId) === String(id)) {
+    activeHistoryId = null;
+    currentReports = {};
+    activeReportKey = null;
+    refreshReportTabs();
+    renderActiveReport();
+    $("decision-panel").hidden = true;
+    setStatus("idle", "idle");
+  }
+  await loadHistory();
 }
 
 function collectParams() {

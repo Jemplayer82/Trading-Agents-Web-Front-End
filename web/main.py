@@ -74,6 +74,14 @@ def get_analysis(analysis_id: int) -> dict[str, Any]:
     return row
 
 
+@app.delete("/api/analyses/{analysis_id}")
+def delete_analysis_endpoint(analysis_id: int) -> dict[str, Any]:
+    deleted = db.delete_analysis(analysis_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="not found")
+    return {"status": "deleted", "id": analysis_id}
+
+
 @app.websocket("/api/analyze")
 async def analyze(ws: WebSocket) -> None:
     await ws.accept()

@@ -162,6 +162,13 @@ def fail_analysis(analysis_id: int, error: str) -> None:
         )
 
 
+def delete_analysis(analysis_id: int) -> bool:
+    """Delete one row by id. Returns True if a row was removed."""
+    with connect() as conn:
+        cur = conn.execute("DELETE FROM analyses WHERE id = ?", (analysis_id,))
+        return cur.rowcount > 0
+
+
 def list_analyses(limit: int = 50) -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute(
