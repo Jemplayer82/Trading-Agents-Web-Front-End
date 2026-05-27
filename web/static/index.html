@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TradingAgents Console</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="prompt">$</span>
+      <span class="brand-name">tradingagents</span>
+      <span class="brand-tag">--web</span>
+    </div>
+    <div class="stats">
+      <span id="stat-elapsed">elapsed: 0s</span>
+      <span id="stat-status" class="dim">idle</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar panel">
+      <div class="panel-title">[ History ]</div>
+      <ul id="history" class="history"></ul>
+    </aside>
+
+    <section class="main">
+      <div class="panel form-panel">
+        <div class="panel-title">[ Run Analysis ]</div>
+        <div class="form-grid">
+          <label>Ticker
+            <input id="f-ticker" type="text" placeholder="SPY, AAPL, 7203.T" autocomplete="off" />
+          </label>
+          <label>Date
+            <input id="f-date" type="date" />
+          </label>
+          <label>Language
+            <select id="f-language"></select>
+          </label>
+          <label>Provider
+            <select id="f-provider"></select>
+          </label>
+          <label>Deep model
+            <select id="f-deep-model"></select>
+          </label>
+          <label>Quick model
+            <select id="f-quick-model"></select>
+          </label>
+          <label>Research depth
+            <select id="f-depth"></select>
+          </label>
+          <fieldset class="analysts">
+            <legend>Analysts</legend>
+            <div id="f-analysts" class="analyst-list"></div>
+          </fieldset>
+          <div class="actions">
+            <button id="btn-run" type="button" class="primary">Run analysis</button>
+            <button id="btn-stop" type="button" class="ghost" disabled>Stop</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel decision-panel" id="decision-panel" hidden>
+        <div class="panel-title">[ Final Decision ]</div>
+        <div class="decision">
+          <span id="decision-signal" class="badge">—</span>
+          <span id="decision-meta" class="dim"></span>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">[ Progress ]</div>
+        <div id="progress" class="progress-grid"></div>
+      </div>
+
+      <div class="panel reports-panel">
+        <div class="panel-title">[ Reports ]</div>
+        <div class="tabs" id="report-tabs"></div>
+        <div class="report-body" id="report-body">
+          <p class="dim">Reports stream in here as agents complete.</p>
+        </div>
+      </div>
+
+      <div class="panel messages-panel">
+        <div class="panel-title">[ Messages / Tool Calls ]</div>
+        <ul id="messages" class="messages"></ul>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
