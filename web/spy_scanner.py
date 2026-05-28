@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
@@ -13,6 +12,7 @@ from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.portfolio_graph import run_single_ticker
 
 from . import db
+from .llm_helpers import llm_for
 
 log = logging.getLogger(__name__)
 
@@ -41,16 +41,7 @@ _REASON_RE = re.compile(r"REASONING\s*:\s*(.+)", re.IGNORECASE)
 
 
 def _llm_quick(config: dict[str, Any]) -> ChatOpenAI:
-    provider = (config.get("llm_provider") or "ollama").lower()
-    model = config.get("quick_think_llm") or "gpt-oss:20b-cloud"
-    base_url = config.get("backend_url") or config.get("base_url")
-    kwargs: dict[str, Any] = {"model": model, "temperature": 0.0}
-    if provider == "ollama":
-        kwargs["base_url"] = base_url or os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434/v1"
-        kwargs["api_key"] = os.environ.get("OLLAMA_API_KEY", "ollama")
-    elif base_url:
-        kwargs["base_url"] = base_url
-    return ChatOpenAI(**kwargs)
+    return llm_for(config, deep=False, temperature=0.0)
 
 
 def _parse_quick_response(text: str) -> tuple[str, int, str]:
