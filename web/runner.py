@@ -8,13 +8,14 @@ the browser.
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import traceback
 from typing import Any, Iterable
 
 from cli.models import AssetType
-from cli.utils import detect_asset_type
+from cli.utils import detect_asset_type, filter_analysts_for_asset_type
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
@@ -31,6 +32,7 @@ REPORT_KEYS = (
     "final_trade_decision",
 )
 
+# Display name → analyst key (the AnalystType enum values used internally)
 ALL_ANALYSTS = ["market", "social", "news", "fundamentals"]
 
 
@@ -44,10 +46,12 @@ def build_config(params: dict[str, Any]) -> dict[str, Any]:
     cfg["quick_think_llm"] = params.get("quick_model") or cfg["quick_think_llm"]
     cfg["output_language"] = params.get("language") or cfg.get("output_language", "English")
 
+    # Research depth → debate / risk-discussion rounds.
     depth = int(params.get("research_depth") or 1)
     cfg["max_debate_rounds"] = depth
     cfg["max_risk_discuss_rounds"] = depth
 
+    # Provider-specific thinking knobs (optional; ignored if provider doesn't use them).
     if params.get("openai_reasoning_effort"):
         cfg["openai_reasoning_effort"] = params["openai_reasoning_effort"]
     if params.get("anthropic_effort"):
@@ -55,6 +59,8 @@ def build_config(params: dict[str, Any]) -> dict[str, Any]:
     if params.get("google_thinking_level"):
         cfg["google_thinking_level"] = params["google_thinking_level"]
 
+    # Backend URL: Ollama uses the env var set in the container; other providers
+    # rely on their client's default endpoint unless explicitly overridden.
     if provider == "ollama":
         cfg["backend_url"] = os.environ.get("OLLAMA_BASE_URL") or cfg.get("backend_url")
     elif params.get("backend_url"):
@@ -85,11 +91,13 @@ def _diff_reports(prev: dict[str, str], new_state: dict[str, Any]) -> dict[str, 
 
 
 def _message_summary(msg: Any) -> dict[str, Any] | None:
+    """Reduce a LangChain message to a small dict the frontend can render."""
     if msg is None:
         return None
     msg_type = getattr(msg, "type", None) or msg.__class__.__name__.lower()
     content = getattr(msg, "content", None)
     if isinstance(content, list):
+        # Anthropic-style content blocks
         text = " ".join(
             (c.get("text", "") if isinstance(c, dict) else str(c)) for c in content
         ).strip()
@@ -109,20 +117,9 @@ def _message_summary(msg: Any) -> dict[str, Any] | None:
     return {
         "type": msg_type,
         "name": name,
-        "text": text[:500],
+        "text": text[:500],  # cap to keep WS frames small
         "tool_calls": tool_summaries,
     }
-
-
-def _error_message(exc: Exception) -> str:
-    msg = str(exc)
-    if "Error code: 500" in msg or "Internal Server Error" in msg:
-        return (
-            f"{msg}\n\n"
-            "Ollama Cloud returned a transient server error. "
-            "Wait a moment and try the analysis again — it usually succeeds on retry."
-        )
-    return msg
 
 
 def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Queue) -> None:
@@ -165,14 +162,17 @@ def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Qu
         final_state: dict[str, Any] = {}
 
         for chunk in graph.graph.stream(init_state, **args):
+            # chunks are full-state values (stream_mode="values")
             final_state = chunk
 
+            # Report deltas
             delta = _diff_reports(seen_reports, chunk)
             if delta:
                 for key, val in delta.items():
                     seen_reports[key] = val
                 emit({"type": "report_update", "reports": delta})
 
+            # Messages tail
             messages = chunk.get("messages") or []
             if len(messages) > last_message_idx:
                 new_msgs = messages[last_message_idx:]
@@ -181,18 +181,37 @@ def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Qu
                 if summaries:
                     emit({"type": "messages", "messages": summaries})
 
+            # Debate state — only emit while the debate is still ongoing.
+            # investment_debate_state / risk_debate_state persist in the
+            # LangGraph state after they finish, so gating on the completion
+            # report prevents the UI from being reset to "in_progress" on
+            # every subsequent chunk after the debate has already completed.
             inv = chunk.get("investment_debate_state") or {}
             risk = chunk.get("risk_debate_state") or {}
-            if isinstance(inv, dict) and inv.get("count"):
-                emit({"type": "debate", "scope": "investment", "rounds": inv.get("count"), "judge": inv.get("judge_decision", "")})
-            if isinstance(risk, dict) and risk.get("count"):
-                emit({"type": "debate", "scope": "risk", "rounds": risk.get("count"), "judge": risk.get("judge_decision", "")})
+            if isinstance(inv, dict) and inv.get("count") and "investment_plan" not in seen_reports:
+                emit({
+                    "type": "debate",
+                    "scope": "investment",
+                    "rounds": inv.get("count"),
+                    "judge": inv.get("judge_decision", ""),
+                })
+            if isinstance(risk, dict) and risk.get("count") and "final_trade_decision" not in seen_reports:
+                emit({
+                    "type": "debate",
+                    "scope": "risk",
+                    "rounds": risk.get("count"),
+                    "judge": risk.get("judge_decision", ""),
+                })
 
+        # Final signal processing
         emit({"type": "status", "message": "Processing final signal..."})
         signal = graph.process_signal(final_state.get("final_trade_decision", ""))
 
+        # Persist to DB
         db.complete_analysis(analysis_id, final_state, signal)
 
+        # Also let the graph's own disk-logging fire (mirrors CLI behavior so the
+        # `~/.tradingagents/logs/{ticker}/{date}/` tree stays consistent across services).
         try:
             graph.curr_state = final_state
             graph.ticker = ticker
@@ -203,6 +222,7 @@ def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Qu
                 final_trade_decision=final_state.get("final_trade_decision", ""),
             )
         except Exception:
+            # disk logging is best-effort — never block on it
             pass
 
         emit({
@@ -217,6 +237,6 @@ def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Qu
             db.fail_analysis(analysis_id, f"{exc}\n{tb}")
         except Exception:
             pass
-        emit({"type": "error", "message": _error_message(exc), "traceback": tb})
+        emit({"type": "error", "message": str(exc), "traceback": tb})
     finally:
-        frames.put(None)
+        frames.put(None)  # sentinel
