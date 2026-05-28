@@ -6,6 +6,7 @@
   <title>TradingAgents Console</title>
   <link rel="stylesheet" href="/static/styles.css" />
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>
+  <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js" defer></script>
   <script src="/static/app.js" defer></script>
   <script src="/static/schwab.js" defer></script>
   <script src="/static/portfolio.js" defer></script>
@@ -94,6 +95,23 @@
         <div class="report-body" id="report-body">
           <p class="dim">Reports stream in here as agents complete.</p>
         </div>
+      </div>
+
+      <div class="panel" id="chart-panel" hidden>
+        <div class="panel-title">[ Technical Chart ]</div>
+        <div class="chart-meta dim" id="chart-meta"></div>
+        <div id="chart-price" class="chart-pane chart-pane-first" style="height: 320px;"></div>
+        <div id="chart-rsi"   class="chart-pane" style="height: 120px;"></div>
+        <div id="chart-macd"  class="chart-pane" style="height: 120px;"></div>
+      </div>
+
+      <div class="panel" id="qa-panel" hidden>
+        <div class="panel-title">[ Ask About This Report ]</div>
+        <div id="qa-thread" class="qa-thread"></div>
+        <form id="qa-form" class="qa-form">
+          <input id="qa-input" type="text" placeholder="e.g. why a stop-loss at $X? what does the RSI mean here?" autocomplete="off" />
+          <button type="submit" class="primary">Ask</button>
+        </form>
       </div>
 
       <div class="panel messages-panel">

@@ -453,3 +453,78 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
   border-color: var(--accent-cyan);
   color: var(--accent-cyan);
 }
+
+/* ----- Technical Chart panel ----- */
+.chart-meta {
+  font-size: 11px;
+  margin-bottom: 6px;
+}
+.chart-pane {
+  width: 100%;
+  border-top: 1px solid var(--panel-border);
+  margin-top: 4px;
+}
+.chart-pane.chart-pane-first {
+  border-top: none;
+  margin-top: 0;
+}
+
+/* ----- Q&A panel ----- */
+.qa-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+  margin-bottom: 10px;
+  padding: 4px 2px;
+}
+.qa-bubble {
+  border: 1px solid var(--panel-border);
+  padding: 6px 10px;
+  border-radius: 6px;
+  max-width: 85%;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.qa-bubble.user {
+  align-self: flex-end;
+  background: #07101a;
+}
+.qa-bubble.assistant {
+  align-self: flex-start;
+  background: var(--panel);
+  border-color: var(--accent-cyan);
+}
+.qa-bubble.error {
+  align-self: flex-start;
+  border-color: var(--accent-red);
+  color: var(--accent-red);
+  background: rgba(255, 124, 124, 0.06);
+}
+.qa-bubble p:first-child { margin-top: 0; }
+.qa-bubble p:last-child  { margin-bottom: 0; }
+.qa-bubble code {
+  background: #15212c;
+  color: var(--accent-yellow);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+.qa-form {
+  display: flex;
+  gap: 8px;
+}
+.qa-form input {
+  flex: 1;
+  background: #060a0f;
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  border-radius: 3px;
+  outline: none;
+}
+.qa-form input:focus { border-color: var(--accent-cyan); }
+.qa-form input:disabled { opacity: 0.5; }

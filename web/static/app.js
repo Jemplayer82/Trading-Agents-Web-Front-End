@@ -217,6 +217,8 @@ async function loadHistoryItem(id) {
   if (a.processed_signal || a.final_decision) {
     showDecision(a.processed_signal, a.final_decision, `${a.ticker} • ${a.trade_date} • ${formatTimestamp(a.created_at)}`);
   }
+  setupQaForAnalysis(a);
+  loadChartForAnalysis(a);
   setStatus("done", `loaded #${a.id}`);
 }
 
@@ -235,6 +237,7 @@ async function deleteHistoryItem(id, ticker) {
     refreshReportTabs();
     renderActiveReport();
     $("decision-panel").hidden = true;
+    hideChartAndQa();
     setStatus("idle", "idle");
   }
   await loadHistory();
@@ -460,4 +463,230 @@ function escapeHtml(s) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+// ===== Technical chart + Q&A panels (per-analysis) =====
+
+let chartPrice = null;
+let chartRsi = null;
+let chartMacd = null;
+let chartResizeHandler = null;
+let qaState = { analysisId: null, history: [], inFlight: false };
+
+function hideChartAndQa() {
+  $("chart-panel").hidden = true;
+  $("qa-panel").hidden = true;
+  destroyCharts();
+  qaState = { analysisId: null, history: [], inFlight: false };
+}
+
+function destroyCharts() {
+  [chartPrice, chartRsi, chartMacd].forEach((c) => {
+    if (c) {
+      try { c.remove(); } catch (e) {}
+    }
+  });
+  chartPrice = chartRsi = chartMacd = null;
+  ["chart-price", "chart-rsi", "chart-macd"].forEach((id) => {
+    const el = $(id);
+    if (el) el.innerHTML = "";
+  });
+  if (chartResizeHandler) {
+    window.removeEventListener("resize", chartResizeHandler);
+    chartResizeHandler = null;
+  }
+}
+
+async function loadChartForAnalysis(a) {
+  const panel = $("chart-panel");
+  const meta = $("chart-meta");
+  panel.hidden = false;
+  meta.textContent = `${a.ticker} • ${a.trade_date} • loading point-in-time chart…`;
+  destroyCharts();
+
+  let data;
+  try {
+    const resp = await fetch(`/api/analyses/${a.id}/chart-data`);
+    if (!resp.ok) {
+      const err = await resp.text();
+      meta.textContent = `${a.ticker} • chart unavailable: ${err.slice(0, 200)}`;
+      return;
+    }
+    data = await resp.json();
+  } catch (e) {
+    meta.textContent = `${a.ticker} • chart unavailable: ${e}`;
+    return;
+  }
+
+  if (!data.candles || !data.candles.length) {
+    meta.textContent = `${a.ticker} • no price data in window`;
+    return;
+  }
+
+  if (!window.LightweightCharts) {
+    meta.textContent = `${a.ticker} • chart library failed to load`;
+    return;
+  }
+
+  meta.textContent = `${data.ticker} • ${data.trade_date} • point-in-time, ${data.lookback_days}d`;
+  renderCharts(data);
+}
+
+function renderCharts(data) {
+  const LC = window.LightweightCharts;
+  const opts = {
+    layout: { background: { color: "#06090d" }, textColor: "#6b7d8f" },
+    grid: {
+      vertLines: { color: "#0f1820" },
+      horzLines: { color: "#0f1820" },
+    },
+    rightPriceScale: { borderColor: "#1d2a36" },
+    timeScale: { borderColor: "#1d2a36", timeVisible: false, secondsVisible: false },
+    crosshair: { mode: 0 },
+  };
+
+  // Price pane
+  const priceEl = $("chart-price");
+  chartPrice = LC.createChart(priceEl, { ...opts, width: priceEl.clientWidth });
+  const candle = chartPrice.addCandlestickSeries({
+    upColor: "#2ecc71",
+    downColor: "#ff7c7c",
+    borderUpColor: "#2ecc71",
+    borderDownColor: "#ff7c7c",
+    wickUpColor: "#2ecc71",
+    wickDownColor: "#ff7c7c",
+  });
+  candle.setData(data.candles);
+
+  const ind = data.indicators || {};
+  const addLine = (chart, series, color, width = 1) => {
+    if (!series || !series.length) return null;
+    const s = chart.addLineSeries({ color, lineWidth: width, priceLineVisible: false, lastValueVisible: false });
+    s.setData(series);
+    return s;
+  };
+  addLine(chartPrice, ind.sma_50,  "#2ecc71", 1);
+  addLine(chartPrice, ind.sma_200, "#f4c95d", 1);
+  addLine(chartPrice, ind.ema_10,  "#6cd5e6", 1);
+  addLine(chartPrice, ind.boll_ub, "#d57bff", 1);
+  addLine(chartPrice, ind.boll_lb, "#d57bff", 1);
+
+  // RSI pane
+  const rsiEl = $("chart-rsi");
+  chartRsi = LC.createChart(rsiEl, { ...opts, width: rsiEl.clientWidth });
+  const rsiLine = addLine(chartRsi, ind.rsi_14, "#6cd5e6", 1);
+  if (rsiLine) {
+    rsiLine.createPriceLine({ price: 70, color: "#ff7c7c", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: "70" });
+    rsiLine.createPriceLine({ price: 30, color: "#2ecc71", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: "30" });
+  }
+
+  // MACD pane
+  const macdEl = $("chart-macd");
+  chartMacd = LC.createChart(macdEl, { ...opts, width: macdEl.clientWidth });
+  addLine(chartMacd, ind.macd,  "#6cd5e6", 1);
+  addLine(chartMacd, ind.macds, "#f4c95d", 1);
+  if (ind.macdh && ind.macdh.length) {
+    const hist = chartMacd.addHistogramSeries({ priceLineVisible: false, lastValueVisible: false });
+    hist.setData(ind.macdh.map((p) => ({
+      time: p.time,
+      value: p.value,
+      color: p.value >= 0 ? "#2ecc7155" : "#ff7c7c55",
+    })));
+  }
+
+  // Sync the three time scales
+  const charts = [chartPrice, chartRsi, chartMacd];
+  charts.forEach((src) => {
+    src.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+      if (!range) return;
+      charts.forEach((tgt) => {
+        if (tgt !== src) {
+          try { tgt.timeScale().setVisibleLogicalRange(range); } catch (e) {}
+        }
+      });
+    });
+  });
+
+  // Resize handling
+  chartResizeHandler = () => {
+    if (chartPrice) chartPrice.applyOptions({ width: priceEl.clientWidth });
+    if (chartRsi)   chartRsi.applyOptions({ width: rsiEl.clientWidth });
+    if (chartMacd)  chartMacd.applyOptions({ width: macdEl.clientWidth });
+  };
+  window.addEventListener("resize", chartResizeHandler);
+}
+
+// ===== Q&A panel =====
+
+function setupQaForAnalysis(a) {
+  qaState = { analysisId: a.id, history: [], inFlight: false };
+  const panel = $("qa-panel");
+  const thread = $("qa-thread");
+  const form = $("qa-form");
+  const input = $("qa-input");
+  panel.hidden = false;
+  thread.innerHTML = "";
+  input.value = "";
+  input.disabled = false;
+
+  // Rewire submit (clone to drop any prior listeners)
+  const newForm = form.cloneNode(true);
+  form.parentNode.replaceChild(newForm, form);
+  const newInput = newForm.querySelector("#qa-input");
+  newForm.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    submitQaQuestion(newInput);
+  });
+  newInput.focus();
+}
+
+function appendQaBubble(role, html) {
+  const thread = $("qa-thread");
+  const div = document.createElement("div");
+  div.className = `qa-bubble ${role}`;
+  div.innerHTML = html;
+  thread.appendChild(div);
+  thread.scrollTop = thread.scrollHeight;
+  return div;
+}
+
+async function submitQaQuestion(input) {
+  if (qaState.inFlight) return;
+  const question = input.value.trim();
+  if (!question) return;
+  if (!qaState.analysisId) return;
+
+  qaState.inFlight = true;
+  input.disabled = true;
+  appendQaBubble("user", escapeHtml(question));
+  const placeholder = appendQaBubble("assistant", '<span class="dim">thinking…</span>');
+
+  const priorHistory = qaState.history.slice();
+
+  try {
+    const resp = await fetch(`/api/analyses/${qaState.analysisId}/ask`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, history: priorHistory }),
+    });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      placeholder.className = "qa-bubble error";
+      placeholder.textContent = `Error ${resp.status}: ${errText.slice(0, 300)}`;
+    } else {
+      const data = await resp.json();
+      const answer = data.answer || "(empty response)";
+      placeholder.innerHTML = window.marked ? window.marked.parse(answer) : escapeHtml(answer);
+      qaState.history.push({ role: "user", content: question });
+      qaState.history.push({ role: "assistant", content: answer });
+      input.value = "";
+    }
+  } catch (e) {
+    placeholder.className = "qa-bubble error";
+    placeholder.textContent = `Network error: ${e}`;
+  } finally {
+    qaState.inFlight = false;
+    input.disabled = false;
+    input.focus();
+  }
 }

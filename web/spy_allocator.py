@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from typing import Any
 
 from langchain_openai import ChatOpenAI
 from tradingagents.default_config import DEFAULT_CONFIG
+
+from .llm_helpers import llm_for
 
 log = logging.getLogger(__name__)
 
@@ -43,16 +44,7 @@ PER_TICKER_TEMPLATE = (
 
 
 def _llm_for(config: dict[str, Any]) -> ChatOpenAI:
-    provider = (config.get("llm_provider") or "ollama").lower()
-    model = config.get("deep_think_llm") or "gpt-oss:120b-cloud"
-    base_url = config.get("backend_url") or config.get("base_url")
-    kwargs: dict[str, Any] = {"model": model, "temperature": 0.1}
-    if provider == "ollama":
-        kwargs["base_url"] = base_url or os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434/v1"
-        kwargs["api_key"] = os.environ.get("OLLAMA_API_KEY", "ollama")
-    elif base_url:
-        kwargs["base_url"] = base_url
-    return ChatOpenAI(**kwargs)
+    return llm_for(config, deep=True, temperature=0.1)
 
 
 def _fallback_allocation(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
