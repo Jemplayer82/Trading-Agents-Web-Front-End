@@ -9,6 +9,7 @@
   <script src="/static/app.js" defer></script>
   <script src="/static/schwab.js" defer></script>
   <script src="/static/portfolio.js" defer></script>
+  <script src="/static/spy.js" defer></script>
 </head>
 <body>
   <header class="topbar">
@@ -21,6 +22,7 @@
       <button class="main-tab active" data-tab="analyze">Run Analysis</button>
       <button class="main-tab" data-tab="schwab">Schwab</button>
       <button class="main-tab" data-tab="portfolio">Portfolio Scan</button>
+      <button class="main-tab" data-tab="spy">S&amp;P 500</button>
     </nav>
     <div class="stats">
       <span id="stat-elapsed">elapsed: 0s</span>
@@ -143,6 +145,109 @@
       <div class="panel">
         <div class="panel-title">[ Per-Ticker Results ]</div>
         <div id="portfolio-tickers" class="ticker-grid-web"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===== TAB: S&P 500 Portfolio Builder ===== -->
+  <main class="layout tab-pane" data-pane="spy" hidden>
+    <aside class="sidebar panel">
+      <div class="panel-title">[ Scan History ]</div>
+      <ul id="spy-history" class="history"></ul>
+    </aside>
+
+    <section class="main">
+      <div class="panel">
+        <div class="panel-title">[ S&amp;P 500 Scanner ]</div>
+        <p class="dim" style="margin: 0 0 10px;">Scans all ~500 S&amp;P 500 tickers, deep-dives the top 50 by conviction, and builds a $100k paper portfolio. Runs automatically every Saturday midnight ET.</p>
+        <div class="actions" style="justify-content: flex-start; gap: 10px;">
+          <button id="btn-spy-scan" type="button" class="primary">Run S&amp;P 500 Scan</button>
+          <button id="btn-spy-refresh" type="button" class="ghost" hidden>Refresh Prices</button>
+          <span id="spy-scan-result" class="dim" style="margin-left: 4px;"></span>
+        </div>
+      </div>
+
+      <div id="spy-progress-panel" class="panel" hidden>
+        <div class="panel-title">[ Scan Progress ]</div>
+        <div class="spy-progress-grid">
+          <div class="spy-progress-row">
+            <span class="spy-progress-label">Quick scan</span>
+            <div class="scan-progress">
+              <div class="scan-progress-bar" id="spy-quick-bar" style="width:0%"></div>
+            </div>
+            <span id="spy-quick-label" class="spy-progress-count dim">0 / 0</span>
+          </div>
+          <div class="spy-progress-row">
+            <span class="spy-progress-label">Deep dive</span>
+            <div class="scan-progress">
+              <div class="scan-progress-bar" id="spy-deep-bar" style="width:0%"></div>
+            </div>
+            <span id="spy-deep-label" class="spy-progress-count dim">0 / 0</span>
+          </div>
+        </div>
+        <p id="spy-status-text" class="dim" style="margin: 8px 0 0; font-size: 12px;"></p>
+      </div>
+
+      <div id="spy-performance-panel" class="panel" hidden>
+        <div class="panel-title">[ Performance ]</div>
+        <div class="spy-perf-grid">
+          <div class="spy-perf-item">
+            <span class="spy-perf-label">Basis</span>
+            <span class="spy-perf-value">$100,000</span>
+          </div>
+          <div class="spy-perf-item">
+            <span class="spy-perf-label">Current Value</span>
+            <span id="spy-perf-value" class="spy-perf-value">—</span>
+          </div>
+          <div class="spy-perf-item">
+            <span class="spy-perf-label">Return</span>
+            <span id="spy-perf-return" class="spy-perf-value">—</span>
+          </div>
+          <div class="spy-perf-item">
+            <span class="spy-perf-label">Last Updated</span>
+            <span id="spy-perf-updated" class="spy-perf-value dim">—</span>
+          </div>
+        </div>
+        <p id="spy-rebalance-notes" class="dim" style="margin: 10px 0 0; font-size: 12px; color: var(--accent-yellow);"></p>
+      </div>
+
+      <div id="spy-portfolio-panel" class="panel" hidden>
+        <div class="panel-title">[ Portfolio Allocations ]</div>
+        <div id="spy-allocator-report" class="report-body" style="margin-bottom: 12px;" hidden></div>
+        <table class="spy-table" id="spy-portfolio-table">
+          <thead>
+            <tr>
+              <th>Ticker</th>
+              <th>Signal</th>
+              <th>Allocation</th>
+              <th>Amount</th>
+              <th>Entry Price</th>
+              <th>Rationale</th>
+            </tr>
+          </thead>
+          <tbody id="spy-portfolio-body"></tbody>
+        </table>
+      </div>
+
+      <div id="spy-quick-panel" class="panel" hidden>
+        <div class="panel-title">[ Quick Scan Results ]</div>
+        <div style="margin-bottom: 8px; display: flex; gap: 8px; align-items: center;">
+          <span class="dim" style="font-size: 11px;">Sort by:</span>
+          <button class="ghost spy-sort-btn active" data-sort="conviction" style="font-size: 11px; padding: 3px 8px;">Conviction</button>
+          <button class="ghost spy-sort-btn" data-sort="signal" style="font-size: 11px; padding: 3px 8px;">Signal</button>
+          <button class="ghost spy-sort-btn" data-sort="ticker" style="font-size: 11px; padding: 3px 8px;">Ticker</button>
+        </div>
+        <table class="spy-table" id="spy-quick-table">
+          <thead>
+            <tr>
+              <th>Ticker</th>
+              <th>Signal</th>
+              <th>Conviction</th>
+              <th>Reasoning</th>
+            </tr>
+          </thead>
+          <tbody id="spy-quick-body"></tbody>
+        </table>
       </div>
     </section>
   </main>

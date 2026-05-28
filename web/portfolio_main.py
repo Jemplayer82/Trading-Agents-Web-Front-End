@@ -20,6 +20,8 @@ from tradingagents.graph.portfolio_graph import run_portfolio_scan
 from . import db
 from .auth import schwab_client, token_store, schwab as schwab_auth
 from .portfolio import aggregator
+from . import spy_scanner, spy_allocator
+from .spy_tickers import get_sp500_tickers
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -194,3 +196,93 @@ def _run_scan(scan_id: int, trade_date: str) -> None:
         full_payload={"per_ticker": per_ticker_payload, "config": config},
     )
     log.info("[scan %s] done — %s", scan_id, counts)
+
+
+# ---------- S&P 500 scanner endpoints ----------
+
+@app.post("/api/spy-scan")
+async def start_spy_scan(background_tasks: BackgroundTasks) -> dict[str, Any]:
+    """Trigger a full S&P 500 scan. Idempotent for today."""
+    today = datetime.utcnow().date().isoformat()
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT id, status FROM spy_scans WHERE trade_date = ? AND status != 'failed' ORDER BY id DESC LIMIT 1",
+            (today,),
+        ).fetchone()
+    if row:
+        return {"scan_id": int(row["id"]), "status": row["status"], "new": False}
+
+    scan_id = db.create_spy_scan(today)
+    background_tasks.add_task(_run_spy_scan_thread, scan_id, today)
+    return {"scan_id": scan_id, "status": "running_quick", "new": True}
+
+
+@app.get("/api/spy-scans")
+def list_spy_scans(limit: int = 50) -> dict[str, Any]:
+    return {"scans": db.list_spy_scans(limit=limit)}
+
+
+@app.get("/api/spy-scans/{scan_id}")
+def get_spy_scan(scan_id: int) -> dict[str, Any]:
+    scan = db.get_spy_scan(scan_id)
+    if not scan:
+        raise HTTPException(status_code=404, detail="not found")
+    return scan
+
+
+@app.post("/api/spy-scans/{scan_id}/refresh-prices")
+def refresh_spy_prices(scan_id: int) -> dict[str, Any]:
+    return spy_scanner.refresh_portfolio_prices(scan_id)
+
+
+@app.post("/api/spy-scans/latest/refresh-prices")
+def refresh_spy_prices_latest() -> dict[str, Any]:
+    scan = db.latest_spy_scan()
+    if not scan:
+        raise HTTPException(status_code=404, detail="no scans found")
+    return spy_scanner.refresh_portfolio_prices(int(scan["id"]))
+
+
+def _run_spy_scan_thread(scan_id: int, trade_date: str) -> None:
+    try:
+        _run_spy_scan(scan_id, trade_date)
+    except Exception as exc:
+        log.exception("SPY scan %s crashed", scan_id)
+        db.fail_spy_scan(scan_id, str(exc))
+
+
+def _run_spy_scan(scan_id: int, trade_date: str) -> None:
+    log.info("[spy %s] starting for %s", scan_id, trade_date)
+    prefs = db.get_preferences() or {}
+    config: dict[str, Any] = {
+        "llm_provider": prefs.get("provider") or "ollama",
+        "deep_think_llm": prefs.get("deep_model") or DEFAULT_CONFIG.get("deep_think_llm"),
+        "quick_think_llm": prefs.get("quick_model") or DEFAULT_CONFIG.get("quick_think_llm"),
+        "max_debate_rounds": int(prefs.get("research_depth") or 1),
+        "output_language": prefs.get("language", "English"),
+    }
+    selected_analysts = prefs.get("analysts") or ["market", "social", "news", "fundamentals"]
+
+    # Phase 1: quick scan all S&P 500
+    tickers = get_sp500_tickers()
+    quick_results = spy_scanner.run_quick_scan(scan_id, tickers, config)
+
+    # Phase 2: deep dive top 50 by conviction
+    buy_or_hold = [r for r in quick_results if (r.get("signal") or "").upper() in ("BUY", "HOLD")]
+    top50 = sorted(buy_or_hold, key=lambda r: -(r.get("conviction") or 0))[:50]
+    if not top50:
+        top50 = sorted(quick_results, key=lambda r: -(r.get("conviction") or 0))[:50]
+    enriched = spy_scanner.run_deep_dives(scan_id, top50, trade_date, config, selected_analysts)
+
+    # Phase 3: allocator
+    db.update_spy_scan(scan_id, status="running_alloc")
+    alloc_result = spy_allocator.run(enriched, trade_date, config)
+    portfolio = alloc_result.get("allocations", [])
+
+    db.complete_spy_scan(
+        scan_id=scan_id,
+        allocator_report=alloc_result.get("report_md", ""),
+        portfolio_json=portfolio,
+    )
+    log.info("[spy %s] done — %d positions, total $%s", scan_id, len(portfolio),
+             "{:,.0f}".format(alloc_result.get("total", 0)))
