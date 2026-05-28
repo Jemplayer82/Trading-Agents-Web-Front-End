@@ -85,19 +85,51 @@ function findProvider(key) {
 function onProviderChange() {
   const key = $("f-provider").value;
   const prov = findProvider(key);
-  fillModelDatalist("deep-models", prov?.models?.deep || []);
-  fillModelDatalist("quick-models", prov?.models?.quick || []);
+  fillModelSelect("f-deep-model", "f-deep-model-custom", prov?.models?.deep || []);
+  fillModelSelect("f-quick-model", "f-quick-model-custom", prov?.models?.quick || []);
 }
 
-function fillModelDatalist(id, options) {
-  const dl = $(id);
-  dl.innerHTML = "";
+function fillModelSelect(selectId, customInputId, options) {
+  const sel = $(selectId);
+  const customEl = $(customInputId);
+  const prevValue = sel.value;
+  sel.innerHTML = "";
   options.forEach((m) => {
     const opt = document.createElement("option");
     opt.value = m.value;
-    opt.label = m.label;
-    dl.appendChild(opt);
+    opt.textContent = m.label || m.value;
+    sel.appendChild(opt);
   });
+  const customOpt = document.createElement("option");
+  customOpt.value = "__custom__";
+  customOpt.textContent = "Custom…";
+  sel.appendChild(customOpt);
+  // Restore previous value if still present
+  if (prevValue && [...sel.options].some((o) => o.value === prevValue)) {
+    sel.value = prevValue;
+  }
+  customEl.style.display = sel.value === "__custom__" ? "" : "none";
+  sel.onchange = () => {
+    customEl.style.display = sel.value === "__custom__" ? "" : "none";
+    if (sel.value === "__custom__") customEl.focus();
+  };
+}
+
+function getModelValue(selectId, customInputId) {
+  const sel = $(selectId);
+  return sel.value === "__custom__" ? $(customInputId).value.trim() : sel.value;
+}
+
+function restoreModelPref(selectId, customInputId, saved) {
+  const sel = $(selectId);
+  const customEl = $(customInputId);
+  if ([...sel.options].some((o) => o.value === saved)) {
+    sel.value = saved;
+  } else {
+    sel.value = "__custom__";
+    customEl.value = saved;
+    customEl.style.display = "";
+  }
 }
 
 async function loadPreferences() {
@@ -115,8 +147,8 @@ async function loadPreferences() {
   $("f-language").value = prefs.language || "English";
   $("f-provider").value = prefs.provider || "ollama";
   onProviderChange();
-  if (prefs.deep_model) $("f-deep-model").value = prefs.deep_model;
-  if (prefs.quick_model) $("f-quick-model").value = prefs.quick_model;
+  if (prefs.deep_model) restoreModelPref("f-deep-model", "f-deep-model-custom", prefs.deep_model);
+  if (prefs.quick_model) restoreModelPref("f-quick-model", "f-quick-model-custom", prefs.quick_model);
   $("f-depth").value = prefs.research_depth || 1;
 
   const wanted = new Set(prefs.analysts || ["market", "social", "news", "fundamentals"]);
@@ -218,8 +250,8 @@ function collectParams() {
     trade_date: $("f-date").value,
     language: $("f-language").value,
     provider: $("f-provider").value,
-    deep_model: $("f-deep-model").value,
-    quick_model: $("f-quick-model").value,
+    deep_model: getModelValue("f-deep-model", "f-deep-model-custom"),
+    quick_model: getModelValue("f-quick-model", "f-quick-model-custom"),
     research_depth: parseInt($("f-depth").value, 10),
     analysts,
   };
