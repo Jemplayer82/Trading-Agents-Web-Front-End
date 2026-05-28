@@ -34,6 +34,16 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
 
 def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
     """Normalize a stock DataFrame for stockstats: parse dates, drop invalid rows, fill price gaps."""
+    # Older cached CSVs and some yfinance outputs name the date column
+    # differently. Normalise to "Date" before any downstream code touches it
+    # — this avoids a KeyError("Date") when reading legacy caches where
+    # df.reset_index() produced an "index" column from an unnamed
+    # DatetimeIndex.
+    if "Date" not in data.columns:
+        for cand in ("Datetime", "date", "index"):
+            if cand in data.columns:
+                data = data.rename(columns={cand: "Date"})
+                break
     data["Date"] = pd.to_datetime(data["Date"], errors="coerce")
     data = data.dropna(subset=["Date"])
 
