@@ -1,10 +1,11 @@
 """SQLite persistence for the web service.
 
-Stores user preferences (single row) and analysis history (one row per run).
-DB file lives in the shared volume so both web restarts and CLI runs see the
-same `~/.tradingagents/` tree.
+Tables:
+  preferences        - single row of user form defaults
+  analyses           - one row per single-ticker analysis (existing)
+  portfolio_scans    - one row per nightly portfolio sweep (new)
+  portfolio_tickers  - join row connecting a scan to the analyses it generated
 """
-
 from __future__ import annotations
 
 import json
@@ -51,6 +52,34 @@ CREATE TABLE IF NOT EXISTS analyses (
 );
 
 CREATE INDEX IF NOT EXISTS idx_analyses_created_at ON analyses (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS portfolio_scans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    trade_date TEXT NOT NULL,
+    status TEXT NOT NULL,
+    num_tickers INTEGER DEFAULT 0,
+    signal_counts TEXT,
+    aggregator_report TEXT,
+    full_payload TEXT,
+    error TEXT,
+    newsletter_sent_at TEXT,
+    newsletter_message_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_portfolio_scans_created_at ON portfolio_scans (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS portfolio_tickers (
+    scan_id INTEGER NOT NULL,
+    ticker TEXT NOT NULL,
+    analysis_id INTEGER,
+    quantity REAL,
+    market_value REAL,
+    signal TEXT,
+    error TEXT,
+    PRIMARY KEY (scan_id, ticker),
+    FOREIGN KEY (scan_id) REFERENCES portfolio_scans (id) ON DELETE CASCADE
+);
 """
 
 
@@ -65,6 +94,7 @@ def connect() -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(DB_PATH, isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
     try:
         yield conn
     finally:
@@ -88,6 +118,8 @@ def save_preferences(data: dict[str, Any]) -> None:
             (payload,),
         )
 
+
+# ---------- single-ticker analyses (unchanged behavior) ----------
 
 def create_analysis(params: dict[str, Any]) -> int:
     with connect() as conn:
@@ -163,7 +195,6 @@ def fail_analysis(analysis_id: int, error: str) -> None:
 
 
 def delete_analysis(analysis_id: int) -> bool:
-    """Delete one row by id. Returns True if a row was removed."""
     with connect() as conn:
         cur = conn.execute("DELETE FROM analyses WHERE id = ?", (analysis_id,))
         return cur.rowcount > 0
@@ -184,9 +215,7 @@ def list_analyses(limit: int = 50) -> list[dict[str, Any]]:
 
 def get_analysis(analysis_id: int) -> dict[str, Any] | None:
     with connect() as conn:
-        row = conn.execute(
-            "SELECT * FROM analyses WHERE id = ?", (analysis_id,)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM analyses WHERE id = ?", (analysis_id,)).fetchone()
     if not row:
         return None
     data = dict(row)
@@ -199,8 +228,139 @@ def get_analysis(analysis_id: int) -> dict[str, Any] | None:
     return data
 
 
+# ---------- portfolio scans (new) ----------
+
+def create_portfolio_scan(trade_date: str) -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO portfolio_scans (created_at, trade_date, status) VALUES (?, ?, 'running')",
+            (datetime.utcnow().isoformat(timespec="seconds") + "Z", trade_date),
+        )
+        return int(cur.lastrowid)
+
+
+def add_scan_ticker(
+    scan_id: int,
+    ticker: str,
+    analysis_id: int | None,
+    quantity: float,
+    market_value: float,
+    signal: str | None,
+    error: str | None = None,
+) -> None:
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO portfolio_tickers (scan_id, ticker, analysis_id, quantity, market_value, signal, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scan_id, ticker) DO UPDATE SET
+                analysis_id = excluded.analysis_id,
+                quantity = excluded.quantity,
+                market_value = excluded.market_value,
+                signal = excluded.signal,
+                error = excluded.error
+            """,
+            (scan_id, ticker, analysis_id, quantity, market_value, signal, error),
+        )
+
+
+def complete_portfolio_scan(
+    scan_id: int,
+    aggregator_report: str,
+    signal_counts: dict[str, int],
+    num_tickers: int,
+    full_payload: dict[str, Any] | None = None,
+) -> None:
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE portfolio_scans SET
+                status = 'completed',
+                num_tickers = ?,
+                signal_counts = ?,
+                aggregator_report = ?,
+                full_payload = ?
+            WHERE id = ?
+            """,
+            (
+                num_tickers,
+                json.dumps(signal_counts),
+                aggregator_report,
+                json.dumps(_serialize(full_payload or {})),
+                scan_id,
+            ),
+        )
+
+
+def fail_portfolio_scan(scan_id: int, error: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE portfolio_scans SET status = 'failed', error = ? WHERE id = ?",
+            (error, scan_id),
+        )
+
+
+def mark_newsletter_sent(scan_id: int, message_id: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE portfolio_scans SET newsletter_sent_at = ?, newsletter_message_id = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(timespec="seconds") + "Z", message_id, scan_id),
+        )
+
+
+def list_portfolio_scans(limit: int = 50) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, created_at, trade_date, status, num_tickers, signal_counts,
+                   newsletter_sent_at
+            FROM portfolio_scans ORDER BY id DESC LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        if d.get("signal_counts"):
+            try:
+                d["signal_counts"] = json.loads(d["signal_counts"])
+            except (TypeError, ValueError):
+                pass
+        out.append(d)
+    return out
+
+
+def get_portfolio_scan(scan_id: int) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM portfolio_scans WHERE id = ?", (scan_id,)).fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        tickers = conn.execute(
+            "SELECT * FROM portfolio_tickers WHERE scan_id = ? ORDER BY ticker",
+            (scan_id,),
+        ).fetchall()
+    for key in ("signal_counts", "full_payload"):
+        if data.get(key):
+            try:
+                data[key] = json.loads(data[key])
+            except (TypeError, ValueError):
+                pass
+    data["tickers"] = [dict(t) for t in tickers]
+    return data
+
+
+def latest_portfolio_scan() -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT id FROM portfolio_scans ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    if not row:
+        return None
+    return get_portfolio_scan(int(row["id"]))
+
+
 def _serialize(obj: Any) -> Any:
-    """Make LangChain messages and other non-JSON-native objects serializable."""
     if isinstance(obj, dict):
         return {k: _serialize(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):

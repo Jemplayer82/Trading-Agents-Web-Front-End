@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tradingagents"
-version = "0.2.5"
+version = "0.2.6"
 description = "TradingAgents: Multi-Agents LLM Financial Trading Framework"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,6 +30,13 @@ dependencies = [
     "tqdm>=4.67.1",
     "typing-extensions>=4.14.0",
     "yfinance>=0.2.63",
+    # Schwab/portfolio/newsletter stack additions (used by web + scheduler containers)
+    "cryptography>=43.0",
+    "httpx>=0.27",
+    "apscheduler>=3.10",
+    "jinja2>=3.1",
+    "markdown>=3.6",
+    "python-dateutil>=2.9",
 ]
 
 [project.optional-dependencies]
@@ -48,7 +55,7 @@ include = ["tradingagents*", "cli*", "web*"]
 
 [tool.setuptools.package-data]
 cli = ["static/*"]
-web = ["static/*"]
+web = ["static/*", "templates/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
