@@ -19,9 +19,15 @@ all three agents log the same warnings when fallback fires.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Callable, Optional, TypeVar
 
 from pydantic import BaseModel
+
+try:
+    from openai import InternalServerError as _OpenAI500
+except ImportError:
+    _OpenAI500 = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +64,10 @@ def invoke_structured_or_freetext(
     invocations, a list of message dicts for chat models that take that
     shape). The same value is forwarded to the free-text path so the
     fallback sees the same input the structured call did.
+
+    The free-text path retries once on provider 500s — Ollama Cloud returns
+    transient InternalServerError under load and a single 5-second pause
+    usually resolves it without surfacing the error to the user.
     """
     if structured_llm is not None:
         try:
@@ -69,5 +79,16 @@ def invoke_structured_or_freetext(
                 agent_name, exc,
             )
 
-    response = plain_llm.invoke(prompt)
-    return response.content
+    for attempt in range(2):
+        try:
+            response = plain_llm.invoke(prompt)
+            return response.content
+        except Exception as exc:
+            if attempt == 0 and _OpenAI500 and isinstance(exc, _OpenAI500):
+                logger.warning(
+                    "%s: provider 500 on free-text call, retrying in 5s (%s)",
+                    agent_name, exc,
+                )
+                time.sleep(5)
+                continue
+            raise
