@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import credentials as creds
 from . import db
 from .auth import schwab as schwab_auth
 from .auth import token_store
@@ -32,6 +33,7 @@ app = FastAPI(title="TradingAgents Web")
 @app.on_event("startup")
 def _startup() -> None:
     db.init_db()
+    creds.apply_to_env()
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -66,6 +68,42 @@ def get_prefs() -> dict[str, Any]:
 async def save_prefs(payload: dict[str, Any]) -> dict[str, str]:
     db.save_preferences(payload)
     return {"status": "saved"}
+
+
+# ---------- LLM provider API-key management ----------
+
+@app.get("/api/credentials")
+def list_credentials_endpoint() -> dict[str, Any]:
+    """Per-provider credential metadata. Keys are masked — never raw."""
+    return {"credentials": creds.list_meta()}
+
+
+@app.put("/api/credentials/{provider}")
+def save_credential_endpoint(provider: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Save an API key (and optional base URL) for `provider`.
+
+    Body: {"api_key": str, "base_url": str?}
+    """
+    api_key = ((payload or {}).get("api_key") or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="missing 'api_key' in body")
+    base_url = (payload or {}).get("base_url") or None
+    if base_url:
+        base_url = str(base_url).strip() or None
+    db.set_credential(provider.lower(), api_key, base_url)
+    creds.apply_to_env()
+    return {"status": "saved", "provider": provider, "masked": creds.mask_key(api_key)}
+
+
+@app.delete("/api/credentials/{provider}")
+def delete_credential_endpoint(provider: str) -> dict[str, str]:
+    """Clear the DB-stored credential for `provider`.
+
+    Note: env vars set externally (.env, docker-compose) are NOT touched.
+    """
+    if not db.delete_credential(provider.lower()):
+        raise HTTPException(status_code=404, detail="no DB credential set for that provider")
+    return {"status": "cleared", "provider": provider}
 
 
 @app.get("/api/analyses")

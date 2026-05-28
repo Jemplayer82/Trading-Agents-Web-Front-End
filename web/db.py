@@ -1,12 +1,13 @@
 """SQLite persistence for the web service.
 
 Tables:
-  preferences        - single row of user form defaults
-  analyses           - one row per single-ticker analysis (existing)
-  portfolio_scans    - one row per nightly portfolio sweep (Schwab)
-  portfolio_tickers  - join row connecting a scan to the analyses it generated
-  spy_scans          - one row per weekly S&P 500 scanner run
-  spy_quick_results  - one row per ticker per SPY scan (quick + deep results)
+  preferences          - single row of user form defaults
+  provider_credentials - per-LLM-provider API key + optional base URL
+  analyses             - one row per single-ticker analysis (existing)
+  portfolio_scans      - one row per nightly portfolio sweep (Schwab)
+  portfolio_tickers    - join row connecting a scan to the analyses it generated
+  spy_scans            - one row per weekly S&P 500 scanner run
+  spy_quick_results    - one row per ticker per SPY scan (quick + deep results)
 """
 from __future__ import annotations
 
@@ -26,6 +27,13 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS preferences (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     data TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS provider_credentials (
+    provider TEXT PRIMARY KEY,
+    api_key TEXT NOT NULL,
+    base_url TEXT,
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS analyses (
@@ -150,6 +158,46 @@ def save_preferences(data: dict[str, Any]) -> None:
             "ON CONFLICT(id) DO UPDATE SET data = excluded.data",
             (payload,),
         )
+
+
+# ---------- provider credentials (LLM API keys) ----------
+
+def set_credential(provider: str, api_key: str, base_url: str | None = None) -> None:
+    """Insert-or-update an API key (and optional base URL) for a provider."""
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO provider_credentials (provider, api_key, base_url, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(provider) DO UPDATE SET "
+            "api_key = excluded.api_key, base_url = excluded.base_url, updated_at = excluded.updated_at",
+            (provider, api_key, base_url, datetime.utcnow().isoformat()),
+        )
+
+
+def get_credential(provider: str) -> dict[str, Any] | None:
+    """Return the full credential row for `provider`, or None if not set."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT provider, api_key, base_url, updated_at FROM provider_credentials WHERE provider = ?",
+            (provider,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_credentials() -> list[dict[str, Any]]:
+    """Return all stored credential rows (api_key included — caller must mask before returning to client)."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT provider, api_key, base_url, updated_at FROM provider_credentials"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_credential(provider: str) -> bool:
+    """Remove a provider's credential. Returns True if a row was deleted."""
+    with connect() as conn:
+        cur = conn.execute("DELETE FROM provider_credentials WHERE provider = ?", (provider,))
+    return cur.rowcount > 0
 
 
 # ---------- single-ticker analyses (unchanged behavior) ----------

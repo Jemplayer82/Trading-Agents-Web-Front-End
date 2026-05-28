@@ -24,6 +24,7 @@
       <button class="main-tab" data-tab="schwab">Schwab</button>
       <button class="main-tab" data-tab="portfolio">Portfolio Scan</button>
       <button class="main-tab" data-tab="spy">S&amp;P 500</button>
+      <button class="main-tab" data-tab="keys">API Keys</button>
     </nav>
     <div class="stats">
       <span id="stat-elapsed">elapsed: 0s</span>
@@ -271,5 +272,34 @@
       </div>
     </section>
   </main>
+
+  <!-- ===== TAB: API Keys ===== -->
+  <main class="layout single tab-pane" data-pane="keys" hidden>
+    <section class="main">
+      <div class="panel">
+        <div class="panel-title">[ LLM Provider API Keys ]</div>
+        <p class="dim" style="margin: 0 0 12px;">
+          Keys are stored in the dashboard's SQLite DB and applied to the process env at startup
+          and on every save. Values set via the Portainer stack's <code>.env</code> still work as
+          a fallback. Stored keys are masked here — they're never read back over the network.
+        </p>
+        <div id="keys-status" class="dim" style="margin-bottom: 10px;"></div>
+        <table class="keys-table">
+          <thead>
+            <tr>
+              <th>Provider</th>
+              <th>Env var</th>
+              <th>Current</th>
+              <th>New value</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="keys-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/credentials.js" defer></script>
 </body>
 </html>

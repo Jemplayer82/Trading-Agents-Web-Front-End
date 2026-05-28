@@ -528,3 +528,61 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 }
 .qa-form input:focus { border-color: var(--accent-cyan); }
 .qa-form input:disabled { opacity: 0.5; }
+
+/* ----- API Keys tab ----- */
+.keys-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.keys-table th,
+.keys-table td {
+  border: 1px solid var(--panel-border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: middle;
+}
+.keys-table thead th {
+  color: var(--dim);
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  background: #07101a;
+}
+.keys-table tbody tr:nth-child(even) { background: #0a141d; }
+.keys-table code {
+  background: #15212c;
+  color: var(--accent-yellow);
+  padding: 1px 5px;
+  border-radius: 2px;
+  font-size: 12px;
+}
+.keys-table input[type=password] {
+  width: 100%;
+  background: #060a0f;
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 13px;
+  border-radius: 3px;
+  outline: none;
+}
+.keys-table input[type=password]:focus { border-color: var(--accent-cyan); }
+.keys-actions { white-space: nowrap; }
+.keys-actions button {
+  font-size: 11px;
+  padding: 4px 10px;
+}
+
+.key-src {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 2px;
+  letter-spacing: 0.5px;
+  margin-right: 6px;
+}
+.key-src.db  { background: var(--accent-cyan);   color: #04161b; }
+.key-src.env { background: var(--accent-yellow); color: #2e2204; }
