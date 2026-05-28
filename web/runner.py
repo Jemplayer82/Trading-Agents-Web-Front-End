@@ -114,6 +114,17 @@ def _message_summary(msg: Any) -> dict[str, Any] | None:
     }
 
 
+def _error_message(exc: Exception) -> str:
+    msg = str(exc)
+    if "Error code: 500" in msg or "Internal Server Error" in msg:
+        return (
+            f"{msg}\n\n"
+            "Ollama Cloud returned a transient server error. "
+            "Wait a moment and try the analysis again — it usually succeeds on retry."
+        )
+    return msg
+
+
 def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Queue) -> None:
     """Run the graph and emit frames. Synchronous — call via asyncio.to_thread."""
 
@@ -206,6 +217,6 @@ def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Qu
             db.fail_analysis(analysis_id, f"{exc}\n{tb}")
         except Exception:
             pass
-        emit({"type": "error", "message": str(exc), "traceback": tb})
+        emit({"type": "error", "message": _error_message(exc), "traceback": tb})
     finally:
         frames.put(None)
