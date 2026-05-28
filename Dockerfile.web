@@ -5,9 +5,9 @@ FROM nginx:alpine
 
 COPY web/nginx.conf /etc/nginx/nginx.conf
 COPY web/static/index.html /usr/share/nginx/html/index.html
-COPY web/static/styles.css /usr/share/nginx/html/static/styles.css
-COPY web/static/app.js /usr/share/nginx/html/static/app.js
-COPY web/static/schwab.js /usr/share/nginx/html/static/schwab.js
-COPY web/static/portfolio.js /usr/share/nginx/html/static/portfolio.js
+# Copy the whole static dir so newly-added JS/CSS files don't get
+# dropped (e.g. spy.js, credentials.js were silently 404→SPA-fallback
+# before this).
+COPY web/static/ /usr/share/nginx/html/static/
 
 EXPOSE 8000
