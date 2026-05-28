@@ -369,3 +369,87 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .pcard-link { margin-top: 8px; font-size: 12px; }
 .pcard-link a { color: var(--accent-cyan); text-decoration: none; }
 .pcard-link a:hover { text-decoration: underline; }
+
+/* ----- S&P 500 Scanner tab ----- */
+.scan-progress {
+  flex: 1;
+  background: var(--panel-border);
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.scan-progress-bar {
+  background: var(--accent-cyan);
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.spy-progress-grid { display: flex; flex-direction: column; gap: 8px; }
+.spy-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+.spy-progress-label { width: 90px; color: var(--dim); text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
+.spy-progress-count { width: 70px; text-align: right; }
+
+.spy-perf-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+.spy-perf-item { display: flex; flex-direction: column; gap: 3px; }
+.spy-perf-label { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+.spy-perf-value { font-size: 15px; font-weight: 600; color: var(--text); }
+
+.spy-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.spy-table th,
+.spy-table td {
+  border: 1px solid var(--panel-border);
+  padding: 5px 8px;
+  text-align: left;
+}
+.spy-table thead th {
+  color: var(--dim);
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  background: #07101a;
+}
+.spy-table tbody tr:hover { background: #0d1922; }
+.spy-table tbody tr:nth-child(even) { background: #0a141d; }
+
+.conviction-badge {
+  display: inline-block;
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  padding: 1px 6px;
+  border-radius: 2px;
+  background: var(--panel-border);
+  color: var(--text);
+}
+.conviction-badge.high  { background: var(--accent-green);   color: #042714; }
+.conviction-badge.mid   { background: var(--accent-yellow);  color: #2e2204; }
+.conviction-badge.low   { background: var(--accent-red);     color: #2e0a0a; }
+
+.return-badge {
+  font-weight: 700;
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 2px;
+}
+.return-badge.pos { color: var(--accent-green); }
+.return-badge.neg { color: var(--accent-red); }
+.return-badge.flat { color: var(--dim); }
+
+.spy-sort-btn.active {
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+}
