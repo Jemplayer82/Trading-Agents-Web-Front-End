@@ -41,11 +41,40 @@ a { color: var(--accent-cyan); }
   position: sticky;
   top: 0;
   z-index: 10;
+  gap: 16px;
 }
 
 .brand .prompt { color: var(--accent-green); margin-right: 6px; }
 .brand-name    { color: var(--accent-cyan); font-weight: 600; }
 .brand-tag     { color: var(--dim); margin-left: 4px; }
+
+/* Top-level tab strip */
+.tab-strip {
+  display: flex;
+  gap: 4px;
+  flex: 1;
+  justify-content: center;
+}
+.main-tab {
+  background: transparent;
+  border: 1px solid var(--panel-border);
+  color: var(--dim);
+  padding: 6px 14px;
+  font-family: inherit;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.main-tab:hover { color: var(--text); border-color: var(--accent-cyan); }
+.main-tab.active {
+  color: var(--accent-cyan);
+  border-color: var(--accent-cyan);
+  background: rgba(108, 213, 230, 0.08);
+}
+
+.tab-pane[hidden] { display: none !important; }
 
 .stats { display: flex; gap: 16px; color: var(--dim); }
 .stats #stat-status { color: var(--accent-yellow); }
@@ -60,6 +89,12 @@ a { color: var(--accent-cyan); }
   gap: 12px;
   padding: 12px;
   min-height: calc(100vh - 41px);
+}
+
+.layout.single {
+  grid-template-columns: 1fr;
+  max-width: 900px;
+  margin: 0 auto;
 }
 
 .sidebar { overflow-y: auto; max-height: calc(100vh - 65px); position: sticky; top: 53px; }
@@ -228,6 +263,7 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .badge.BUY, .h-sig.BUY     { background: var(--buy); color: #042714; }
 .badge.SELL, .h-sig.SELL   { background: var(--sell); color: #2e0a0a; }
 .badge.HOLD, .h-sig.HOLD   { background: var(--hold); color: #2e2204; }
+.badge.UNKNOWN, .h-sig.UNKNOWN { background: var(--panel-border); color: var(--dim); }
 
 .decision { display: flex; align-items: center; gap: 12px; }
 .decision .badge { font-size: 16px; padding: 6px 14px; border-radius: 3px; font-weight: 700; }
@@ -309,3 +345,27 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .messages .tool-args { color: var(--dim); font-size: 11px; display: block; }
 
 .dim { color: var(--dim); }
+
+/* ----- Schwab tab ----- */
+.schwab-status p { margin: 4px 0; }
+.schwab-status strong { color: var(--accent-cyan); }
+
+/* ----- Portfolio Scan tab ----- */
+.ticker-grid-web {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+.pcard {
+  background: #07101a;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  padding: 10px 12px;
+}
+.pcard-row { display: flex; justify-content: space-between; align-items: center; }
+.pcard-tk { font-weight: 700; color: var(--accent-cyan); letter-spacing: 0.5px; }
+.pcard-meta { color: var(--dim); font-size: 11px; margin-top: 2px; }
+.pcard-err  { color: var(--accent-red); font-size: 11px; margin-top: 6px; }
+.pcard-link { margin-top: 8px; font-size: 12px; }
+.pcard-link a { color: var(--accent-cyan); text-decoration: none; }
+.pcard-link a:hover { text-decoration: underline; }
