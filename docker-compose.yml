@@ -12,8 +12,7 @@ services:
     tty: true
     stdin_open: true
 
-  # FastAPI backend — same image as CLI but ENTRYPOINT swapped to uvicorn.
-  # This is the only HTTP-facing process that needs the LLM API key.
+  # Single-ticker analysis backend + Schwab OAuth.
   tradingagents-api:
     image: ghcr.io/jemplayer82/tradingagents:latest
     entrypoint: ["uvicorn", "web.main:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -22,9 +21,54 @@ services:
       TRADINGAGENTS_LLM_PROVIDER: ollama
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY}
+      SCHWAB_APP_KEY: ${SCHWAB_APP_KEY}
+      SCHWAB_APP_SECRET: ${SCHWAB_APP_SECRET}
+      SCHWAB_CALLBACK_URL: ${SCHWAB_CALLBACK_URL}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
     restart: unless-stopped
+
+  # Portfolio scan backend — separate container so long scans don't block ad-hoc.
+  tradingagents-portfolio:
+    image: ghcr.io/jemplayer82/tradingagents:latest
+    entrypoint: ["uvicorn", "web.portfolio_main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      LLM_PROVIDER: ollama
+      TRADINGAGENTS_LLM_PROVIDER: ollama
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY}
+      SCHWAB_APP_KEY: ${SCHWAB_APP_KEY}
+      SCHWAB_APP_SECRET: ${SCHWAB_APP_SECRET}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
+    volumes:
+      - tradingagents_data:/home/appuser/.tradingagents
+    restart: unless-stopped
+    depends_on:
+      - tradingagents-api
+
+  # Cron daemon — fires nightly scan + 5am newsletter + hourly token health.
+  tradingagents-scheduler:
+    image: ghcr.io/jemplayer82/tradingagents:latest
+    entrypoint: ["python", "-m", "web.scheduler"]
+    environment:
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
+      FRED_NOTIFY_URL: ${FRED_NOTIFY_URL}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      NEWSLETTER_FROM: ${NEWSLETTER_FROM}
+      NEWSLETTER_TO: ${NEWSLETTER_TO}
+      DASHBOARD_URL: ${DASHBOARD_URL:-https://trading.txferguson.net}
+      SCHEDULER_TIMEZONE: America/New_York
+      TRADINGAGENTS_API_URL: http://tradingagents-api:8000
+      TRADINGAGENTS_PORTFOLIO_URL: http://tradingagents-portfolio:8000
+    volumes:
+      - tradingagents_data:/home/appuser/.tradingagents
+    restart: unless-stopped
+    depends_on:
+      - tradingagents-portfolio
 
   # Pure nginx frontend — no secrets, just static files + reverse proxy.
   tradingagents-web:
@@ -34,6 +78,7 @@ services:
     restart: unless-stopped
     depends_on:
       - tradingagents-api
+      - tradingagents-portfolio
 
 volumes:
   tradingagents_data:

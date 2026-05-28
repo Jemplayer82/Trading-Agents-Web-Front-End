@@ -7,6 +7,8 @@
   <link rel="stylesheet" href="/static/styles.css" />
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>
   <script src="/static/app.js" defer></script>
+  <script src="/static/schwab.js" defer></script>
+  <script src="/static/portfolio.js" defer></script>
 </head>
 <body>
   <header class="topbar">
@@ -15,13 +17,19 @@
       <span class="brand-name">tradingagents</span>
       <span class="brand-tag">--web</span>
     </div>
+    <nav class="tab-strip" id="main-tabs">
+      <button class="main-tab active" data-tab="analyze">Run Analysis</button>
+      <button class="main-tab" data-tab="schwab">Schwab</button>
+      <button class="main-tab" data-tab="portfolio">Portfolio Scan</button>
+    </nav>
     <div class="stats">
       <span id="stat-elapsed">elapsed: 0s</span>
       <span id="stat-status" class="dim">idle</span>
     </div>
   </header>
 
-  <main class="layout">
+  <!-- ===== TAB: Run Analysis (existing dashboard) ===== -->
+  <main class="layout tab-pane active" data-pane="analyze">
     <aside class="sidebar panel">
       <div class="panel-title">[ History ]</div>
       <ul id="history" class="history"></ul>
@@ -87,6 +95,54 @@
       <div class="panel messages-panel">
         <div class="panel-title">[ Messages / Tool Calls ]</div>
         <ul id="messages" class="messages"></ul>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===== TAB: Schwab ===== -->
+  <main class="layout single tab-pane" data-pane="schwab" hidden>
+    <section class="main">
+      <div class="panel">
+        <div class="panel-title">[ Schwab Connection ]</div>
+        <div id="schwab-status-box" class="schwab-status">
+          <p class="dim">Loading…</p>
+        </div>
+        <div class="actions" style="justify-content: flex-start; margin-top: 12px;">
+          <button id="btn-schwab-connect" type="button" class="primary">Connect to Schwab</button>
+          <button id="btn-schwab-disconnect" type="button" class="ghost" hidden>Disconnect</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">[ Run Scan Now ]</div>
+        <p class="dim">Triggers a portfolio scan immediately (idempotent for today). The nightly cron also fires at 22:00 ET.</p>
+        <div class="actions" style="justify-content: flex-start;">
+          <button id="btn-scan-now" type="button" class="primary">Run scan now</button>
+          <span id="scan-now-result" class="dim" style="margin-left: 12px;"></span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===== TAB: Portfolio Scan ===== -->
+  <main class="layout tab-pane" data-pane="portfolio" hidden>
+    <aside class="sidebar panel">
+      <div class="panel-title">[ Scan History ]</div>
+      <ul id="portfolio-history" class="history"></ul>
+    </aside>
+
+    <section class="main">
+      <div class="panel">
+        <div class="panel-title">[ Briefing ]</div>
+        <div id="portfolio-meta" class="dim" style="margin-bottom: 8px;"></div>
+        <div id="portfolio-briefing" class="report-body">
+          <p class="dim">Select a scan from the sidebar.</p>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-title">[ Per-Ticker Results ]</div>
+        <div id="portfolio-tickers" class="ticker-grid-web"></div>
       </div>
     </section>
   </main>

@@ -1,11 +1,13 @@
 # Pure static frontend: nginx serving the dashboard HTML/CSS/JS and
-# reverse-proxying API + WebSocket traffic to the tradingagents-api
-# service. No Python, no secrets in this image.
+# reverse-proxying API + WebSocket traffic to the agents API + portfolio
+# services. No Python, no secrets in this image.
 FROM nginx:alpine
 
 COPY web/nginx.conf /etc/nginx/nginx.conf
 COPY web/static/index.html /usr/share/nginx/html/index.html
 COPY web/static/styles.css /usr/share/nginx/html/static/styles.css
 COPY web/static/app.js /usr/share/nginx/html/static/app.js
+COPY web/static/schwab.js /usr/share/nginx/html/static/schwab.js
+COPY web/static/portfolio.js /usr/share/nginx/html/static/portfolio.js
 
 EXPOSE 8000
