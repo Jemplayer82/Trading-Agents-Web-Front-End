@@ -124,7 +124,7 @@ class MinimaxChatOpenAI(NormalizedChatOpenAI):
     (#826).
 
     Tool-choice handling for M2.x — those models accept only the string
-    enum ``{"none", "auto"}`` and reject langchain's function-spec dict —
+    enum ``{\"none\", \"auto\"}`` and reject langchain's function-spec dict —
     is handled by the capability dispatch in
     ``NormalizedChatOpenAI.with_structured_output``, not here.
     """
@@ -226,6 +226,11 @@ class OpenAIClient(BaseLLMClient):
         for key in _PASSTHROUGH_KWARGS:
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
+
+        # Ollama Cloud returns transient 500s under load; raise the SDK's
+        # default of 2 retries so minor hiccups recover automatically.
+        if self.provider == "ollama" and "max_retries" not in llm_kwargs:
+            llm_kwargs["max_retries"] = 4
 
         # Native OpenAI: use Responses API for consistent behavior across
         # all model families. Third-party providers use Chat Completions.
