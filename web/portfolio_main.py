@@ -17,6 +17,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.portfolio_graph import run_portfolio_scan
 
+from . import credentials as creds
 from . import db
 from .auth import schwab_client, token_store, schwab as schwab_auth
 from .portfolio import aggregator
@@ -32,6 +33,7 @@ app = FastAPI(title="TradingAgents Portfolio")
 @app.on_event("startup")
 def _startup() -> None:
     db.init_db()
+    creds.apply_to_env()
 
 
 @app.get("/api/health")
@@ -99,8 +101,23 @@ def delete_scan(scan_id: int) -> dict[str, Any]:
 
 # ---------- background worker ----------
 
+def _refresh_creds_from_db() -> None:
+    """Re-apply DB-stored API keys to env before a scan starts.
+
+    The api container hosts the UI where the user saves keys; this
+    container only sees them via the shared sqlite DB. Refreshing
+    here means a credential saved mid-day takes effect on the very
+    next scan without needing a container restart.
+    """
+    try:
+        creds.apply_to_env()
+    except Exception:
+        log.exception("[creds] refresh failed")
+
+
 def _run_scan_thread(scan_id: int, trade_date: str) -> None:
     """Synchronous worker run inside a thread by FastAPI BackgroundTasks."""
+    _refresh_creds_from_db()
     try:
         _run_scan(scan_id, trade_date)
     except Exception as exc:
@@ -244,6 +261,7 @@ def refresh_spy_prices_latest() -> dict[str, Any]:
 
 
 def _run_spy_scan_thread(scan_id: int, trade_date: str) -> None:
+    _refresh_creds_from_db()
     try:
         _run_spy_scan(scan_id, trade_date)
     except Exception as exc:
