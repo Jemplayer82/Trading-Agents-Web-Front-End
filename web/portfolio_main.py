@@ -1,0 +1,196 @@
+"""FastAPI service dedicated to portfolio scans.
+
+Runs inside the tradingagents-portfolio container. Reads Schwab tokens from the
+shared volume, runs each holding through TradingAgentsGraph, calls the
+aggregator, and writes results to web.db. The scheduler container fires this
+at 22:00 ET nightly.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import datetime
+from typing import Any
+
+from fastapi import BackgroundTasks, FastAPI, HTTPException
+
+from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.graph.portfolio_graph import run_portfolio_scan
+
+from . import db
+from .auth import schwab_client, token_store, schwab as schwab_auth
+from .portfolio import aggregator
+
+log = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+app = FastAPI(title="TradingAgents Portfolio")
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    db.init_db()
+
+
+@app.get("/api/health")
+def health() -> dict[str, str]:
+    return {"status": "ok", "service": "portfolio"}
+
+
+@app.get("/api/auth/schwab/status")
+def schwab_status() -> dict[str, Any]:
+    """Same shape as the api container's endpoint — the scheduler hits whichever."""
+    bundle = token_store.load()
+    if not bundle:
+        return {"connected": False, "days_until_refresh_expires": None}
+    return {
+        "connected": True,
+        "days_until_refresh_expires": schwab_auth.refresh_days_remaining(bundle),
+        "refresh_issued_at": bundle.refresh_issued_at,
+    }
+
+
+@app.post("/api/portfolio-scan")
+async def start_scan(background_tasks: BackgroundTasks) -> dict[str, Any]:
+    """Kick off a portfolio scan. Idempotent for the same date — returns the
+    existing scan_id if a non-failed scan was already created today.
+    """
+    today = datetime.utcnow().date().isoformat()
+    # Idempotency check
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT id, status FROM portfolio_scans WHERE trade_date = ? AND status != 'failed' ORDER BY id DESC LIMIT 1",
+            (today,),
+        ).fetchone()
+    if row:
+        return {"scan_id": int(row["id"]), "status": row["status"], "new": False}
+
+    if not token_store.load():
+        raise HTTPException(status_code=400, detail="Schwab not connected — visit /api/auth/schwab first")
+
+    scan_id = db.create_portfolio_scan(today)
+    background_tasks.add_task(_run_scan_thread, scan_id, today)
+    return {"scan_id": scan_id, "status": "running", "new": True}
+
+
+@app.get("/api/portfolio-scans")
+def list_scans(limit: int = 50) -> dict[str, Any]:
+    return {"scans": db.list_portfolio_scans(limit=limit)}
+
+
+@app.get("/api/portfolio-scans/{scan_id}")
+def get_scan(scan_id: int) -> dict[str, Any]:
+    scan = db.get_portfolio_scan(scan_id)
+    if not scan:
+        raise HTTPException(status_code=404, detail="not found")
+    return scan
+
+
+@app.delete("/api/portfolio-scans/{scan_id}")
+def delete_scan(scan_id: int) -> dict[str, Any]:
+    with db.connect() as conn:
+        cur = conn.execute("DELETE FROM portfolio_scans WHERE id = ?", (scan_id,))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="not found")
+    return {"status": "deleted", "id": scan_id}
+
+
+# ---------- background worker ----------
+
+def _run_scan_thread(scan_id: int, trade_date: str) -> None:
+    """Synchronous worker run inside a thread by FastAPI BackgroundTasks."""
+    try:
+        _run_scan(scan_id, trade_date)
+    except Exception as exc:
+        log.exception("Scan %s crashed", scan_id)
+        db.fail_portfolio_scan(scan_id, str(exc))
+
+
+def _run_scan(scan_id: int, trade_date: str) -> None:
+    log.info("[scan %s] starting for %s", scan_id, trade_date)
+
+    # Step 1: fetch positions from Schwab
+    account_data, bundle = schwab_client.get_account_numbers()
+    if not account_data:
+        raise RuntimeError("Schwab returned no accounts")
+    account_hash = account_data[0].get("hashValue") or account_data[0].get("accountNumber")
+    if not account_hash:
+        raise RuntimeError(f"No accountHash in {account_data[0]}")
+    positions, bundle = schwab_client.get_positions(account_hash, bundle=bundle)
+    log.info("[scan %s] %d positions from Schwab", scan_id, len(positions))
+
+    # Step 2: load user preferences for LLM / analyst config
+    prefs = db.get_preferences() or {}
+    config: dict[str, Any] = {
+        "llm_provider": prefs.get("provider") or "ollama",
+        "deep_think_llm": prefs.get("deep_model") or "gpt-oss:120b-cloud",
+        "quick_think_llm": prefs.get("quick_model") or "gpt-oss:20b-cloud",
+        "max_debate_rounds": int(prefs.get("research_depth") or 1),
+    }
+    selected_analysts = prefs.get("analysts") or ["market", "social", "news", "fundamentals"]
+
+    # Step 3: for each position, create an analyses row + run the graph
+    per_ticker_payload: list[dict[str, Any]] = []
+    pos_dicts = [
+        {"symbol": p.symbol, "quantity": p.quantity, "market_value": p.market_value, "asset_type": p.asset_type}
+        for p in positions
+    ]
+
+    from tradingagents.graph.portfolio_graph import run_single_ticker
+
+    counts = {"BUY": 0, "HOLD": 0, "SELL": 0}
+    for i, pos in enumerate(pos_dicts, start=1):
+        ticker = pos["symbol"]
+        log.info("[scan %s] %d/%d: %s", scan_id, i, len(pos_dicts), ticker)
+        analysis_id = db.create_analysis({
+            "ticker": ticker,
+            "trade_date": trade_date,
+            "provider": config["llm_provider"],
+            "deep_model": config["deep_think_llm"],
+            "quick_model": config["quick_think_llm"],
+            "analysts": selected_analysts,
+            "research_depth": config["max_debate_rounds"],
+            "language": prefs.get("language", "English"),
+        })
+        try:
+            result = run_single_ticker(ticker, trade_date, config, selected_analysts)
+            final_state = result["final_state"]
+            signal = (result.get("signal") or "").upper()
+            db.complete_analysis(analysis_id, final_state, signal)
+            if signal in counts:
+                counts[signal] += 1
+            db.add_scan_ticker(scan_id, ticker, analysis_id, pos["quantity"], pos["market_value"], signal)
+            per_ticker_payload.append({
+                "ticker": ticker,
+                "signal": signal,
+                "quantity": pos["quantity"],
+                "market_value": pos["market_value"],
+                "trader_plan": final_state.get("trader_investment_plan", ""),
+                "final_decision": final_state.get("final_trade_decision", ""),
+            })
+        except Exception as exc:
+            log.exception("[scan %s] failed for %s", scan_id, ticker)
+            db.fail_analysis(analysis_id, str(exc))
+            db.add_scan_ticker(scan_id, ticker, analysis_id, pos["quantity"], pos["market_value"], None, error=str(exc))
+            per_ticker_payload.append({
+                "ticker": ticker,
+                "signal": "",
+                "quantity": pos["quantity"],
+                "market_value": pos["market_value"],
+                "trader_plan": "",
+                "final_decision": f"(failed: {exc})",
+            })
+
+    # Step 4: aggregator pass
+    log.info("[scan %s] running aggregator over %d tickers", scan_id, len(per_ticker_payload))
+    aggregator_md = aggregator.run(per_ticker_payload, trade_date, config)
+
+    # Step 5: persist final scan row
+    db.complete_portfolio_scan(
+        scan_id=scan_id,
+        aggregator_report=aggregator_md,
+        signal_counts=counts,
+        num_tickers=len(per_ticker_payload),
+        full_payload={"per_ticker": per_ticker_payload, "config": config},
+    )
+    log.info("[scan %s] done — %s", scan_id, counts)

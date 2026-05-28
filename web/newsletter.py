@@ -1,0 +1,109 @@
+"""Render the overnight portfolio scan as an HTML email and SMTP-send it."""
+from __future__ import annotations
+
+import logging
+import os
+import smtplib
+import ssl
+from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
+from pathlib import Path
+from typing import Any
+
+import markdown as md_lib
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+log = logging.getLogger(__name__)
+
+TEMPLATE_DIR = Path(__file__).parent / "templates"
+_env = Environment(
+    loader=FileSystemLoader(str(TEMPLATE_DIR)),
+    autoescape=select_autoescape(["html"]),
+)
+
+
+def _badge_color(signal: str) -> str:
+    return {"BUY": "#2ecc71", "SELL": "#ff7c7c", "HOLD": "#f4c95d"}.get(
+        (signal or "").upper(), "#6b7d8f"
+    )
+
+
+def _markdown_to_html(text: str) -> str:
+    if not text:
+        return ""
+    try:
+        return md_lib.markdown(text, extensions=["fenced_code", "tables"])
+    except Exception:
+        return f"<pre>{text}</pre>"
+
+
+def _excerpt(text: str, n: int = 280) -> str:
+    if not text:
+        return ""
+    text = text.replace("\n\n", " ").strip()
+    if len(text) <= n:
+        return text
+    return text[:n].rsplit(" ", 1)[0] + "…"
+
+
+_env.filters["mdhtml"] = _markdown_to_html
+_env.filters["badgecolor"] = _badge_color
+_env.filters["excerpt"] = _excerpt
+
+
+def render(scan: dict[str, Any]) -> tuple[str, str]:
+    """Returns (subject, html_body)."""
+    dashboard_url = os.environ.get("DASHBOARD_URL", "https://trading.txferguson.net").rstrip("/")
+    counts = scan.get("signal_counts") or {}
+    n = scan.get("num_tickers") or 0
+    date_str = (scan.get("trade_date") or scan.get("created_at") or "")[:10]
+    subject = (
+        f"Portfolio Briefing · {date_str} · {n} positions · "
+        f"{counts.get('BUY', 0)} BUY / {counts.get('HOLD', 0)} HOLD / {counts.get('SELL', 0)} SELL"
+    )
+    html = _env.get_template("newsletter.html").render(
+        scan=scan,
+        counts=counts,
+        date_str=date_str,
+        dashboard_url=dashboard_url,
+        tickers=scan.get("tickers") or [],
+    )
+    return subject, html
+
+
+def send(scan: dict[str, Any]) -> str | None:
+    """Render and SMTP-send. Returns Message-ID on success, None on failure."""
+    host = os.environ.get("SMTP_HOST")
+    port = int(os.environ.get("SMTP_PORT", "587"))
+    user = os.environ.get("SMTP_USER")
+    password = os.environ.get("SMTP_PASS")
+    sender = os.environ.get("NEWSLETTER_FROM") or user
+    recipient = os.environ.get("NEWSLETTER_TO")
+    if not (host and user and password and recipient):
+        log.warning("[newsletter] SMTP env missing — skipping send")
+        return None
+    subject, html = render(scan)
+    msg = EmailMessage()
+    msg["From"] = sender
+    msg["To"] = recipient
+    msg["Subject"] = subject
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain="tradingagents")
+    msg.set_content("This email is HTML — please use an HTML-capable client.")
+    msg.add_alternative(html, subtype="html")
+    try:
+        if port == 465:
+            ctx = ssl.create_default_context()
+            with smtplib.SMTP_SSL(host, port, context=ctx, timeout=30) as s:
+                s.login(user, password)
+                s.send_message(msg)
+        else:
+            with smtplib.SMTP(host, port, timeout=30) as s:
+                s.starttls()
+                s.login(user, password)
+                s.send_message(msg)
+        log.info("[newsletter] sent: %s", subject)
+        return msg["Message-ID"]
+    except Exception as exc:
+        log.exception("[newsletter] SMTP send failed: %s", exc)
+        return None
