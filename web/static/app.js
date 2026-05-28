@@ -85,25 +85,19 @@ function findProvider(key) {
 function onProviderChange() {
   const key = $("f-provider").value;
   const prov = findProvider(key);
-  fillModelSelect("f-deep-model", prov?.models?.deep || []);
-  fillModelSelect("f-quick-model", prov?.models?.quick || []);
+  fillModelDatalist("deep-models", prov?.models?.deep || []);
+  fillModelDatalist("quick-models", prov?.models?.quick || []);
 }
 
-function fillModelSelect(id, options) {
-  const sel = $(id);
-  sel.innerHTML = "";
+function fillModelDatalist(id, options) {
+  const dl = $(id);
+  dl.innerHTML = "";
   options.forEach((m) => {
     const opt = document.createElement("option");
     opt.value = m.value;
-    opt.textContent = m.label;
-    sel.appendChild(opt);
+    opt.label = m.label;
+    dl.appendChild(opt);
   });
-  if (!options.length) {
-    const opt = document.createElement("option");
-    opt.value = "";
-    opt.textContent = "(none — enter manually via API)";
-    sel.appendChild(opt);
-  }
 }
 
 async function loadPreferences() {

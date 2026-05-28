@@ -54,10 +54,12 @@
             <select id="f-provider"></select>
           </label>
           <label>Deep model
-            <select id="f-deep-model"></select>
+            <input id="f-deep-model" type="text" list="deep-models" autocomplete="off" placeholder="Pick a preset or type a custom model name" />
+            <datalist id="deep-models"></datalist>
           </label>
           <label>Quick model
-            <select id="f-quick-model"></select>
+            <input id="f-quick-model" type="text" list="quick-models" autocomplete="off" placeholder="Pick a preset or type a custom model name" />
+            <datalist id="quick-models"></datalist>
           </label>
           <label>Research depth
             <select id="f-depth"></select>
