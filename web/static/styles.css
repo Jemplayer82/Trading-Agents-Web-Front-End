@@ -625,3 +625,54 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 }
 .key-src.db  { background: var(--accent-cyan);   color: #04161b; }
 .key-src.env { background: var(--accent-yellow); color: #2e2204; }
+
+/* ===== Live reasoning timeline (train of thought) ===== */
+.reasoning-wrap {
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  margin-bottom: 12px;
+  background: #0a0e13;
+}
+.reasoning-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--panel-border);
+}
+.reasoning-title {
+  color: var(--accent-cyan);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.reasoning-toggle { font-size: 11px; padding: 2px 8px; }
+.reasoning-log {
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.reasoning-block { margin-bottom: 10px; }
+.reasoning-node {
+  color: var(--accent-magenta);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-bottom: 2px;
+}
+.reasoning-text {
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.reasoning-text.reasoning-thinking { color: var(--dim); font-style: italic; }
+.reasoning-tool {
+  color: var(--accent-yellow);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 4px 0;
+}

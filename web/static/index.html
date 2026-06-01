@@ -113,12 +113,13 @@
         <div id="progress" class="progress-grid"></div>
       </div>
 
-      <div class="panel reports-panel">
-        <div class="panel-title">[ Reports ]</div>
-        <div class="tabs" id="report-tabs"></div>
-        <div class="report-body" id="report-body">
-          <p class="dim">Reports stream in here as agents complete.</p>
-        </div>
+      <div class="panel" id="qa-panel" hidden>
+        <div class="panel-title">[ Ask About This Report ]</div>
+        <div id="qa-thread" class="qa-thread"></div>
+        <form id="qa-form" class="qa-form">
+          <input id="qa-input" type="text" placeholder="e.g. why a stop-loss at $X? what does the RSI mean here?" autocomplete="off" />
+          <button type="submit" class="primary">Ask</button>
+        </form>
       </div>
 
       <div class="panel" id="chart-panel" hidden>
@@ -129,13 +130,19 @@
         <div id="chart-macd"  class="chart-pane" style="height: 120px;"></div>
       </div>
 
-      <div class="panel" id="qa-panel" hidden>
-        <div class="panel-title">[ Ask About This Report ]</div>
-        <div id="qa-thread" class="qa-thread"></div>
-        <form id="qa-form" class="qa-form">
-          <input id="qa-input" type="text" placeholder="e.g. why a stop-loss at $X? what does the RSI mean here?" autocomplete="off" />
-          <button type="submit" class="primary">Ask</button>
-        </form>
+      <div class="panel reports-panel">
+        <div class="panel-title">[ Reports ]</div>
+        <div class="reasoning-wrap" id="reasoning-wrap" hidden>
+          <div class="reasoning-head">
+            <span class="reasoning-title">Live Reasoning</span>
+            <button id="reasoning-toggle" type="button" class="ghost reasoning-toggle">hide</button>
+          </div>
+          <div class="reasoning-log" id="reasoning"></div>
+        </div>
+        <div class="tabs" id="report-tabs"></div>
+        <div class="report-body" id="report-body">
+          <p class="dim">Reports stream in here as agents complete.</p>
+        </div>
       </div>
 
       <div class="panel messages-panel">
@@ -206,93 +213,12 @@
         <p class="dim" style="margin: 0 0 10px;">Scans all ~500 S&amp;P 500 tickers, deep-dives the top 50 by conviction, and builds a $100k paper portfolio. Runs automatically every Saturday midnight ET.</p>
         <div class="actions" style="justify-content: flex-start; gap: 10px;">
           <button id="btn-spy-scan" type="button" class="primary">Run S&amp;P 500 Scan</button>
-          <button id="btn-spy-refresh" type="button" class="ghost" hidden>Refresh Prices</button>
-          <span id="spy-scan-result" class="dim" style="margin-left: 4px;"></span>
+          <button id="btn-spy-stop" type="button" class="ghost" hidden>Stop Scan</button>
+          <span id="spy-scan-status" class="dim" style="margin-left: 4px;"></span>
         </div>
       </div>
 
-      <div id="spy-progress-panel" class="panel" hidden>
-        <div class="panel-title">[ Scan Progress ]</div>
-        <div class="spy-progress-grid">
-          <div class="spy-progress-row">
-            <span class="spy-progress-label">Quick scan</span>
-            <div class="scan-progress">
-              <div class="scan-progress-bar" id="spy-quick-bar" style="width:0%"></div>
-            </div>
-            <span id="spy-quick-label" class="spy-progress-count dim">0 / 0</span>
-          </div>
-          <div class="spy-progress-row">
-            <span class="spy-progress-label">Deep dive</span>
-            <div class="scan-progress">
-              <div class="scan-progress-bar" id="spy-deep-bar" style="width:0%"></div>
-            </div>
-            <span id="spy-deep-label" class="spy-progress-count dim">0 / 0</span>
-          </div>
-        </div>
-        <p id="spy-status-text" class="dim" style="margin: 8px 0 0; font-size: 12px;"></p>
-      </div>
-
-      <div id="spy-performance-panel" class="panel" hidden>
-        <div class="panel-title">[ Performance ]</div>
-        <div class="spy-perf-grid">
-          <div class="spy-perf-item">
-            <span class="spy-perf-label">Basis</span>
-            <span class="spy-perf-value">$100,000</span>
-          </div>
-          <div class="spy-perf-item">
-            <span class="spy-perf-label">Current Value</span>
-            <span id="spy-perf-value" class="spy-perf-value">—</span>
-          </div>
-          <div class="spy-perf-item">
-            <span class="spy-perf-label">Return</span>
-            <span id="spy-perf-return" class="spy-perf-value">—</span>
-          </div>
-          <div class="spy-perf-item">
-            <span class="spy-perf-label">Last Updated</span>
-            <span id="spy-perf-updated" class="spy-perf-value dim">—</span>
-          </div>
-        </div>
-        <p id="spy-rebalance-notes" class="dim" style="margin: 10px 0 0; font-size: 12px; color: var(--accent-yellow);"></p>
-      </div>
-
-      <div id="spy-portfolio-panel" class="panel" hidden>
-        <div class="panel-title">[ Portfolio Allocations ]</div>
-        <div id="spy-allocator-report" class="report-body" style="margin-bottom: 12px;" hidden></div>
-        <table class="spy-table" id="spy-portfolio-table">
-          <thead>
-            <tr>
-              <th>Ticker</th>
-              <th>Signal</th>
-              <th>Allocation</th>
-              <th>Amount</th>
-              <th>Entry Price</th>
-              <th>Rationale</th>
-            </tr>
-          </thead>
-          <tbody id="spy-portfolio-body"></tbody>
-        </table>
-      </div>
-
-      <div id="spy-quick-panel" class="panel" hidden>
-        <div class="panel-title">[ Quick Scan Results ]</div>
-        <div style="margin-bottom: 8px; display: flex; gap: 8px; align-items: center;">
-          <span class="dim" style="font-size: 11px;">Sort by:</span>
-          <button class="ghost spy-sort-btn active" data-sort="conviction" style="font-size: 11px; padding: 3px 8px;">Conviction</button>
-          <button class="ghost spy-sort-btn" data-sort="signal" style="font-size: 11px; padding: 3px 8px;">Signal</button>
-          <button class="ghost spy-sort-btn" data-sort="ticker" style="font-size: 11px; padding: 3px 8px;">Ticker</button>
-        </div>
-        <table class="spy-table" id="spy-quick-table">
-          <thead>
-            <tr>
-              <th>Ticker</th>
-              <th>Signal</th>
-              <th>Conviction</th>
-              <th>Reasoning</th>
-            </tr>
-          </thead>
-          <tbody id="spy-quick-body"></tbody>
-        </table>
-      </div>
+      <div id="spy-main"></div>
     </section>
   </main>
 

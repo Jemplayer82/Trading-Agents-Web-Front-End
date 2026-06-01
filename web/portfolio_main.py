@@ -41,6 +41,12 @@ def _startup() -> None:
     db.init_db()
     creds.apply_to_env()
     creds.apply_settings_to_env()
+    # Clear any LLM-activity rows left stale by a previous crash so the
+    # scanner's dynamic concurrency starts from an accurate count.
+    try:
+        db.purge_stale_activity()
+    except Exception:
+        log.exception("[startup] purge_stale_activity failed")
 
 
 @app.get("/api/health")
@@ -255,6 +261,23 @@ def get_spy_scan(scan_id: int) -> dict[str, Any]:
     return scan
 
 
+@app.post("/api/spy-scans/{scan_id}/cancel")
+def cancel_spy_scan(scan_id: int) -> dict[str, Any]:
+    """Cooperatively cancel a running S&P 500 scan.
+
+    Sets a flag the scan worker polls between LLM calls; the worker stops
+    submitting new work, lets in-flight calls finish, and marks the scan
+    'cancelled'. Returns immediately.
+    """
+    scan = db.get_spy_scan(scan_id)
+    if not scan:
+        raise HTTPException(status_code=404, detail="not found")
+    if not str(scan.get("status", "")).startswith("running"):
+        return {"status": scan.get("status"), "cancelling": False}
+    db.request_spy_scan_cancel(scan_id)
+    return {"status": "cancelling", "cancelling": True}
+
+
 @app.post("/api/spy-scans/{scan_id}/refresh-prices")
 def refresh_spy_prices(scan_id: int) -> dict[str, Any]:
     return spy_scanner.refresh_portfolio_prices(scan_id)
@@ -272,6 +295,9 @@ def _run_spy_scan_thread(scan_id: int, trade_date: str) -> None:
     _refresh_creds_from_db()
     try:
         _run_spy_scan(scan_id, trade_date)
+    except spy_scanner.ScanCancelled:
+        log.info("SPY scan %s cancelled by user", scan_id)
+        db.update_spy_scan(scan_id, status="cancelled")
     except Exception as exc:
         log.exception("SPY scan %s crashed", scan_id)
         db.fail_spy_scan(scan_id, str(exc))
@@ -293,12 +319,18 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
     tickers = get_sp500_tickers()
     quick_results = spy_scanner.run_quick_scan(scan_id, tickers, config)
 
+    if db.is_spy_scan_cancelled(scan_id):
+        raise spy_scanner.ScanCancelled()
+
     # Phase 2: deep dive top 50 by conviction
     buy_or_hold = [r for r in quick_results if (r.get("signal") or "").upper() in ("BUY", "HOLD")]
     top50 = sorted(buy_or_hold, key=lambda r: -(r.get("conviction") or 0))[:50]
     if not top50:
         top50 = sorted(quick_results, key=lambda r: -(r.get("conviction") or 0))[:50]
     enriched = spy_scanner.run_deep_dives(scan_id, top50, trade_date, config, selected_analysts)
+
+    if db.is_spy_scan_cancelled(scan_id):
+        raise spy_scanner.ScanCancelled()
 
     # Phase 3: allocator
     db.update_spy_scan(scan_id, status="running_alloc")

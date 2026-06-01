@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -15,6 +18,98 @@ from . import db
 from .llm_helpers import llm_for
 
 log = logging.getLogger(__name__)
+
+
+class ScanCancelled(Exception):
+    """Raised inside a scan worker loop when the user requests cancellation."""
+
+
+def _total_budget() -> int:
+    """Max concurrent LLM calls shared with single-ticker analyses.
+
+    Read at call time so a value set via the Settings UI (OLLAMA_MAX_CONCURRENCY)
+    takes effect on the next scan without a redeploy.
+    """
+    try:
+        return max(1, int(os.environ.get("OLLAMA_MAX_CONCURRENCY", "5")))
+    except (TypeError, ValueError):
+        return 5
+
+
+class DynamicGate:
+    """A resizable concurrency limiter.
+
+    Workers wrap their LLM call in `with gate:`. A monitor thread calls
+    set_limit() to shrink/grow the number of permitted concurrent calls.
+    Shrinking below the in-flight count is allowed — in-flight calls finish,
+    and no new ones are admitted until usage drops below the new limit.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self._cv = threading.Condition()
+        self._limit = max(1, limit)
+        self._in_use = 0
+
+    def set_limit(self, n: int) -> None:
+        with self._cv:
+            self._limit = max(1, n)
+            self._cv.notify_all()
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    def __enter__(self) -> "DynamicGate":
+        with self._cv:
+            while self._in_use >= self._limit:
+                self._cv.wait(timeout=1.0)
+            self._in_use += 1
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        with self._cv:
+            self._in_use -= 1
+            self._cv.notify_all()
+
+
+class _GateMonitor:
+    """Background thread that keeps a DynamicGate sized to the live budget.
+
+    scan_limit = max(1, TOTAL - active_single_ticker_analyses)
+    so single-ticker analyses always get priority and the scan floors at 1.
+    """
+
+    def __init__(self, gate: DynamicGate, poll_seconds: float = 3.0) -> None:
+        self._gate = gate
+        self._poll = poll_seconds
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _recompute(self) -> int:
+        total = _total_budget()
+        active = 0
+        try:
+            active = db.count_active_single()
+        except Exception:
+            log.debug("[gate] count_active_single failed", exc_info=True)
+        return max(1, total - active)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            limit = self._recompute()
+            if limit != self._gate.limit:
+                log.info("[gate] resizing scan concurrency to %d", limit)
+            self._gate.set_limit(limit)
+            self._stop.wait(self._poll)
+
+    def __enter__(self) -> DynamicGate:
+        # Apply an initial limit synchronously before any work starts.
+        self._gate.set_limit(self._recompute())
+        self._thread.start()
+        return self._gate
+
+    def __exit__(self, *exc: Any) -> None:
+        self._stop.set()
 
 QUICK_SCAN_SYSTEM = (
     "You are a momentum-based equity screener. Given recent price "
@@ -65,6 +160,7 @@ def _quick_scan_one(
     price_data: dict[str, Any],
     sector: str,
     llm: ChatOpenAI,
+    gate: "DynamicGate | None" = None,
 ) -> dict[str, Any]:
     try:
         closes = price_data.get("close", [])
@@ -84,22 +180,30 @@ def _quick_scan_one(
             ticker=ticker, price=price, ret5=ret5, ret20=ret20,
             vol_ratio=vol_ratio, sector=sector,
         )
-        # Retry up to 3 times on 429 rate-limit responses.
+        # Retry up to 3 times on 429 rate-limit responses. The dynamic gate
+        # caps how many of these LLM calls run at once (shared budget with
+        # single-ticker analyses).
         for attempt in range(4):
             try:
-                resp = llm.invoke([
-                    {"role": "system", "content": QUICK_SCAN_SYSTEM},
-                    {"role": "user", "content": prompt},
-                ])
+                if gate is not None:
+                    with gate:
+                        resp = llm.invoke([
+                            {"role": "system", "content": QUICK_SCAN_SYSTEM},
+                            {"role": "user", "content": prompt},
+                        ])
+                else:
+                    resp = llm.invoke([
+                        {"role": "system", "content": QUICK_SCAN_SYSTEM},
+                        {"role": "user", "content": prompt},
+                    ])
                 break
             except Exception as e:
                 msg = str(e).lower()
                 if "429" in msg or "too many" in msg or "rate" in msg:
                     if attempt < 3:
-                        import time as _time
                         wait = 5 * (attempt + 1)
                         log.warning("Quick scan 429 for %s, retrying in %ss", ticker, wait)
-                        _time.sleep(wait)
+                        time.sleep(wait)
                         continue
                 raise
         raw = resp.content if hasattr(resp, "content") else str(resp)
@@ -147,28 +251,44 @@ def run_quick_scan(
     results: list[dict[str, Any]] = []
     completed = 0
 
-    def _scan_one(t: str) -> dict[str, Any]:
-        return _quick_scan_one(t, price_data_map.get(t, {"close": [], "volume": []}), "Unknown", llm)
+    # The thread pool is sized to the max budget; the DynamicGate (resized by
+    # the monitor thread) is what actually throttles concurrent LLM calls so
+    # single-ticker analyses keep priority. The scan floors at 1 worker.
+    budget = _total_budget()
 
-    # 5 concurrent LLM calls — stays well within Ollama Cloud's rate limit
-    # even when a single-ticker analysis is also running in the api container.
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {pool.submit(_scan_one, t): t for t in tickers}
-        for fut in as_completed(futures):
-            result = fut.result()
-            results.append(result)
-            db.upsert_spy_quick_result(
-                scan_id=scan_id,
-                ticker=result["ticker"],
-                signal=result.get("signal"),
-                conviction=result.get("conviction"),
-                reasoning=result.get("reasoning"),
-                error=result.get("error"),
+    with _GateMonitor(DynamicGate(budget)) as gate:
+        def _scan_one(t: str) -> dict[str, Any]:
+            if db.is_spy_scan_cancelled(scan_id):
+                return {"ticker": t, "signal": "HOLD", "conviction": 0,
+                        "reasoning": "cancelled", "entry_price": 0.0, "skipped": True}
+            return _quick_scan_one(
+                t, price_data_map.get(t, {"close": [], "volume": []}), "Unknown", llm, gate
             )
-            completed += 1
-            if completed % 50 == 0 or completed == len(tickers):
-                db.update_spy_scan(scan_id, quick_count=completed)
-                log.info("[spy %s] quick scan %d/%d done", scan_id, completed, len(tickers))
+
+        with ThreadPoolExecutor(max_workers=budget) as pool:
+            futures = {pool.submit(_scan_one, t): t for t in tickers}
+            for fut in as_completed(futures):
+                result = fut.result()
+                if result.get("skipped"):
+                    continue
+                results.append(result)
+                db.upsert_spy_quick_result(
+                    scan_id=scan_id,
+                    ticker=result["ticker"],
+                    signal=result.get("signal"),
+                    conviction=result.get("conviction"),
+                    reasoning=result.get("reasoning"),
+                    error=result.get("error"),
+                )
+                completed += 1
+                if completed % 50 == 0 or completed == len(tickers):
+                    db.update_spy_scan(scan_id, quick_count=completed)
+                    log.info("[spy %s] quick scan %d/%d done", scan_id, completed, len(tickers))
+
+                if db.is_spy_scan_cancelled(scan_id):
+                    log.info("[spy %s] cancellation requested — stopping quick scan", scan_id)
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    raise ScanCancelled()
 
     return results
 
@@ -186,9 +306,16 @@ def run_deep_dives(
 
     enriched: list[dict[str, Any]] = []
     completed = 0
+    budget = _total_budget()
 
-    def _dive(c: dict[str, Any]) -> dict[str, Any]:
+    def _dive(c: dict[str, Any], gate: DynamicGate) -> dict[str, Any]:
         ticker = c["ticker"]
+        if db.is_spy_scan_cancelled(scan_id):
+            return {**c, "skipped": True}
+        with gate:
+            return _dive_inner(c, ticker)
+
+    def _dive_inner(c: dict[str, Any], ticker: str) -> dict[str, Any]:
         analysis_id = db.create_analysis({
             "ticker": ticker,
             "trade_date": trade_date,
@@ -220,14 +347,22 @@ def run_deep_dives(
             db.fail_analysis(analysis_id, str(exc))
             return {**c, "error": str(exc), "analysis_id": analysis_id}
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {pool.submit(_dive, c): c["ticker"] for c in candidates}
-        for fut in as_completed(futures):
-            result = fut.result()
-            enriched.append(result)
-            completed += 1
-            db.update_spy_scan(scan_id, deep_count=completed)
-            log.info("[spy %s] deep dive %d/%d: %s", scan_id, completed, len(candidates), result["ticker"])
+    with _GateMonitor(DynamicGate(budget)) as gate:
+        with ThreadPoolExecutor(max_workers=budget) as pool:
+            futures = {pool.submit(_dive, c, gate): c["ticker"] for c in candidates}
+            for fut in as_completed(futures):
+                result = fut.result()
+                if result.get("skipped"):
+                    continue
+                enriched.append(result)
+                completed += 1
+                db.update_spy_scan(scan_id, deep_count=completed)
+                log.info("[spy %s] deep dive %d/%d: %s", scan_id, completed, len(candidates), result["ticker"])
+
+                if db.is_spy_scan_cancelled(scan_id):
+                    log.info("[spy %s] cancellation requested — stopping deep dives", scan_id)
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    raise ScanCancelled()
 
     return enriched
 
