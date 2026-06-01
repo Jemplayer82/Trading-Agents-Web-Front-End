@@ -81,3 +81,108 @@ def list_meta() -> list[dict[str, Any]]:
             "updated_at": (row or {}).get("updated_at"),
         })
     return out
+
+
+# ===================================================================
+# App settings — env-style config the user manages from the UI.
+#
+# Anything NOT an LLM-provider key (those live in provider_credentials,
+# above): Schwab OAuth, market-data keys, Ollama, SMTP/newsletter, the
+# notifier webhook, plus arbitrary custom env vars the user adds.
+#
+# All of these env vars are read CALL-TIME inside functions, so copying
+# a DB value onto os.environ at startup / on save takes effect without a
+# restart. Import-time-read vars (paths, WEB_DB, TOKEN paths) are
+# deliberately NOT in the registry — a DB value couldn't take effect for
+# them, and they aren't credentials.
+# ===================================================================
+
+# Each entry: key (env var), label, group, secret (mask?), placeholder.
+SETTINGS_REGISTRY: list[dict[str, Any]] = [
+    # Brokerage (Schwab OAuth app credentials)
+    {"key": "SCHWAB_APP_KEY", "label": "Schwab App Key", "group": "Brokerage (Schwab)", "secret": True, "placeholder": "Client ID from the Schwab developer portal"},
+    {"key": "SCHWAB_APP_SECRET", "label": "Schwab App Secret", "group": "Brokerage (Schwab)", "secret": True, "placeholder": "Client secret"},
+    {"key": "SCHWAB_CALLBACK_URL", "label": "Schwab Callback URL", "group": "Brokerage (Schwab)", "secret": False, "placeholder": "https://trading.txferguson.net/api/auth/schwab/callback"},
+    # Market data
+    {"key": "ALPHA_VANTAGE_API_KEY", "label": "Alpha Vantage API Key", "group": "Market Data", "secret": True, "placeholder": "Used for technical indicators"},
+    # Ollama / LLM infra
+    {"key": "OLLAMA_BASE_URL", "label": "Ollama Base URL", "group": "LLM Infra", "secret": False, "placeholder": "https://ollama.com/v1 or http://host:11434/v1"},
+    {"key": "OLLAMA_API_KEY", "label": "Ollama API Key", "group": "LLM Infra", "secret": True, "placeholder": "Ollama Cloud auth token"},
+    # Email / newsletter
+    {"key": "SMTP_HOST", "label": "SMTP Host", "group": "Email / Newsletter", "secret": False, "placeholder": "smtp.gmail.com"},
+    {"key": "SMTP_PORT", "label": "SMTP Port", "group": "Email / Newsletter", "secret": False, "placeholder": "587"},
+    {"key": "SMTP_USER", "label": "SMTP Username", "group": "Email / Newsletter", "secret": False, "placeholder": "you@example.com"},
+    {"key": "SMTP_PASS", "label": "SMTP Password", "group": "Email / Newsletter", "secret": True, "placeholder": "App password"},
+    {"key": "NEWSLETTER_FROM", "label": "Newsletter From", "group": "Email / Newsletter", "secret": False, "placeholder": "defaults to SMTP username"},
+    {"key": "NEWSLETTER_TO", "label": "Newsletter To", "group": "Email / Newsletter", "secret": False, "placeholder": "recipient@example.com"},
+    # Notifications
+    {"key": "FRED_NOTIFY_URL", "label": "Notify Webhook URL", "group": "Notifications", "secret": True, "placeholder": "WhatsApp/webhook URL (leave blank to disable)"},
+]
+
+_REGISTRY_BY_KEY = {s["key"]: s for s in SETTINGS_REGISTRY}
+_REGISTRY_KEYS = set(_REGISTRY_BY_KEY)
+
+
+def mask_setting(key: str, value: str | None) -> str:
+    """Mask secrets; show non-secret config values verbatim."""
+    spec = _REGISTRY_BY_KEY.get(key)
+    is_secret = spec["secret"] if spec else True  # custom keys treated as secret
+    if not value:
+        return ""
+    return mask_key(value) if is_secret else value
+
+
+def apply_settings_to_env() -> None:
+    """Copy every stored app_setting onto os.environ.
+
+    Called at startup and after every PUT/DELETE in each container.
+    """
+    applied = 0
+    for row in db.list_app_settings():
+        key, value = row["key"], row["value"]
+        if value:
+            os.environ[key] = value
+            applied += 1
+    if applied:
+        log.info("[settings] applied %d app settings from DB to env", applied)
+
+
+def list_settings_meta() -> dict[str, Any]:
+    """Registry settings + custom settings, masked. Safe to return to client."""
+    stored = {r["key"]: r for r in db.list_app_settings()}
+
+    registry_out: list[dict[str, Any]] = []
+    for spec in SETTINGS_REGISTRY:
+        key = spec["key"]
+        row = stored.get(key)
+        db_val = (row or {}).get("value") or ""
+        env_val = os.environ.get(key) or ""
+        effective = db_val or env_val
+        source = "db" if db_val else ("env" if env_val else None)
+        registry_out.append({
+            "key": key,
+            "label": spec["label"],
+            "group": spec["group"],
+            "secret": spec["secret"],
+            "placeholder": spec.get("placeholder", ""),
+            "has_value": bool(effective),
+            "masked": mask_setting(key, effective),
+            "source": source,
+            "updated_at": (row or {}).get("updated_at"),
+        })
+
+    custom_out: list[dict[str, Any]] = []
+    for key, row in stored.items():
+        if key in _REGISTRY_KEYS:
+            continue
+        val = row.get("value") or ""
+        custom_out.append({
+            "key": key,
+            "secret": True,
+            "has_value": bool(val),
+            "masked": mask_key(val),
+            "source": "db",
+            "updated_at": row.get("updated_at"),
+        })
+
+    return {"registry": registry_out, "custom": custom_out}

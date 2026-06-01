@@ -7,14 +7,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import queue
+import re
+import sqlite3
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import auth_app
 from . import credentials as creds
 from . import db
 from .auth import schwab as schwab_auth
@@ -27,13 +31,25 @@ log = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
+# Custom app-setting keys must look like env vars.
+_SETTING_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
 app = FastAPI(title="TradingAgents Web")
+
+# Gate every /api/ route behind a login session (allowlist + internal-token
+# bypass live in auth_app). Registered before route handlers run.
+app.middleware("http")(auth_app.auth_middleware)
 
 
 @app.on_event("startup")
 def _startup() -> None:
     db.init_db()
     creds.apply_to_env()
+    creds.apply_settings_to_env()
+    try:
+        db.purge_expired_sessions()
+    except Exception:
+        log.exception("session purge failed")
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -68,6 +84,119 @@ def get_prefs() -> dict[str, Any]:
 async def save_prefs(payload: dict[str, Any]) -> dict[str, str]:
     db.save_preferences(payload)
     return {"status": "saved"}
+
+
+# ---------- authentication (dashboard login) ----------
+
+@app.get("/api/auth/me")
+def auth_me(request: Request) -> dict[str, Any]:
+    """Public. Reports auth state and whether first-run setup is needed."""
+    if db.count_users() == 0:
+        return {"authenticated": False, "setup_required": True}
+    username = auth_app.current_username(request)
+    return {"authenticated": bool(username), "username": username, "setup_required": False}
+
+
+@app.post("/api/auth/setup")
+def auth_setup(payload: dict[str, Any], response: Response) -> dict[str, Any]:
+    """Public, but only works while no users exist. Creates the first admin."""
+    if db.count_users() > 0:
+        raise HTTPException(status_code=403, detail="setup already complete")
+    username = ((payload or {}).get("username") or "").strip()
+    password = (payload or {}).get("password") or ""
+    if not username or len(password) < 8:
+        raise HTTPException(status_code=400, detail="username required, password >= 8 chars")
+    db.create_user(username, auth_app.hash_password(password))
+    token, _ = auth_app.new_session(username)
+    auth_app.set_session_cookie(response, token)
+    return {"status": "created", "username": username}
+
+
+@app.post("/api/auth/login")
+def auth_login(payload: dict[str, Any], response: Response) -> dict[str, Any]:
+    username = ((payload or {}).get("username") or "").strip()
+    password = (payload or {}).get("password") or ""
+    user = db.get_user(username)
+    if not user or not auth_app.verify_password(password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="invalid username or password")
+    token, _ = auth_app.new_session(username)
+    auth_app.set_session_cookie(response, token)
+    return {"status": "ok", "username": username}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request, response: Response) -> dict[str, str]:
+    token = request.cookies.get(auth_app.COOKIE_NAME)
+    if token:
+        db.delete_session(token)
+    auth_app.clear_session_cookie(response)
+    return {"status": "logged_out"}
+
+
+@app.get("/api/auth/users")
+def auth_list_users() -> dict[str, Any]:
+    return {"users": db.list_users()}
+
+
+@app.post("/api/auth/users")
+def auth_add_user(payload: dict[str, Any]) -> dict[str, Any]:
+    username = ((payload or {}).get("username") or "").strip()
+    password = (payload or {}).get("password") or ""
+    if not username or len(password) < 8:
+        raise HTTPException(status_code=400, detail="username required, password >= 8 chars")
+    try:
+        db.create_user(username, auth_app.hash_password(password))
+    except sqlite3.IntegrityError:
+        raise HTTPException(status_code=409, detail="username already exists")
+    return {"status": "created", "username": username}
+
+
+@app.post("/api/auth/password")
+def auth_change_password(payload: dict[str, Any], request: Request) -> dict[str, str]:
+    username = auth_app.current_username(request)
+    if not username:
+        raise HTTPException(status_code=401, detail="not logged in")
+    current = (payload or {}).get("current_password") or ""
+    new = (payload or {}).get("new_password") or ""
+    user = db.get_user(username)
+    if not user or not auth_app.verify_password(current, user["password_hash"]):
+        raise HTTPException(status_code=403, detail="current password incorrect")
+    if len(new) < 8:
+        raise HTTPException(status_code=400, detail="new password must be >= 8 chars")
+    db.set_user_password(username, auth_app.hash_password(new))
+    return {"status": "changed"}
+
+
+# ---------- app settings (env-style config managed from the UI) ----------
+
+@app.get("/api/settings")
+def list_settings_endpoint() -> dict[str, Any]:
+    """Curated registry + custom settings, masked. Behind auth."""
+    return creds.list_settings_meta()
+
+
+@app.put("/api/settings/{key}")
+def save_setting_endpoint(key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    key = key.strip().upper()
+    if not _SETTING_KEY_RE.match(key):
+        raise HTTPException(status_code=400, detail="key must match ^[A-Z][A-Z0-9_]*$")
+    value = (payload or {}).get("value")
+    if value is None or str(value) == "":
+        raise HTTPException(status_code=400, detail="missing 'value' in body")
+    db.set_app_setting(key, str(value))
+    creds.apply_settings_to_env()
+    return {"status": "saved", "key": key, "masked": creds.mask_setting(key, str(value))}
+
+
+@app.delete("/api/settings/{key}")
+def delete_setting_endpoint(key: str) -> dict[str, str]:
+    key = key.strip().upper()
+    if not db.delete_app_setting(key):
+        raise HTTPException(status_code=404, detail="no setting stored for that key")
+    # Unset from this process's env so the cleared value stops taking effect
+    # immediately (other containers drop it at their next restart/refresh).
+    os.environ.pop(key, None)
+    return {"status": "cleared", "key": key}
 
 
 # ---------- LLM provider API-key management ----------
@@ -347,6 +476,17 @@ def schwab_disconnect() -> dict[str, str]:
 
 @app.websocket("/api/analyze")
 async def analyze(ws: WebSocket) -> None:
+    # The http auth middleware doesn't see websocket scope, so gate here:
+    # require a valid session cookie (or the internal-token header).
+    token = ws.cookies.get(auth_app.COOKIE_NAME)
+    internal = ws.headers.get("x-internal-token")
+    expected = os.environ.get("INTERNAL_API_TOKEN")
+    authed = bool(token and db.get_session(token)) or bool(
+        internal and expected and internal == expected
+    )
+    if not authed:
+        await ws.close(code=4401)
+        return
     await ws.accept()
     try:
         params = await ws.receive_json()

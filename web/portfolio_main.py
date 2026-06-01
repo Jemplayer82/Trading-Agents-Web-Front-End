@@ -17,6 +17,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.portfolio_graph import run_portfolio_scan
 
+from . import auth_app
 from . import credentials as creds
 from . import db
 from .auth import schwab_client, token_store, schwab as schwab_auth
@@ -29,11 +30,17 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="TradingAgents Portfolio")
 
+# Same login gate as the api container. Validates the shared sessions
+# table; scheduler->portfolio cron calls pass via the X-Internal-Token
+# bypass in auth_app.
+app.middleware("http")(auth_app.auth_middleware)
+
 
 @app.on_event("startup")
 def _startup() -> None:
     db.init_db()
     creds.apply_to_env()
+    creds.apply_settings_to_env()
 
 
 @app.get("/api/health")
@@ -106,11 +113,12 @@ def _refresh_creds_from_db() -> None:
 
     The api container hosts the UI where the user saves keys; this
     container only sees them via the shared sqlite DB. Refreshing
-    here means a credential saved mid-day takes effect on the very
-    next scan without needing a container restart.
+    here means a credential or app setting (Schwab key, etc.) saved
+    mid-day takes effect on the very next scan without a restart.
     """
     try:
         creds.apply_to_env()
+        creds.apply_settings_to_env()
     except Exception:
         log.exception("[creds] refresh failed")
 
