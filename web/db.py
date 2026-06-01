@@ -19,7 +19,7 @@ import json
 import os
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -118,6 +118,7 @@ CREATE TABLE IF NOT EXISTS spy_scans (
     current_value REAL,
     last_price_check TEXT,
     rebalance_notes TEXT,
+    cancel_requested INTEGER DEFAULT 0,
     error TEXT
 );
 
@@ -146,13 +147,42 @@ CREATE TABLE IF NOT EXISTS portfolio_tickers (
     PRIMARY KEY (scan_id, ticker),
     FOREIGN KEY (scan_id) REFERENCES portfolio_scans (id) ON DELETE CASCADE
 );
+
+-- Cross-container LLM concurrency registry. The api container inserts a row
+-- per in-flight single-ticker analysis; the portfolio scanner reads the live
+-- count to dynamically size its worker pool (single-ticker gets priority).
+CREATE TABLE IF NOT EXISTS llm_activity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    label TEXT,
+    started_at TEXT NOT NULL,
+    heartbeat TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_activity_kind ON llm_activity (kind, heartbeat);
 """
+
+
+# Lightweight column migrations for tables that predate a new column.
+# (init_db only runs CREATE TABLE IF NOT EXISTS, which never alters an
+# existing table — so additive columns need an explicit guarded ALTER.)
+_COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
+    ("spy_scans", "cancel_requested", "INTEGER DEFAULT 0"),
+]
+
+
+def _run_column_migrations(conn: sqlite3.Connection) -> None:
+    for table, column, decl in _COLUMN_MIGRATIONS:
+        cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
         conn.executescript(SCHEMA)
+        _run_column_migrations(conn)
 
 
 @contextmanager
@@ -588,10 +618,24 @@ def latest_portfolio_scan() -> dict[str, Any] | None:
 def create_spy_scan(trade_date: str) -> int:
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO spy_scans (created_at, trade_date, status) VALUES (?, ?, 'pending')",
+            "INSERT INTO spy_scans (created_at, trade_date, status, cancel_requested) VALUES (?, ?, 'pending', 0)",
             (datetime.utcnow().isoformat(timespec="seconds") + "Z", trade_date),
         )
         return int(cur.lastrowid)
+
+
+def request_spy_scan_cancel(scan_id: int) -> None:
+    """Flag a running scan for cooperative cancellation."""
+    with connect() as conn:
+        conn.execute("UPDATE spy_scans SET cancel_requested = 1 WHERE id = ?", (scan_id,))
+
+
+def is_spy_scan_cancelled(scan_id: int) -> bool:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT cancel_requested FROM spy_scans WHERE id = ?", (scan_id,)
+        ).fetchone()
+    return bool(row and row["cancel_requested"])
 
 
 def update_spy_scan(scan_id: int, **kwargs: Any) -> None:
@@ -705,6 +749,58 @@ def latest_spy_scan() -> dict[str, Any] | None:
     if not row:
         return None
     return get_spy_scan(int(row["id"]))
+
+
+# ---------- cross-container LLM concurrency registry ----------
+
+def register_activity(kind: str, label: str | None = None) -> int:
+    """Record an in-flight LLM consumer (e.g. a single-ticker analysis).
+
+    Returns the row id; pass it to heartbeat_activity()/clear_activity().
+    """
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO llm_activity (kind, label, started_at, heartbeat) VALUES (?, ?, ?, ?)",
+            (kind, label, now, now),
+        )
+        return int(cur.lastrowid)
+
+
+def heartbeat_activity(activity_id: int) -> None:
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with connect() as conn:
+        conn.execute("UPDATE llm_activity SET heartbeat = ? WHERE id = ?", (now, activity_id))
+
+
+def clear_activity(activity_id: int) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM llm_activity WHERE id = ?", (activity_id,))
+
+
+def count_active_single(stale_seconds: int = 120) -> int:
+    """Count fresh single-ticker analyses currently consuming LLM slots.
+
+    Rows whose heartbeat is older than stale_seconds are ignored (and pruned)
+    so a crashed api container doesn't permanently starve the scanner.
+    """
+    cutoff = (
+        datetime.utcnow() - timedelta(seconds=stale_seconds)
+    ).isoformat(timespec="seconds") + "Z"
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM llm_activity WHERE kind = 'single' AND heartbeat >= ?",
+            (cutoff,),
+        ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def purge_stale_activity(stale_seconds: int = 120) -> None:
+    cutoff = (
+        datetime.utcnow() - timedelta(seconds=stale_seconds)
+    ).isoformat(timespec="seconds") + "Z"
+    with connect() as conn:
+        conn.execute("DELETE FROM llm_activity WHERE heartbeat < ?", (cutoff,))
 
 
 def _serialize(obj: Any) -> Any:

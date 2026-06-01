@@ -90,6 +90,62 @@ def _diff_reports(prev: dict[str, str], new_state: dict[str, Any]) -> dict[str, 
     return out
 
 
+def _debate_markdown(state: Any) -> str:
+    """Render an InvestDebateState / RiskDebateState into a readable transcript."""
+    if not isinstance(state, dict):
+        return ""
+    parts: list[str] = []
+    history = (state.get("history") or "").strip()
+    if history:
+        parts.append(history)
+    else:
+        # Fall back to the per-side trails if the combined transcript is empty.
+        for key in (
+            "bull_history", "bear_history",
+            "aggressive_history", "conservative_history", "neutral_history",
+        ):
+            v = (state.get(key) or "").strip()
+            if v:
+                parts.append(v)
+    judge = (state.get("judge_decision") or "").strip()
+    if judge:
+        parts.append("---\n\n### Judge Decision\n\n" + judge)
+    return "\n\n".join(p for p in parts if p).strip()
+
+
+# Synthetic report keys → the LangGraph state key holding the debate.
+DEBATE_REPORTS = {
+    "investment_debate": "investment_debate_state",
+    "risk_debate": "risk_debate_state",
+}
+
+
+def _token_text(msg: Any) -> tuple[str, str]:
+    """Extract (content, reasoning) deltas from a streamed message chunk."""
+    content = getattr(msg, "content", None)
+    if isinstance(content, list):
+        text = "".join(
+            (c.get("text", "") if isinstance(c, dict) else str(c)) for c in content
+        )
+    else:
+        text = content or ""
+    extra = getattr(msg, "additional_kwargs", None) or {}
+    reasoning = extra.get("reasoning_content") or extra.get("reasoning") or ""
+    return text, (reasoning if isinstance(reasoning, str) else "")
+
+
+def _unwrap_stream_item(item: Any) -> tuple[str, Any]:
+    """Normalise a multi-mode stream item to (mode, payload)."""
+    if (
+        isinstance(item, tuple)
+        and len(item) == 2
+        and isinstance(item[0], str)
+        and item[0] in ("values", "messages", "updates")
+    ):
+        return item[0], item[1]
+    return "values", item
+
+
 def _message_summary(msg: Any) -> dict[str, Any] | None:
     """Reduce a LangChain message to a small dict the frontend can render."""
     if msg is None:
@@ -156,17 +212,38 @@ def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Qu
             past_context=graph.memory_log.get_past_context(ticker),
         )
         args = graph.propagator.get_graph_args()
+        # Stream full-state values (existing behaviour) AND per-token message
+        # chunks so the UI can show each agent's train of thought live.
+        args["stream_mode"] = ["values", "messages"]
 
         seen_reports: dict[str, str] = {}
         last_message_idx = 0
         final_state: dict[str, Any] = {}
 
-        for chunk in graph.graph.stream(init_state, **args):
-            # chunks are full-state values (stream_mode="values")
+        for item in graph.graph.stream(init_state, **args):
+            mode, chunk = _unwrap_stream_item(item)
+
+            # ---- token stream (train of thought) ----
+            if mode == "messages":
+                msg_chunk = chunk[0] if isinstance(chunk, tuple) else chunk
+                meta = chunk[1] if isinstance(chunk, tuple) and len(chunk) > 1 else {}
+                node = (meta or {}).get("langgraph_node")
+                text, reasoning = _token_text(msg_chunk)
+                if reasoning:
+                    emit({"type": "token", "node": node, "text": reasoning, "channel": "reasoning"})
+                if text:
+                    emit({"type": "token", "node": node, "text": text, "channel": "content"})
+                continue
+
+            # ---- full-state values ----
             final_state = chunk
 
-            # Report deltas
+            # Report deltas (+ synthesised bull/bear & risk debate transcripts)
             delta = _diff_reports(seen_reports, chunk)
+            for rep_key, state_key in DEBATE_REPORTS.items():
+                md = _debate_markdown(chunk.get(state_key))
+                if md and md != seen_reports.get(rep_key, ""):
+                    delta[rep_key] = md
             if delta:
                 for key, val in delta.items():
                     seen_reports[key] = val

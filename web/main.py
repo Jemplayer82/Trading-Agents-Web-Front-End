@@ -11,6 +11,8 @@ import os
 import queue
 import re
 import sqlite3
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +36,19 @@ STATIC_DIR = Path(__file__).parent / "static"
 # Custom app-setting keys must look like env vars.
 _SETTING_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
+
+def _total_budget() -> int:
+    try:
+        return max(1, int(os.environ.get("OLLAMA_MAX_CONCURRENCY", "5")))
+    except (TypeError, ValueError):
+        return 5
+
+
+# Process-local cap on concurrent single-ticker analyses in THIS (api) container,
+# so one user opening many tabs can't alone exceed the shared Ollama budget. The
+# scanner in the portfolio container yields to these via the llm_activity table.
+_SINGLE_SLOTS = threading.Semaphore(_total_budget())
+
 app = FastAPI(title="TradingAgents Web")
 
 # Gate every /api/ route behind a login session (allowlist + internal-token
@@ -50,6 +65,10 @@ def _startup() -> None:
         db.purge_expired_sessions()
     except Exception:
         log.exception("session purge failed")
+    try:
+        db.purge_stale_activity()
+    except Exception:
+        log.exception("activity purge failed")
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -513,17 +532,37 @@ async def analyze(ws: WebSocket) -> None:
 
     await ws.send_json({"type": "started", "analysis_id": analysis_id})
 
+    # Register this run in the cross-container LLM activity registry so the
+    # S&P 500 scanner yields worker slots to it (single-ticker priority).
+    ticker_label = str(params.get("ticker", "")).strip().upper()
+    activity_id = db.register_activity("single", ticker_label)
+
+    def _worker() -> None:
+        # Process-local cap: block until a slot frees if this api container is
+        # already at the shared budget. The scanner sees us via llm_activity
+        # the moment we registered above, so it has already begun yielding.
+        with _SINGLE_SLOTS:
+            run_analysis_sync(params, analysis_id, frames)
+
     frames: queue.Queue = queue.Queue()
-    producer = asyncio.create_task(
-        asyncio.to_thread(run_analysis_sync, params, analysis_id, frames)
-    )
+    producer = asyncio.create_task(asyncio.to_thread(_worker))
 
     loop = asyncio.get_running_loop()
+    last_hb = 0.0
     try:
         while True:
             frame = await loop.run_in_executor(None, frames.get)
             if frame is None:
                 break
+            # Heartbeat the activity row at most every 10s so a long run keeps
+            # its slot reservation fresh (stale rows are reclaimed after 120s).
+            now = time.monotonic()
+            if now - last_hb >= 10.0:
+                last_hb = now
+                try:
+                    db.heartbeat_activity(activity_id)
+                except Exception:
+                    pass
             try:
                 await ws.send_json(frame)
             except (WebSocketDisconnect, RuntimeError):
@@ -531,6 +570,10 @@ async def analyze(ws: WebSocket) -> None:
     finally:
         try:
             await producer
+        except Exception:
+            pass
+        try:
+            db.clear_activity(activity_id)
         except Exception:
             pass
         try:

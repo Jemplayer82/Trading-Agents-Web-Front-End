@@ -92,6 +92,7 @@ async function loadSpyScan(id) {
   }
   const scan = await r.json();
   renderSpyScan(scan);
+  updateStopButton(scan);
 
   if (scan.status && scan.status.startsWith("running")) {
     spyPollTimer = setInterval(async () => {
@@ -99,6 +100,7 @@ async function loadSpyScan(id) {
       if (!pr.ok) { stopSpyPoll(); return; }
       const updated = await pr.json();
       renderSpyScan(updated);
+      updateStopButton(updated);
       if (!updated.status || !updated.status.startsWith("running")) stopSpyPoll();
     }, 5000);
   }
@@ -106,6 +108,38 @@ async function loadSpyScan(id) {
 
 function stopSpyPoll() {
   if (spyPollTimer) { clearInterval(spyPollTimer); spyPollTimer = null; }
+}
+
+// Show the Stop button only while the active scan is running.
+function updateStopButton(scan) {
+  const btn = $$spy("btn-spy-stop");
+  if (!btn) return;
+  const running = scan && scan.status && scan.status.startsWith("running");
+  btn.hidden = !running;
+  if (running && scan.cancel_requested) {
+    btn.disabled = true;
+    btn.textContent = "Stopping…";
+  } else {
+    btn.disabled = false;
+    btn.textContent = "Stop Scan";
+  }
+}
+
+async function triggerSpyStop() {
+  if (!activeSpyId) return;
+  const btn = $$spy("btn-spy-stop");
+  const status = $$spy("spy-scan-status");
+  if (btn) { btn.disabled = true; btn.textContent = "Stopping…"; }
+  if (status) status.textContent = "Cancelling scan #" + activeSpyId + "…";
+  try {
+    const r = await fetch("/api/spy-scans/" + activeSpyId + "/cancel", { method: "POST" });
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    if (status) status.textContent = "Cancellation requested — finishing in-flight calls…";
+  } catch (e) {
+    if (status) status.textContent = "Cancel failed: " + e;
+    if (btn) { btn.disabled = false; btn.textContent = "Stop Scan"; }
+  }
 }
 
 function renderSpyScanError(msg) {
@@ -116,6 +150,14 @@ function renderSpyScanError(msg) {
 function renderSpyScan(scan) {
   const main = $$spy("spy-main");
   if (!main) return;
+
+  // Status banner for terminal/cancel states
+  let bannerHtml = "";
+  if (scan.status === "cancelled") {
+    bannerHtml = "<div class=\"panel\"><p style=\"color:var(--accent-yellow);\">Scan #" + scan.id + " was cancelled. Partial results below.</p></div>";
+  } else if (scan.cancel_requested && scan.status && scan.status.startsWith("running")) {
+    bannerHtml = "<div class=\"panel\"><p style=\"color:var(--accent-yellow);\">Cancellation requested — finishing in-flight calls…</p></div>";
+  }
 
   // Progress section (only while running)
   let progressHtml = "";
@@ -261,7 +303,7 @@ function renderSpyScan(scan) {
     reportHtml = "<div class=\"panel\"><p style=\"color:var(--accent-red);\">" + escHtml(scan.error) + "</p></div>";
   }
 
-  main.innerHTML = progressHtml + perfHtml + portfolioHtml + tableHtml + reportHtml;
+  main.innerHTML = bannerHtml + progressHtml + perfHtml + portfolioHtml + tableHtml + reportHtml;
 
   // Wire up analysis cross-links
   main.querySelectorAll(".spy-analysis-link").forEach((a) => {
@@ -312,6 +354,8 @@ document.addEventListener("tab-shown", (ev) => {
 document.addEventListener("DOMContentLoaded", () => {
   const btn = $$spy("btn-spy-scan");
   if (btn) btn.addEventListener("click", triggerSpyScan);
+  const stopBtn = $$spy("btn-spy-stop");
+  if (stopBtn) stopBtn.addEventListener("click", triggerSpyStop);
 });
 
 // Auto-refresh history every 15s while tab is visible

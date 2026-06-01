@@ -5,8 +5,10 @@ const REPORT_KEYS = [
   ["sentiment_report", "Sentiment"],
   ["news_report", "News"],
   ["fundamentals_report", "Fundamentals"],
+  ["investment_debate", "Bull vs Bear"],
   ["investment_plan", "Research Plan"],
   ["trader_investment_plan", "Trader Plan"],
+  ["risk_debate", "Risk Debate"],
   ["final_trade_decision", "Final Decision"],
 ];
 
@@ -24,6 +26,8 @@ let elapsedTimer = null;
 let activeReportKey = null;
 let currentReports = {};
 let activeHistoryId = null;
+let lastRunMeta = null;
+let reasoningNodes = {}; // node -> {el, buffer}
 
 const $ = (id) => document.getElementById(id);
 
@@ -35,6 +39,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("btn-run").addEventListener("click", startRun);
   $("btn-stop").addEventListener("click", stopRun);
   $("f-provider").addEventListener("change", onProviderChange);
+  const rt = $("reasoning-toggle");
+  if (rt) {
+    rt.addEventListener("click", () => {
+      const log = $("reasoning");
+      const hidden = log.style.display === "none";
+      log.style.display = hidden ? "" : "none";
+      rt.textContent = hidden ? "hide" : "show";
+    });
+  }
 });
 
 async function loadProviders() {
@@ -209,10 +222,19 @@ async function loadHistoryItem(id) {
   });
   const resp = await fetch(`/api/analyses/${id}`);
   const a = await resp.json();
+  const fs = a.full_state || {};
   currentReports = {};
   REPORT_KEYS.forEach(([k]) => {
-    if (a[k]) currentReports[k] = a[k];
+    if (k === "investment_debate" || k === "risk_debate") return; // synthesized below
+    const v = fs[k] || a[k] || "";
+    if (v) currentReports[k] = v;
   });
+  // Synthesize the bull/bear + risk debate transcripts from the saved state.
+  const invMd = debateToMarkdown(fs.investment_debate_state);
+  if (invMd) currentReports.investment_debate = invMd;
+  const riskMd = debateToMarkdown(fs.risk_debate_state);
+  if (riskMd) currentReports.risk_debate = riskMd;
+  resetReasoning(); // reasoning timeline is live-only
   refreshReportTabs();
   if (a.processed_signal || a.final_decision) {
     showDecision(a.processed_signal, a.final_decision, `${a.ticker} • ${a.trade_date} • ${formatTimestamp(a.created_at)}`);
@@ -266,8 +288,11 @@ function startRun() {
   if (!params.analysts.length) { alert("Select at least one analyst."); return; }
 
   currentReports = {};
+  lastRunMeta = { ticker: params.ticker, trade_date: params.trade_date };
   $("messages").innerHTML = "";
   $("progress").innerHTML = "";
+  resetReasoning();
+  hideChartAndQa();
   refreshReportTabs();
   $("decision-panel").hidden = true;
 
@@ -328,6 +353,10 @@ function handleFrame(frame) {
       break;
     case "messages":
       frame.messages.forEach(appendMessage);
+      frame.messages.forEach(appendReasoningMessage);
+      break;
+    case "token":
+      appendReasoningToken(frame.node, frame.text, frame.channel);
       break;
     case "debate":
       if (frame.scope === "investment") setAgentState("research_debate", "in_progress");
@@ -336,6 +365,17 @@ function handleFrame(frame) {
     case "done":
       showDecision(frame.signal, frame.final_decision, `analysis #${frame.analysis_id}`);
       setStatus("done", "complete");
+      // Reveal the per-analysis Q&A + chart now that the run is persisted.
+      if (frame.analysis_id) {
+        const a = {
+          id: frame.analysis_id,
+          ticker: (lastRunMeta && lastRunMeta.ticker) || "",
+          trade_date: (lastRunMeta && lastRunMeta.trade_date) || "",
+        };
+        activeHistoryId = frame.analysis_id;
+        setupQaForAnalysis(a);
+        loadChartForAnalysis(a);
+      }
       break;
     case "error":
       setStatus("error", frame.message);
@@ -408,6 +448,23 @@ function renderActiveReport() {
   body.innerHTML = window.marked ? window.marked.parse(md) : `<pre>${escapeHtml(md)}</pre>`;
 }
 
+function debateToMarkdown(state) {
+  if (!state || typeof state !== "object") return "";
+  const parts = [];
+  const history = (state.history || "").trim();
+  if (history) {
+    parts.push(history);
+  } else {
+    ["bull_history", "bear_history", "aggressive_history", "conservative_history", "neutral_history"].forEach((k) => {
+      const v = (state[k] || "").trim();
+      if (v) parts.push(v);
+    });
+  }
+  const judge = (state.judge_decision || "").trim();
+  if (judge) parts.push("---\n\n### Judge Decision\n\n" + judge);
+  return parts.filter(Boolean).join("\n\n").trim();
+}
+
 function appendMessage(m) {
   const ul = $("messages");
   const li = document.createElement("li");
@@ -422,6 +479,77 @@ function appendMessage(m) {
   li.innerHTML = `<span class="who ${who}">${who}</span><span class="what">${escapeHtml(text)}${toolArgs}</span>`;
   ul.insertBefore(li, ul.firstChild);
   while (ul.children.length > 200) ul.removeChild(ul.lastChild);
+}
+
+// ===== Live reasoning timeline (train of thought) =====
+
+function prettyNodeName(node) {
+  if (!node) return "agent";
+  return String(node)
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function resetReasoning() {
+  reasoningNodes = {};
+  const log = $("reasoning");
+  if (log) log.innerHTML = "";
+  const wrap = $("reasoning-wrap");
+  if (wrap) wrap.hidden = true;
+}
+
+function ensureReasoningBlock(node) {
+  const key = node || "agent";
+  if (reasoningNodes[key]) return reasoningNodes[key];
+  const log = $("reasoning");
+  const wrap = $("reasoning-wrap");
+  if (wrap) wrap.hidden = false;
+  const block = document.createElement("div");
+  block.className = "reasoning-block";
+  const head = document.createElement("div");
+  head.className = "reasoning-node";
+  head.textContent = prettyNodeName(key);
+  const body = document.createElement("div");
+  body.className = "reasoning-text";
+  block.appendChild(head);
+  block.appendChild(body);
+  log.appendChild(block);
+  const entry = { el: body, buffer: "" };
+  reasoningNodes[key] = entry;
+  return entry;
+}
+
+function scrollReasoning() {
+  const log = $("reasoning");
+  if (log) log.scrollTop = log.scrollHeight;
+}
+
+function appendReasoningToken(node, text, channel) {
+  if (!text) return;
+  const entry = ensureReasoningBlock(node);
+  entry.buffer += text;
+  // Cap per-node buffer so a very long run doesn't bloat the DOM.
+  if (entry.buffer.length > 20000) entry.buffer = entry.buffer.slice(-20000);
+  entry.el.textContent = entry.buffer;
+  entry.el.classList.toggle("reasoning-thinking", channel === "reasoning");
+  scrollReasoning();
+}
+
+function appendReasoningMessage(m) {
+  // Fold tool calls into the timeline as a discrete line.
+  if (!m || !m.tool_calls || !m.tool_calls.length) return;
+  const log = $("reasoning");
+  const wrap = $("reasoning-wrap");
+  if (wrap) wrap.hidden = false;
+  const line = document.createElement("div");
+  line.className = "reasoning-tool";
+  line.textContent =
+    "↳ " +
+    m.tool_calls
+      .map((t) => `${t.name}(${typeof t.args === "string" ? t.args : JSON.stringify(t.args || {})})`)
+      .join(", ");
+  log.appendChild(line);
+  scrollReasoning();
 }
 
 function showDecision(signal, decision, meta) {
