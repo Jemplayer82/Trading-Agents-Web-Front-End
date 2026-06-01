@@ -5,14 +5,36 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>TradingAgents Console</title>
   <link rel="stylesheet" href="/static/styles.css" />
+  <script src="/static/auth.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js" defer></script>
   <script src="/static/app.js" defer></script>
   <script src="/static/schwab.js" defer></script>
   <script src="/static/portfolio.js" defer></script>
   <script src="/static/spy.js" defer></script>
+  <script src="/static/credentials.js" defer></script>
 </head>
 <body>
+  <!-- Login / first-run setup gate. auth.js reveals this when not authed. -->
+  <div id="auth-overlay" hidden>
+    <div class="auth-card">
+      <div class="auth-brand"><span class="prompt">$</span> tradingagents <span class="brand-tag">--login</span></div>
+      <p id="auth-msg" class="dim"></p>
+      <form id="auth-form" autocomplete="off">
+        <label>Username
+          <input id="auth-username" type="text" autocomplete="username" />
+        </label>
+        <label>Password
+          <input id="auth-password" type="password" autocomplete="current-password" />
+        </label>
+        <label id="auth-confirm-wrap" hidden>Confirm password
+          <input id="auth-confirm" type="password" autocomplete="new-password" />
+        </label>
+        <button id="auth-submit" type="submit" class="primary">Log in</button>
+        <p id="auth-error" class="auth-error"></p>
+      </form>
+    </div>
+  </div>
   <header class="topbar">
     <div class="brand">
       <span class="prompt">$</span>
@@ -24,11 +46,12 @@
       <button class="main-tab" data-tab="schwab">Schwab</button>
       <button class="main-tab" data-tab="portfolio">Portfolio Scan</button>
       <button class="main-tab" data-tab="spy">S&amp;P 500</button>
-      <button class="main-tab" data-tab="keys">API Keys</button>
+      <button class="main-tab" data-tab="keys">Settings</button>
     </nav>
     <div class="stats">
       <span id="stat-elapsed">elapsed: 0s</span>
       <span id="stat-status" class="dim">idle</span>
+      <button id="btn-logout" type="button" class="ghost" hidden style="padding:4px 10px;font-size:11px;">Logout</button>
     </div>
   </header>
 
@@ -276,30 +299,76 @@
   <!-- ===== TAB: API Keys ===== -->
   <main class="layout single tab-pane" data-pane="keys" hidden>
     <section class="main">
+      <!-- App settings: Schwab, market data, Ollama, email, notifications -->
+      <div class="panel">
+        <div class="panel-title">[ App Settings &amp; Credentials ]</div>
+        <p class="dim" style="margin: 0 0 12px;">
+          Everything is stored in the dashboard's SQLite DB and applied to the process environment
+          immediately. Secrets are masked — never read back over the network. Values set in the
+          Portainer stack still work as a fallback.
+        </p>
+        <div id="settings-status" class="dim" style="margin-bottom: 10px;"></div>
+        <table class="keys-table">
+          <thead>
+            <tr><th>Setting</th><th>Env var</th><th>Current</th><th>New value</th><th></th></tr>
+          </thead>
+          <tbody id="settings-body"></tbody>
+        </table>
+      </div>
+
+      <!-- Add an arbitrary env var / credential -->
+      <div class="panel">
+        <div class="panel-title">[ Add Custom Setting ]</div>
+        <p class="dim" style="margin: 0 0 10px;">Set any environment variable by name (e.g. a key for a service not listed above).</p>
+        <form id="custom-setting-form" style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
+          <label style="flex:1; min-width:160px; display:flex; flex-direction:column; gap:4px; color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Key (UPPER_SNAKE_CASE)
+            <input id="custom-setting-key" type="text" placeholder="MY_SERVICE_API_KEY" autocomplete="off" style="background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:6px 8px;font-family:inherit;font-size:13px;border-radius:3px;" />
+          </label>
+          <label style="flex:2; min-width:200px; display:flex; flex-direction:column; gap:4px; color:var(--dim); font-size:11px; text-transform:uppercase; letter-spacing:0.5px;">Value
+            <input id="custom-setting-value" type="password" placeholder="value (hidden)" autocomplete="off" style="background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:6px 8px;font-family:inherit;font-size:13px;border-radius:3px;" />
+          </label>
+          <button type="submit" class="primary" style="font-size:11px;padding:6px 12px;">Add</button>
+        </form>
+        <table class="keys-table" id="custom-settings-table" style="margin-top:12px;" hidden>
+          <thead><tr><th>Env var</th><th>Current</th><th></th></tr></thead>
+          <tbody id="custom-settings-body"></tbody>
+        </table>
+      </div>
+
+      <!-- Existing LLM provider keys -->
       <div class="panel">
         <div class="panel-title">[ LLM Provider API Keys ]</div>
-        <p class="dim" style="margin: 0 0 12px;">
-          Keys are stored in the dashboard's SQLite DB and applied to the process env at startup
-          and on every save. Values set via the Portainer stack's <code>.env</code> still work as
-          a fallback. Stored keys are masked here — they're never read back over the network.
-        </p>
         <div id="keys-status" class="dim" style="margin-bottom: 10px;"></div>
         <table class="keys-table">
           <thead>
-            <tr>
-              <th>Provider</th>
-              <th>Env var</th>
-              <th>Current</th>
-              <th>New value</th>
-              <th></th>
-            </tr>
+            <tr><th>Provider</th><th>Env var</th><th>Current</th><th>New value</th><th></th></tr>
           </thead>
           <tbody id="keys-body"></tbody>
         </table>
       </div>
+
+      <!-- Users -->
+      <div class="panel">
+        <div class="panel-title">[ Users ]</div>
+        <div id="users-status" class="dim" style="margin-bottom: 10px;"></div>
+        <table class="keys-table"><thead><tr><th>Username</th><th>Created</th></tr></thead><tbody id="users-body"></tbody></table>
+        <div style="display:flex; gap:24px; flex-wrap:wrap; margin-top:14px;">
+          <form id="add-user-form" style="display:flex; flex-direction:column; gap:6px; min-width:220px;">
+            <div class="settings-group-title" style="margin:0;">Add user</div>
+            <input id="new-user-name" type="text" placeholder="username" autocomplete="off" style="background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:6px 8px;border-radius:3px;font-family:inherit;font-size:13px;" />
+            <input id="new-user-pass" type="password" placeholder="password (min 8)" autocomplete="new-password" style="background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:6px 8px;border-radius:3px;font-family:inherit;font-size:13px;" />
+            <button type="submit" class="primary" style="font-size:11px;padding:6px 12px;">Create user</button>
+          </form>
+          <form id="change-pass-form" style="display:flex; flex-direction:column; gap:6px; min-width:220px;">
+            <div class="settings-group-title" style="margin:0;">Change my password</div>
+            <input id="cur-pass" type="password" placeholder="current password" autocomplete="current-password" style="background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:6px 8px;border-radius:3px;font-family:inherit;font-size:13px;" />
+            <input id="new-pass" type="password" placeholder="new password (min 8)" autocomplete="new-password" style="background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:6px 8px;border-radius:3px;font-family:inherit;font-size:13px;" />
+            <button type="submit" class="primary" style="font-size:11px;padding:6px 12px;">Update password</button>
+          </form>
+        </div>
+        <p id="users-msg" class="dim" style="margin-top:10px;font-size:12px;"></p>
+      </div>
     </section>
   </main>
-
-  <script src="/static/credentials.js" defer></script>
 </body>
 </html>

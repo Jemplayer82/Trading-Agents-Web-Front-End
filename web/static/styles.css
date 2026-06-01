@@ -529,6 +529,45 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .qa-form input:focus { border-color: var(--accent-cyan); }
 .qa-form input:disabled { opacity: 0.5; }
 
+/* ----- Auth overlay ----- */
+#auth-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(6, 10, 15, 0.97);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#auth-overlay[hidden] { display: none; }
+.auth-card {
+  width: 340px;
+  max-width: 90vw;
+  border: 1px solid var(--panel-border);
+  background: var(--panel);
+  border-radius: 6px;
+  padding: 24px;
+}
+.auth-brand { color: var(--accent-cyan); font-weight: 600; margin-bottom: 8px; }
+.auth-brand .prompt { color: var(--accent-green); }
+.auth-card form { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
+.auth-card label { display: flex; flex-direction: column; gap: 4px; color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+.auth-card input {
+  background: #060a0f; color: var(--text); border: 1px solid var(--panel-border);
+  padding: 8px; font-family: inherit; font-size: 13px; border-radius: 3px; outline: none;
+}
+.auth-card input:focus { border-color: var(--accent-cyan); }
+.auth-error { color: var(--accent-red); font-size: 12px; min-height: 14px; margin: 0; }
+
+/* ----- Settings tab ----- */
+.settings-group-title {
+  color: var(--accent-magenta);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 18px 0 6px;
+}
+
 /* ----- API Keys tab ----- */
 .keys-table {
   width: 100%;

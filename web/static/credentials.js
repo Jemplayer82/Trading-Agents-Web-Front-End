@@ -147,20 +147,250 @@
     }
   }
 
-  // Reload on every tab activation — keeps the masked preview fresh
-  // after the user has saved/cleared from another browser/tab.
+  // ---------- App settings (Schwab, Ollama, SMTP, etc.) + custom ----------
+
+  function srcTag(source) {
+    if (source === "db") return '<span class="key-src db">DB</span>';
+    if (source === "env") return '<span class="key-src env">.env</span>';
+    return "";
+  }
+
+  async function loadSettings() {
+    const status = $("settings-status");
+    const body = $("settings-body");
+    if (!body) return;
+    status.textContent = "loading…";
+    let data;
+    try {
+      const resp = await fetch("/api/settings");
+      data = await resp.json();
+    } catch (e) {
+      status.textContent = `failed to load: ${e}`;
+      return;
+    }
+    const registry = data.registry || [];
+    const custom = data.custom || [];
+
+    body.innerHTML = "";
+    let lastGroup = null;
+    registry.forEach((s) => {
+      if (s.group !== lastGroup) {
+        lastGroup = s.group;
+        const gtr = document.createElement("tr");
+        gtr.innerHTML = `<td colspan="5" class="settings-group-title">${s.group}</td>`;
+        body.appendChild(gtr);
+      }
+      const tr = document.createElement("tr");
+
+      const tdLabel = document.createElement("td");
+      tdLabel.textContent = s.label;
+      tr.appendChild(tdLabel);
+
+      const tdEnv = document.createElement("td");
+      tdEnv.innerHTML = `<code>${s.key}</code>`;
+      tr.appendChild(tdEnv);
+
+      const tdCur = document.createElement("td");
+      if (s.has_value) {
+        tdCur.innerHTML = `${srcTag(s.source)} <code>${s.masked || "set"}</code>`;
+      } else {
+        tdCur.innerHTML = '<span class="dim">— none set</span>';
+      }
+      tr.appendChild(tdCur);
+
+      const tdNew = document.createElement("td");
+      const inp = document.createElement("input");
+      inp.type = s.secret ? "password" : "text";
+      inp.placeholder = s.placeholder || "New value";
+      inp.autocomplete = "off";
+      inp.spellcheck = false;
+      tdNew.appendChild(inp);
+      tr.appendChild(tdNew);
+
+      const tdAct = document.createElement("td");
+      tdAct.className = "keys-actions";
+      const saveBtn = document.createElement("button");
+      saveBtn.type = "button"; saveBtn.className = "primary"; saveBtn.textContent = "Save";
+      saveBtn.addEventListener("click", () => saveSetting(s.key, inp));
+      tdAct.appendChild(saveBtn);
+      if (s.source === "db") {
+        const clr = document.createElement("button");
+        clr.type = "button"; clr.className = "ghost"; clr.textContent = "Clear";
+        clr.style.marginLeft = "6px";
+        clr.addEventListener("click", () => clearSetting(s.key));
+        tdAct.appendChild(clr);
+      }
+      tr.appendChild(tdAct);
+      body.appendChild(tr);
+    });
+    status.textContent = "Saved values apply immediately; .env values are used as fallback.";
+
+    // Custom settings table
+    const ctable = $("custom-settings-table");
+    const cbody = $("custom-settings-body");
+    cbody.innerHTML = "";
+    if (custom.length) {
+      ctable.hidden = false;
+      custom.forEach((c) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td><code>${c.key}</code></td><td>${srcTag("db")} <code>${c.masked || "set"}</code></td>`;
+        const tdAct = document.createElement("td");
+        tdAct.className = "keys-actions";
+        const clr = document.createElement("button");
+        clr.type = "button"; clr.className = "ghost"; clr.textContent = "Clear";
+        clr.addEventListener("click", () => clearSetting(c.key));
+        tdAct.appendChild(clr);
+        tr.appendChild(tdAct);
+        cbody.appendChild(tr);
+      });
+    } else {
+      ctable.hidden = true;
+    }
+  }
+
+  async function saveSetting(key, input) {
+    const value = (input && input.value || "").trim();
+    if (!value) { alert("Enter a value first."); return; }
+    const status = $("settings-status");
+    status.textContent = `saving ${key}…`;
+    try {
+      const resp = await fetch(`/api/settings/${encodeURIComponent(key)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value }),
+      });
+      if (!resp.ok) {
+        const d = await resp.json().catch(() => ({}));
+        status.textContent = `save failed: ${d.detail || resp.status}`;
+        return;
+      }
+      input.value = "";
+      await loadSettings();
+    } catch (e) {
+      status.textContent = `save failed: ${e}`;
+    }
+  }
+
+  async function clearSetting(key) {
+    if (!confirm(`Clear ${key}? Any .env fallback will be used instead.`)) return;
+    try {
+      const resp = await fetch(`/api/settings/${encodeURIComponent(key)}`, { method: "DELETE" });
+      if (!resp.ok) {
+        const d = await resp.json().catch(() => ({}));
+        $("settings-status").textContent = `clear failed: ${d.detail || resp.status}`;
+        return;
+      }
+      await loadSettings();
+    } catch (e) {
+      $("settings-status").textContent = `clear failed: ${e}`;
+    }
+  }
+
+  function wireCustomForm() {
+    const form = $("custom-setting-form");
+    if (!form || form.dataset.wired) return;
+    form.dataset.wired = "1";
+    form.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const key = $("custom-setting-key").value.trim().toUpperCase();
+      const value = $("custom-setting-value").value;
+      if (!/^[A-Z][A-Z0-9_]*$/.test(key)) { alert("Key must be UPPER_SNAKE_CASE (letters, digits, underscores)."); return; }
+      if (!value) { alert("Enter a value."); return; }
+      try {
+        const resp = await fetch(`/api/settings/${encodeURIComponent(key)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ value }),
+        });
+        if (!resp.ok) {
+          const d = await resp.json().catch(() => ({}));
+          alert(`Failed: ${d.detail || resp.status}`);
+          return;
+        }
+        $("custom-setting-key").value = "";
+        $("custom-setting-value").value = "";
+        await loadSettings();
+      } catch (e) { alert(`Failed: ${e}`); }
+    });
+  }
+
+  // ---------- Users ----------
+
+  async function loadUsers() {
+    const body = $("users-body");
+    if (!body) return;
+    try {
+      const resp = await fetch("/api/auth/users");
+      const data = await resp.json();
+      body.innerHTML = "";
+      (data.users || []).forEach((u) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td>${u.username}</td><td class="dim">${(u.created_at || "").slice(0, 19).replace("T", " ")}</td>`;
+        body.appendChild(tr);
+      });
+    } catch (e) { /* gated until logged in */ }
+  }
+
+  function wireUserForms() {
+    const addF = $("add-user-form");
+    if (addF && !addF.dataset.wired) {
+      addF.dataset.wired = "1";
+      addF.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const username = $("new-user-name").value.trim();
+        const password = $("new-user-pass").value;
+        const msg = $("users-msg");
+        try {
+          const resp = await fetch("/api/auth/users", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username, password }),
+          });
+          const d = await resp.json().catch(() => ({}));
+          msg.textContent = resp.ok ? `User '${username}' created.` : `Failed: ${d.detail || resp.status}`;
+          if (resp.ok) { $("new-user-name").value = ""; $("new-user-pass").value = ""; loadUsers(); }
+        } catch (e) { msg.textContent = `Failed: ${e}`; }
+      });
+    }
+    const passF = $("change-pass-form");
+    if (passF && !passF.dataset.wired) {
+      passF.dataset.wired = "1";
+      passF.addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const msg = $("users-msg");
+        try {
+          const resp = await fetch("/api/auth/password", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              current_password: $("cur-pass").value,
+              new_password: $("new-pass").value,
+            }),
+          });
+          const d = await resp.json().catch(() => ({}));
+          msg.textContent = resp.ok ? "Password updated." : `Failed: ${d.detail || resp.status}`;
+          if (resp.ok) { $("cur-pass").value = ""; $("new-pass").value = ""; }
+        } catch (e) { msg.textContent = `Failed: ${e}`; }
+      });
+    }
+  }
+
+  function loadAll() {
+    loadCredentials();
+    loadSettings();
+    loadUsers();
+    wireCustomForm();
+    wireUserForms();
+  }
+
+  // Reload on every tab activation — keeps masked previews fresh.
   document.addEventListener("tab-shown", (ev) => {
-    if (ev.detail === "keys") loadCredentials();
+    if (ev.detail === "keys") loadAll();
   });
 
   document.addEventListener("DOMContentLoaded", () => {
-    // If page loads with #keys active, load immediately
     const initial = document.querySelector(".tab-pane.active");
-    if (initial && initial.dataset.pane === "keys") {
-      loadCredentials();
-    }
+    if (initial && initial.dataset.pane === "keys") loadAll();
   });
 
   // Expose a manual refresh hook for the console
-  window.reloadCredentials = loadCredentials;
+  window.reloadCredentials = loadAll;
 })();

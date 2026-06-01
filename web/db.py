@@ -3,6 +3,10 @@
 Tables:
   preferences          - single row of user form defaults
   provider_credentials - per-LLM-provider API key + optional base URL
+  app_settings         - env-style key/value config managed from the UI
+                         (Schwab app key/secret/callback, Ollama base URL, etc.)
+  users                - dashboard login accounts (username + pbkdf2 hash)
+  sessions             - active login sessions (cookie token -> username)
   analyses             - one row per single-ticker analysis (existing)
   portfolio_scans      - one row per nightly portfolio sweep (Schwab)
   portfolio_tickers    - join row connecting a scan to the analyses it generated
@@ -35,6 +39,27 @@ CREATE TABLE IF NOT EXISTS provider_credentials (
     base_url TEXT,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    username TEXT PRIMARY KEY,
+    password_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions (expires_at);
 
 CREATE TABLE IF NOT EXISTS analyses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -198,6 +223,123 @@ def delete_credential(provider: str) -> bool:
     with connect() as conn:
         cur = conn.execute("DELETE FROM provider_credentials WHERE provider = ?", (provider,))
     return cur.rowcount > 0
+
+
+# ---------- app settings (Schwab, Ollama, etc. — env-style config) ----------
+
+def set_app_setting(key: str, value: str) -> None:
+    """Insert-or-update a UI-managed env-style setting."""
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (key, value, datetime.utcnow().isoformat()),
+        )
+
+
+def get_app_setting(key: str) -> str | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?", (key,)
+        ).fetchone()
+    return row["value"] if row else None
+
+
+def list_app_settings() -> list[dict[str, Any]]:
+    """All stored settings — caller must mask before returning to client."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT key, value, updated_at FROM app_settings"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_app_setting(key: str) -> bool:
+    with connect() as conn:
+        cur = conn.execute("DELETE FROM app_settings WHERE key = ?", (key,))
+    return cur.rowcount > 0
+
+
+# ---------- auth: users + sessions ----------
+
+def count_users() -> int:
+    with connect() as conn:
+        row = conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()
+    return int(row["n"])
+
+
+def create_user(username: str, password_hash: str) -> None:
+    """Insert a new user. Raises sqlite3.IntegrityError if username exists."""
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
+            (username, password_hash, datetime.utcnow().isoformat()),
+        )
+
+
+def get_user(username: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT username, password_hash, created_at FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_users() -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT username, created_at FROM users ORDER BY created_at"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_user_password(username: str, password_hash: str) -> bool:
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE users SET password_hash = ? WHERE username = ?",
+            (password_hash, username),
+        )
+    return cur.rowcount > 0
+
+
+def delete_user(username: str) -> bool:
+    with connect() as conn:
+        cur = conn.execute("DELETE FROM users WHERE username = ?", (username,))
+    return cur.rowcount > 0
+
+
+def create_session(token: str, username: str, expires_at: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO sessions (token, username, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (token, username, datetime.utcnow().isoformat(), expires_at),
+        )
+
+
+def get_session(token: str) -> dict[str, Any] | None:
+    """Return a non-expired session row, or None. Expired rows are ignored."""
+    now = datetime.utcnow().isoformat()
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT token, username, created_at, expires_at FROM sessions "
+            "WHERE token = ? AND expires_at > ?",
+            (token, now),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def delete_session(token: str) -> bool:
+    with connect() as conn:
+        cur = conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+    return cur.rowcount > 0
+
+
+def purge_expired_sessions() -> int:
+    now = datetime.utcnow().isoformat()
+    with connect() as conn:
+        cur = conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
+    return cur.rowcount
 
 
 # ---------- single-ticker analyses (unchanged behavior) ----------
