@@ -84,10 +84,24 @@ def _quick_scan_one(
             ticker=ticker, price=price, ret5=ret5, ret20=ret20,
             vol_ratio=vol_ratio, sector=sector,
         )
-        resp = llm.invoke([
-            {"role": "system", "content": QUICK_SCAN_SYSTEM},
-            {"role": "user", "content": prompt},
-        ])
+        # Retry up to 3 times on 429 rate-limit responses.
+        for attempt in range(4):
+            try:
+                resp = llm.invoke([
+                    {"role": "system", "content": QUICK_SCAN_SYSTEM},
+                    {"role": "user", "content": prompt},
+                ])
+                break
+            except Exception as e:
+                msg = str(e).lower()
+                if "429" in msg or "too many" in msg or "rate" in msg:
+                    if attempt < 3:
+                        import time as _time
+                        wait = 5 * (attempt + 1)
+                        log.warning("Quick scan 429 for %s, retrying in %ss", ticker, wait)
+                        _time.sleep(wait)
+                        continue
+                raise
         raw = resp.content if hasattr(resp, "content") else str(resp)
         signal, conviction, reasoning = _parse_quick_response(raw)
         return {"ticker": ticker, "signal": signal, "conviction": conviction,
@@ -136,7 +150,9 @@ def run_quick_scan(
     def _scan_one(t: str) -> dict[str, Any]:
         return _quick_scan_one(t, price_data_map.get(t, {"close": [], "volume": []}), "Unknown", llm)
 
-    with ThreadPoolExecutor(max_workers=20) as pool:
+    # 5 concurrent LLM calls — stays well within Ollama Cloud's rate limit
+    # even when a single-ticker analysis is also running in the api container.
+    with ThreadPoolExecutor(max_workers=5) as pool:
         futures = {pool.submit(_scan_one, t): t for t in tickers}
         for fut in as_completed(futures):
             result = fut.result()
@@ -204,7 +220,7 @@ def run_deep_dives(
             db.fail_analysis(analysis_id, str(exc))
             return {**c, "error": str(exc), "analysis_id": analysis_id}
 
-    with ThreadPoolExecutor(max_workers=5) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         futures = {pool.submit(_dive, c): c["ticker"] for c in candidates}
         for fut in as_completed(futures):
             result = fut.result()
