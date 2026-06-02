@@ -406,3 +406,10 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
     log.info("[spy %s] done — %d positions, capital $%s → deployed $%s", scan_id,
              len([p for p in portfolio if p.get("action") != "EXITED"]),
              f"{starting_value:,.0f}", f"{alloc_result.get('total', 0):,.0f}")
+
+    # Mark the fresh portfolio to market immediately so the table shows live
+    # share counts / current prices / P&L without waiting for the hourly cron.
+    try:
+        spy_scanner.refresh_portfolio_prices(scan_id)
+    except Exception:
+        log.exception("[spy %s] initial price refresh failed (non-fatal)", scan_id)

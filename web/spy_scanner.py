@@ -402,16 +402,29 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
     deployed = 0.0
     signal_flips: list[str] = []
     for a in portfolio:
-        # Skip closed/zero positions — they hold no capital.
-        if a.get("action") == "EXITED" or (a.get("dollar_amount") or 0) <= 0:
+        # Skip closed positions — they hold no capital.
+        if a.get("action") == "EXITED":
             continue
         t = a["ticker"]
-        amount = a.get("dollar_amount", 0)
-        deployed += amount
-        cp = current_prices.get(t) or a.get("entry_price") or 0
-        ep = a.get("entry_price") or cp
-        pos_value = (cp / ep) * amount if ep and ep > 0 else amount
-        positions_value += pos_value
+        ep = float(a.get("entry_price") or 0)
+        # Whole shares purchased at entry. Legacy scans (pre whole-share) have
+        # no `shares` field — derive it from the dollar target / entry price.
+        shares = a.get("shares")
+        if shares is None:
+            shares = int(float(a.get("dollar_amount") or 0) // ep) if ep > 0 else 0
+            a["shares"] = shares
+        if shares <= 0:
+            continue
+        cost = a.get("cost_basis")
+        if cost is None:
+            cost = round(shares * ep, 2)
+            a["cost_basis"] = cost
+        deployed += cost
+
+        cp = current_prices.get(t) or ep
+        a["current_price"] = round(cp, 2)
+        a["current_value"] = round(shares * cp, 2)
+        positions_value += a["current_value"]
 
         quick = db.get_spy_quick_result(scan_id, t)
         if quick and quick.get("signal") and a.get("signal"):
@@ -425,7 +438,14 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
         "Signal flips detected:\n" + "\n".join("- " + f for f in signal_flips)
     ) if signal_flips else ""
 
-    db.update_spy_scan_prices(scan_id=scan_id, current_value=current_value, rebalance_notes=rebalance_notes)
+    # Persist the mutated portfolio so per-position current_price/current_value
+    # are saved alongside the scan-level value.
+    db.update_spy_scan_prices(
+        scan_id=scan_id,
+        current_value=current_value,
+        rebalance_notes=rebalance_notes,
+        portfolio_json=portfolio,
+    )
     return {
         "current_value": round(current_value, 2),
         "positions_value": round(positions_value, 2),
