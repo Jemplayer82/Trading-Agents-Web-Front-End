@@ -99,14 +99,14 @@ def list_meta() -> list[dict[str, Any]]:
 
 # Each entry: key (env var), label, group, secret (mask?), placeholder.
 SETTINGS_REGISTRY: list[dict[str, Any]] = [
-    # Brokerage (Schwab)
-    {"key": "SCHWAB_ENABLED", "label": "Enable Schwab features (1=on, 0=off)", "group": "Brokerage (Schwab)", "secret": False, "placeholder": "1 — set 0 if you have no Schwab account"},
+    # Brokerage (Schwab) — data-source switch
+    {"key": "SCHWAB_ENABLED", "label": "Data source — Schwab MCP (on) vs free built-in tools (off)", "group": "Brokerage (Schwab)", "secret": False, "type": "toggle", "placeholder": "on = Schwab holdings + market data; off hides holdings and uses free yfinance"},
     # Brokerage (Schwab OAuth app credentials)
     {"key": "SCHWAB_APP_KEY", "label": "Schwab App Key", "group": "Brokerage (Schwab)", "secret": True, "placeholder": "Client ID from the Schwab developer portal"},
     {"key": "SCHWAB_APP_SECRET", "label": "Schwab App Secret", "group": "Brokerage (Schwab)", "secret": True, "placeholder": "Client secret"},
     {"key": "SCHWAB_CALLBACK_URL", "label": "Schwab Callback URL", "group": "Brokerage (Schwab)", "secret": False, "placeholder": "https://trading.txferguson.net/api/auth/schwab/callback"},
     {"key": "SCHWAB_MCP_URL", "label": "Schwab MCP URL", "group": "Brokerage (Schwab)", "secret": False, "placeholder": "http://100.112.40.124:3105/mcp"},
-    {"key": "SCHWAB_MARKET_DATA", "label": "Use Schwab market data (1/0)", "group": "Brokerage (Schwab)", "secret": False, "placeholder": "1"},
+    {"key": "SCHWAB_MARKET_DATA", "label": "Use Schwab for market data (off = free yfinance)", "group": "Brokerage (Schwab)", "secret": False, "type": "toggle", "placeholder": "1"},
     # Market data
     {"key": "ALPHA_VANTAGE_API_KEY", "label": "Alpha Vantage API Key", "group": "Market Data", "secret": True, "placeholder": "Used for technical indicators"},
     # Ollama / LLM infra
@@ -168,6 +168,7 @@ def list_settings_meta() -> dict[str, Any]:
             "label": spec["label"],
             "group": spec["group"],
             "secret": spec["secret"],
+            "type": spec.get("type", "text"),
             "placeholder": spec.get("placeholder", ""),
             "has_value": bool(effective),
             "masked": mask_setting(key, effective),

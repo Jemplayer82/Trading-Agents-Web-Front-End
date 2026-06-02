@@ -110,6 +110,20 @@ def call_tool(name: str, arguments: dict[str, Any], timeout: float = 30.0) -> An
         return None
 
     result = frame.get("result") or {}
+    if result.get("isError"):
+        # The MCP tool ran but the upstream Schwab call failed — most commonly
+        # the MCP server's Schwab session is unauthorized / its token expired
+        # (re-auth at https://schwab.txferguson.net/auth). The human-readable
+        # reason is in the text content. Surface it in logs and treat as "no
+        # data" so callers fall back (market data → yfinance) or show
+        # "not connected" rather than leaking the raw error string downstream.
+        detail = ""
+        for block in result.get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "text":
+                detail = block.get("text") or ""
+                break
+        log.warning("[schwab_mcp] %s tool error: %s", name, detail or "(no detail)")
+        return None
     for block in result.get("content") or []:
         if isinstance(block, dict) and block.get("type") == "text":
             txt = block.get("text") or ""
