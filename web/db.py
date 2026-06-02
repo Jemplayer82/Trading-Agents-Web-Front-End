@@ -162,6 +162,14 @@ CREATE TABLE IF NOT EXISTS llm_activity (
 );
 
 CREATE INDEX IF NOT EXISTS idx_llm_activity_kind ON llm_activity (kind, heartbeat);
+
+-- Cached company name + website per ticker (resolved via yfinance on demand).
+CREATE TABLE IF NOT EXISTS ticker_info (
+    ticker TEXT PRIMARY KEY,
+    name TEXT,
+    website TEXT,
+    fetched_at TEXT NOT NULL
+);
 """
 
 
@@ -839,6 +847,32 @@ def purge_stale_activity(stale_seconds: int = 120) -> None:
     ).isoformat(timespec="seconds") + "Z"
     with connect() as conn:
         conn.execute("DELETE FROM llm_activity WHERE heartbeat < ?", (cutoff,))
+
+
+# ---------- ticker company-info cache ----------
+
+def get_ticker_info(ticker: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT ticker, name, website FROM ticker_info WHERE ticker = ?", (ticker,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def set_ticker_info(ticker: str, name: str | None, website: str | None) -> None:
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO ticker_info (ticker, name, website, fetched_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(ticker) DO UPDATE SET
+                name = excluded.name,
+                website = excluded.website,
+                fetched_at = excluded.fetched_at
+            """,
+            (ticker, name, website, now),
+        )
 
 
 def _serialize(obj: Any) -> Any:
