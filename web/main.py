@@ -274,6 +274,49 @@ def delete_analysis_endpoint(analysis_id: int) -> dict[str, Any]:
     return {"status": "deleted", "id": analysis_id}
 
 
+@app.get("/api/ticker-info/{ticker}")
+def ticker_info(ticker: str) -> dict[str, Any]:
+    """Company name + website for a ticker, resolved via yfinance and cached.
+
+    Falls back to the Yahoo Finance quote page when no corporate website is
+    available, so the link is always usable.
+    """
+    t = (ticker or "").strip().upper()
+    yahoo = f"https://finance.yahoo.com/quote/{t}"
+    if not t:
+        raise HTTPException(status_code=400, detail="missing ticker")
+
+    cached = db.get_ticker_info(t)
+    if cached:
+        return {
+            "ticker": t,
+            "name": cached.get("name") or t,
+            "website": cached.get("website") or yahoo,
+        }
+
+    name = t
+    website = ""
+    try:
+        import yfinance as yf  # lazy — keeps app startup light
+        info = yf.Ticker(t).info or {}
+        name = info.get("longName") or info.get("shortName") or t
+        site = info.get("website") or ""
+        if isinstance(site, str) and site.startswith(("http://", "https://")):
+            website = site
+    except Exception:
+        log.warning("ticker-info lookup failed for %s", t)
+
+    final_website = website or yahoo
+    # Only cache once we actually resolved something, so a transient yfinance
+    # failure retries next time instead of sticking a poor result forever.
+    if name != t or website:
+        try:
+            db.set_ticker_info(t, name, final_website)
+        except Exception:
+            pass
+    return {"ticker": t, "name": name, "website": final_website}
+
+
 # ---------- Q&A and chart for saved analyses ----------
 
 @app.post("/api/analyses/{analysis_id}/ask")

@@ -184,6 +184,22 @@ function renderSpyScan(scan) {
   const main = $$spy("spy-main");
   if (!main) return;
 
+  // Map ticker -> deep-dive analysis id (only deep-dived tickers have one).
+  const aidByTicker = {};
+  (scan.quick_results || []).forEach((r) => {
+    if (r.analysis_id) aidByTicker[r.ticker] = r.analysis_id;
+  });
+  // Render a ticker as a link to its full report when an analysis exists.
+  function tickerCell(ticker) {
+    const aid = aidByTicker[ticker];
+    if (aid) {
+      return "<a href=\"#\" class=\"spy-analysis-link\" data-id=\"" + aid +
+        "\" title=\"Open full report\" style=\"color:var(--accent-cyan);font-weight:700;\">" +
+        escHtml(ticker) + " ↗</a>";
+    }
+    return "<strong style=\"color:var(--accent-cyan);\">" + escHtml(ticker) + "</strong>";
+  }
+
   // Status banner for terminal/cancel states
   const running = scan.status && scan.status.startsWith("running");
   let bannerHtml = "";
@@ -229,6 +245,13 @@ function renderSpyScan(scan) {
     const basis = scan.starting_value || 100000;
     const cv = scan.current_value;
     const isRebalance = scan.previous_scan_id != null;
+    const deployed = scan.portfolio_json
+      .filter((a) => a.action !== "EXITED" && (a.dollar_amount || 0) > 0)
+      .reduce((s, a) => s + (a.dollar_amount || 0), 0);
+    const cash = Math.max(0, basis - deployed);
+    const cashSpan = "<span>Deployed: <strong>$" + Math.round(deployed).toLocaleString() +
+      "</strong> · Cash: <strong>$" + Math.round(cash).toLocaleString() +
+      "</strong> (" + (basis > 0 ? (cash / basis * 100).toFixed(0) : "0") + "%)</span>";
     if (cv != null) {
       const ret = ((cv - basis) / basis) * 100;
       const sign = ret >= 0 ? "+" : "";
@@ -239,6 +262,7 @@ function renderSpyScan(scan) {
           "<div style=\"display:flex;gap:24px;align-items:baseline;flex-wrap:wrap;\">" +
             "<span class=\"dim\" style=\"font-size:11px;\">" + (isRebalance ? "Rebalance" : "Initial") + "</span>" +
             "<span>Basis: <strong>$" + Math.round(basis).toLocaleString() + "</strong></span>" +
+            cashSpan +
             "<span>Current: <strong style=\"color:" + retColor + ";\">$" + Math.round(cv).toLocaleString() + "</strong></span>" +
             "<span>Return: <strong style=\"color:" + retColor + ";\">" + sign + ret.toFixed(2) + "% (" + sign + "$" + Math.abs(Math.round(cv - basis)).toLocaleString() + ")</strong></span>" +
             "<span class=\"dim\">Updated: " + fmtTs(scan.last_price_check) + "</span>" +
@@ -255,6 +279,7 @@ function renderSpyScan(scan) {
           "<div class=\"panel-title\">[ Performance ]</div>" +
           "<div style=\"margin-bottom:8px;color:var(--dim);font-size:12px;\">" +
             (isRebalance ? "Rebalance — starting capital: <strong>$" + Math.round(basis).toLocaleString() + "</strong>" : "Initial portfolio — $100,000 basis") +
+            " · Deployed $" + Math.round(deployed).toLocaleString() + " · Cash $" + Math.round(cash).toLocaleString() +
           "</div>" +
           "<p class=\"dim\">Prices not yet refreshed. " +
           "<button class=\"ghost\" style=\"font-size:12px;\" onclick=\"refreshSpyPrices(" + scan.id + ")\">Refresh now</button></p>" +
@@ -271,16 +296,12 @@ function renderSpyScan(scan) {
       const sig = (r.signal || "HOLD").toUpperCase();
       const conv = r.conviction || 0;
       const convColor = conv >= 8 ? "var(--accent-green)" : (conv >= 5 ? "var(--accent-yellow)" : "var(--accent-red)");
-      const analysisLink = r.analysis_id
-        ? "<a href=\"#\" class=\"spy-analysis-link\" data-id=\"" + r.analysis_id + "\">view →</a>"
-        : "";
       return (
         "<tr>" +
-          "<td><strong style=\"color:var(--accent-cyan);\">" + escHtml(r.ticker) + "</strong></td>" +
+          "<td>" + tickerCell(r.ticker) + "</td>" +
           "<td><span class=\"badge " + sig + "\">" + sig + "</span></td>" +
           "<td><span class=\"conviction-badge\" style=\"color:" + convColor + ";font-weight:700;\">" + conv + "/10</span></td>" +
-          "<td style=\"color:var(--dim);font-size:11px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;\">" + escHtml(r.reasoning || "") + "</td>" +
-          "<td style=\"font-size:12px;\">" + analysisLink + "</td>" +
+          "<td style=\"color:var(--dim);font-size:11px;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;\">" + escHtml(r.reasoning || "") + "</td>" +
         "</tr>"
       );
     }).join("");
@@ -290,7 +311,7 @@ function renderSpyScan(scan) {
         "<div style=\"overflow-x:auto;\">" +
           "<table class=\"spy-table\">" +
             "<thead><tr>" +
-              "<th>Ticker</th><th>Signal</th><th>Conviction</th><th>Reasoning</th><th></th>" +
+              "<th>Ticker</th><th>Signal</th><th>Conviction</th><th>Reasoning</th>" +
             "</tr></thead>" +
             "<tbody>" + rows + "</tbody>" +
           "</table>" +
@@ -324,7 +345,7 @@ function renderSpyScan(scan) {
       const dimRow = act === "EXITED" ? " style=\"opacity:0.5;\"" : "";
       return (
         "<tr" + dimRow + ">" +
-          "<td><strong style=\"color:var(--accent-cyan);\">" + escHtml(a.ticker) + "</strong></td>" +
+          "<td>" + tickerCell(a.ticker) + "</td>" +
           "<td><span style=\"font-size:10px;font-weight:700;text-transform:uppercase;color:" + actCol + ";\">" + act + "</span></td>" +
           "<td><span class=\"badge " + sig + "\">" + sig + "</span></td>" +
           "<td>" + (act === "EXITED" ? "<span class=\"dim\">—</span>" : "$" + Math.round(a.dollar_amount || 0).toLocaleString()) + "</td>" +
@@ -345,11 +366,23 @@ function renderSpyScan(scan) {
           "<table class=\"spy-table\">" +
             "<thead><tr><th>Ticker</th><th>Action</th><th>Signal</th><th>$ Amount</th><th>%</th><th>Rationale</th></tr></thead>" +
             "<tbody>" + rows + "</tbody>" +
-            "<tfoot><tr style=\"font-weight:700;border-top:1px solid var(--panel-border);\">" +
-              "<td colspan=\"3\">TOTAL DEPLOYED</td>" +
-              "<td>$" + Math.round(total).toLocaleString() + "</td>" +
-              "<td>" + (basis > 0 ? (total / basis * 100).toFixed(1) : "0.0") + "%</td><td></td>" +
-            "</tr></tfoot>" +
+            "<tfoot>" +
+              "<tr style=\"font-weight:700;border-top:1px solid var(--panel-border);\">" +
+                "<td colspan=\"3\">TOTAL DEPLOYED</td>" +
+                "<td>$" + Math.round(total).toLocaleString() + "</td>" +
+                "<td>" + (basis > 0 ? (total / basis * 100).toFixed(1) : "0.0") + "%</td><td></td>" +
+              "</tr>" +
+              "<tr style=\"color:var(--accent-yellow);\">" +
+                "<td colspan=\"3\">CASH (uninvested)</td>" +
+                "<td>$" + Math.round(Math.max(0, basis - total)).toLocaleString() + "</td>" +
+                "<td>" + (basis > 0 ? (Math.max(0, basis - total) / basis * 100).toFixed(1) : "0.0") + "%</td><td></td>" +
+              "</tr>" +
+              "<tr style=\"font-weight:700;border-top:1px solid var(--panel-border);color:var(--dim);\">" +
+                "<td colspan=\"3\">PORTFOLIO VALUE</td>" +
+                "<td>$" + Math.round(basis).toLocaleString() + "</td>" +
+                "<td>100%</td><td></td>" +
+              "</tr>" +
+            "</tfoot>" +
           "</table>" +
         "</div>" +
       "</div>"

@@ -15,17 +15,25 @@ log = logging.getLogger(__name__)
 
 # ─── Fresh allocation (week 1 or first ever run) ──────────────────────────────
 
-FRESH_SYSTEM_PROMPT = """You are a quantitative portfolio manager. Given a set of
-deep-dive analyses for the top S&P 500 candidates, produce a $100,000 paper
-portfolio allocation.
+FRESH_SYSTEM_PROMPT = """You are a quantitative portfolio manager. You have up to
+$100,000 of paper capital and a shortlist of deep-dive analyses for the top S&P
+500 candidates.
+
+Capital discipline (IMPORTANT):
+- The candidate list is a SHORTLIST for review — NOT a mandate to buy all of them.
+- You do NOT have to deploy the full $100,000. Hold the remainder as cash whenever
+  there aren't enough genuinely compelling, high-conviction opportunities.
+- Only deploy capital to names you would actually buy with real money. It is
+  perfectly fine (and often correct) to invest well under $100,000 in just a
+  handful of positions and leave the rest in cash.
 
 Rules:
-- Total must equal EXACTLY $100,000.
+- Total invested must be ≤ $100,000 (anything not invested is cash).
 - Minimum position: $500. Maximum position: $15,000 (15%).
 - Weight positions by signal strength and conviction score.
 - Only BUY-rated tickers should receive meaningful allocation (>1%).
-- HOLD tickers may receive small allocations (0.5–3%) as speculative.
-- SELL-rated tickers get $0.
+- HOLD tickers may receive small allocations (0.5–3%) as speculative, or none.
+- SELL-rated and low-conviction tickers get $0 (just omit them).
 - Set "action" to "NEW" for every position (this is a fresh portfolio).
 - Return ONLY valid JSON — no prose, no markdown fences.
 
@@ -47,8 +55,14 @@ You will receive:
 2. Current holdings with this week's updated signals.
 3. New high-conviction candidates not yet in the portfolio.
 
+Capital discipline (IMPORTANT):
+- The candidate list is a SHORTLIST for review — NOT a mandate to hold all of them.
+- You do NOT have to stay fully invested. Total invested may be LESS than the
+  starting capital; hold the remainder as cash when conviction is thin.
+- Raise cash by trimming or exiting when there aren't enough compelling ideas.
+
 Rebalancing rules:
-- Total allocations must equal EXACTLY the starting capital (rounded to nearest $1).
+- Total invested must be ≤ the starting capital (the rest is cash).
 - Minimum position: $500. Maximum: 15% of starting capital.
 - EXITED positions (SELL signal or dropped out of top candidates) free up capital.
 - Kept positions maintain their original entry_price for P&L tracking.
@@ -270,13 +284,16 @@ def run(
                     a["entry_price"] = prev["entry_price"]
 
     total = sum(a.get("dollar_amount", 0) for a in allocations if a.get("action") != "EXITED")
+    cash = max(0.0, capital - total)
+    cash_pct = (cash / capital * 100) if capital else 0.0
 
     # ── Build markdown report ─────────────────────────────────────────────────
     mode_label = "Rebalance" if is_rebalance else "Initial Portfolio"
     lines = [
         f"# S&P 500 Paper Portfolio — {trade_date} ({mode_label})",
         f"**Starting capital:** ${capital:,.0f}  ",
-        f"**Total deployed:** ${total:,.0f}  ",
+        f"**Total deployed:** ${total:,.0f} ({(total / capital * 100) if capital else 0:.1f}%)  ",
+        f"**Cash (uninvested):** ${cash:,.0f} ({cash_pct:.1f}%)  ",
         f"**Positions:** {len([a for a in allocations if a.get('action') != 'EXITED'])}",
         "",
     ]
@@ -305,6 +322,7 @@ def run(
     return {
         "allocations": allocations,
         "total": total,
+        "cash": round(cash, 2),
         "report_md": "\n".join(lines),
         "starting_value": capital,
     }

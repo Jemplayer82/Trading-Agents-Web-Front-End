@@ -394,21 +394,33 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
         log.exception("Price refresh failed for scan %s: %s", scan_id, exc)
         return {"error": str(exc)}
 
-    current_value = 0.0
+    # Basis = the capital this scan started with (100k for week 1, the prior
+    # week's value for a rebalance). Anything not deployed is held as cash.
+    basis = float(scan.get("starting_value") or 100_000)
+
+    positions_value = 0.0
+    deployed = 0.0
     signal_flips: list[str] = []
     for a in portfolio:
+        # Skip closed/zero positions — they hold no capital.
+        if a.get("action") == "EXITED" or (a.get("dollar_amount") or 0) <= 0:
+            continue
         t = a["ticker"]
+        amount = a.get("dollar_amount", 0)
+        deployed += amount
         cp = current_prices.get(t) or a.get("entry_price") or 0
         ep = a.get("entry_price") or cp
-        pos_value = (cp / ep) * a.get("dollar_amount", 0) if ep and ep > 0 else a.get("dollar_amount", 0)
-        current_value += pos_value
+        pos_value = (cp / ep) * amount if ep and ep > 0 else amount
+        positions_value += pos_value
 
         quick = db.get_spy_quick_result(scan_id, t)
         if quick and quick.get("signal") and a.get("signal"):
             if quick["signal"].upper() != a["signal"].upper():
                 signal_flips.append("{}: was {} at entry, now {}".format(t, a["signal"], quick["signal"]))
 
-    return_pct = ((current_value - 100_000) / 100_000) * 100
+    cash = max(0.0, basis - deployed)
+    current_value = positions_value + cash
+    return_pct = ((current_value - basis) / basis) * 100 if basis else 0.0
     rebalance_notes = (
         "Signal flips detected:\n" + "\n".join("- " + f for f in signal_flips)
     ) if signal_flips else ""
@@ -416,6 +428,9 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
     db.update_spy_scan_prices(scan_id=scan_id, current_value=current_value, rebalance_notes=rebalance_notes)
     return {
         "current_value": round(current_value, 2),
+        "positions_value": round(positions_value, 2),
+        "cash": round(cash, 2),
+        "deployed": round(deployed, 2),
         "return_pct": round(return_pct, 2),
         "rebalance_notes": rebalance_notes,
     }

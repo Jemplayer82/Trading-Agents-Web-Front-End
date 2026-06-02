@@ -48,7 +48,32 @@ document.addEventListener("DOMContentLoaded", async () => {
       rt.textContent = hidden ? "hide" : "show";
     });
   }
+  // Cross-tab links (S&P 500 / Portfolio Scan) ask us to open an analysis.
+  window.addEventListener("load-analysis", (ev) => {
+    if (ev.detail != null) loadHistoryItem(ev.detail);
+  });
 });
+
+// Fetch + render the company name and website link for the loaded analysis.
+async function showCompanyHeader(ticker) {
+  const el = $("decision-company");
+  if (!el) return;
+  el.innerHTML = "";
+  if (!ticker) return;
+  try {
+    const r = await fetch(`/api/ticker-info/${encodeURIComponent(ticker)}`);
+    if (!r.ok) return;
+    const info = await r.json();
+    const name = info.name || ticker;
+    const site = info.website;
+    let html = `<strong style="color:var(--text);">${escapeHtml(name)}</strong>`;
+    if (site) {
+      const label = site.replace(/^https?:\/\//, "").replace(/\/$/, "");
+      html += ` · <a href="${escapeHtml(site)}" target="_blank" rel="noopener">${escapeHtml(label)} ↗</a>`;
+    }
+    el.innerHTML = html;
+  } catch (e) { /* non-fatal */ }
+}
 
 async function loadProviders() {
   const resp = await fetch("/api/providers");
@@ -239,6 +264,7 @@ async function loadHistoryItem(id) {
   if (a.processed_signal || a.final_decision) {
     showDecision(a.processed_signal, a.final_decision, `${a.ticker} • ${a.trade_date} • ${formatTimestamp(a.created_at)}`);
   }
+  showCompanyHeader(a.ticker);
   setupQaForAnalysis(a);
   loadChartForAnalysis(a);
   setStatus("done", `loaded #${a.id}`);
@@ -373,6 +399,7 @@ function handleFrame(frame) {
           trade_date: (lastRunMeta && lastRunMeta.trade_date) || "",
         };
         activeHistoryId = frame.analysis_id;
+        showCompanyHeader(a.ticker);
         setupQaForAnalysis(a);
         loadChartForAnalysis(a);
       }
