@@ -307,34 +307,61 @@ def refresh_spy_prices(scan_id: int) -> dict[str, Any]:
 # ---------- Live Schwab account (read-only, via Schwab MCP) ----------
 
 def _parse_schwab_account(accounts: list[dict[str, Any]] | None) -> dict[str, Any] | None:
-    """Reduce a Schwab getAccounts payload to positions + balances."""
+    """Aggregate a Schwab getAccounts payload (possibly several accounts) into a
+    single combined view: positions summed by symbol, plus total cash + value.
+
+    Balance fields vary by account: currentBalances often omits
+    liquidationValue/cashBalance, so we fall back to equity / initialBalances.
+    """
     if not accounts:
         return None
-    acct = accounts[0]
-    sec = acct.get("securitiesAccount") or acct
+
+    agg: dict[str, dict[str, Any]] = {}
+    cash = 0.0
+    total_value = 0.0
+    for a in accounts:
+        sec = a.get("securitiesAccount") or a
+        for p in sec.get("positions") or []:
+            instr = p.get("instrument") or {}
+            sym = instr.get("symbol")
+            qty = float(p.get("longQuantity") or 0) - float(p.get("shortQuantity") or 0)
+            if not sym or qty == 0:
+                continue
+            e = agg.setdefault(sym, {"symbol": sym, "shares": 0.0, "market_value": 0.0, "_cost": 0.0})
+            e["shares"] += qty
+            e["market_value"] += float(p.get("marketValue") or 0)
+            e["_cost"] += float(p.get("averagePrice") or 0) * qty
+
+        cur = sec.get("currentBalances") or {}
+        init = sec.get("initialBalances") or {}
+        tv = cur.get("liquidationValue")
+        if tv is None:
+            tv = cur.get("equity")
+        if tv is None:
+            tv = init.get("liquidationValue") or init.get("accountValue") or 0
+        total_value += float(tv or 0)
+        c = cur.get("cashBalance")
+        if c is None:
+            c = init.get("cashBalance")
+        if c is None:
+            c = init.get("totalCash") or 0
+        cash += float(c or 0)
+
     positions = []
-    for p in sec.get("positions") or []:
-        instr = p.get("instrument") or {}
-        sym = instr.get("symbol")
-        qty = float(p.get("longQuantity") or 0) - float(p.get("shortQuantity") or 0)
-        if not sym or qty == 0:
-            continue
+    for e in agg.values():
+        shares = e["shares"]
         positions.append({
-            "symbol": sym,
-            "shares": qty,
-            "market_value": float(p.get("marketValue") or 0),
-            "average_price": float(p.get("averagePrice") or 0),
+            "symbol": e["symbol"],
+            "shares": round(shares, 4),
+            "market_value": round(e["market_value"], 2),
+            "average_price": round(e["_cost"] / shares, 2) if shares else 0,
         })
     positions.sort(key=lambda x: -x["market_value"])
-    bal = sec.get("currentBalances") or {}
-    cash = bal.get("cashBalance")
-    if cash is None:
-        cash = bal.get("totalCash") or bal.get("cashAvailableForTrading") or 0
     return {
         "positions": positions,
-        "cash": float(cash or 0),
-        "liquidation_value": float(bal.get("liquidationValue") or 0),
-        "account": sec.get("accountNumber") or (accounts[0].get("accountNumber")),
+        "cash": round(cash, 2),
+        "liquidation_value": round(total_value, 2),
+        "num_accounts": len(accounts),
     }
 
 
