@@ -44,7 +44,11 @@ async function loadSpyHistory() {
       const li = document.createElement("li");
       li.dataset.id = s.id;
       if (String(s.id) === String(activeSpyId)) li.classList.add("active");
-      const statusClass = s.status === "completed" ? "BUY" : (s.status.startsWith("running") ? "HOLD" : "SELL");
+      const running = s.status && s.status.startsWith("running");
+      const stopping = running && s.cancel_requested;
+      const statusLabel = stopping ? "STOPPING" : (s.status || "—").toUpperCase();
+      const statusClass = stopping ? "HOLD"
+        : (s.status === "completed" ? "BUY" : (running ? "HOLD" : "SELL"));
       const basis = s.starting_value || 100000;
       const returnBadge = s.current_value != null
         ? " · " + fmtReturn(s.current_value, basis)
@@ -56,12 +60,17 @@ async function loadSpyHistory() {
         "<span class=\"h-main\">" +
           "<span class=\"h-top\">" +
             "<span class=\"h-tk\">#" + s.id + " · " + escHtml(s.trade_date) + typeTag + "</span>" +
-            "<span class=\"h-sig " + statusClass + "\">" + (s.status || "—").toUpperCase() + "</span>" +
+            "<span class=\"h-sig " + statusClass + "\">" + statusLabel + "</span>" +
           "</span>" +
           "<span class=\"h-ts\">" + fmtTs(s.created_at) + returnBadge + "</span>" +
-        "</span>"
+        "</span>" +
+        "<button class=\"h-del\" title=\"Delete this scan\" aria-label=\"Delete\">×</button>"
       );
       li.querySelector(".h-main").addEventListener("click", () => loadSpyScan(s.id));
+      li.querySelector(".h-del").addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        deleteSpyScan(s.id);
+      });
       ul.appendChild(li);
     });
 
@@ -132,6 +141,7 @@ function updateStopButton(scan) {
 
 async function triggerSpyStop() {
   if (!activeSpyId) return;
+  if (!confirm("Stop scan #" + activeSpyId + "?\n\nIn-progress deep dives are full analyses and will finish first (this can take a few minutes). Partial results are kept.")) return;
   const btn = $$spy("btn-spy-stop");
   const status = $$spy("spy-scan-status");
   if (btn) { btn.disabled = true; btn.textContent = "Stopping…"; }
@@ -140,10 +150,28 @@ async function triggerSpyStop() {
     const r = await fetch("/api/spy-scans/" + activeSpyId + "/cancel", { method: "POST" });
     const data = await r.json();
     if (data.error) throw new Error(data.error);
-    if (status) status.textContent = "Cancellation requested — finishing in-flight calls…";
+    if (status) status.textContent = "Cancellation requested — winding down in-progress deep dives…";
   } catch (e) {
     if (status) status.textContent = "Cancel failed: " + e;
     if (btn) { btn.disabled = false; btn.textContent = "Stop Scan"; }
+  }
+}
+
+async function deleteSpyScan(id) {
+  if (!confirm("Delete S&P 500 scan #" + id + "?\n\nThis removes the scan, its quick-scan results, and its portfolio. The deep-dive analyses it created stay in the Run Analysis history.")) return;
+  try {
+    const r = await fetch("/api/spy-scans/" + id, { method: "DELETE" });
+    if (!r.ok) { alert("Delete failed (HTTP " + r.status + ")."); return; }
+    if (String(activeSpyId) === String(id)) {
+      activeSpyId = null;
+      stopSpyPoll();
+      const main = $$spy("spy-main");
+      if (main) main.innerHTML = "";
+      updateStopButton(null);
+    }
+    await loadSpyHistory();
+  } catch (e) {
+    alert("Delete failed: " + e);
   }
 }
 
@@ -157,11 +185,18 @@ function renderSpyScan(scan) {
   if (!main) return;
 
   // Status banner for terminal/cancel states
+  const running = scan.status && scan.status.startsWith("running");
   let bannerHtml = "";
   if (scan.status === "cancelled") {
-    bannerHtml = "<div class=\"panel\"><p style=\"color:var(--accent-yellow);\">Scan #" + scan.id + " was cancelled. Partial results below.</p></div>";
-  } else if (scan.cancel_requested && scan.status && scan.status.startsWith("running")) {
-    bannerHtml = "<div class=\"panel\"><p style=\"color:var(--accent-yellow);\">Cancellation requested — finishing in-flight calls…</p></div>";
+    bannerHtml = "<div class=\"panel\"><p style=\"color:var(--accent-yellow);\"><strong>Scan #" + scan.id + " was stopped.</strong> Partial results below.</p></div>";
+  } else if (scan.cancel_requested && running) {
+    bannerHtml = (
+      "<div class=\"panel\"><p style=\"color:var(--accent-yellow);\">" +
+        "<strong>Stopping scan #" + scan.id + "…</strong> " +
+        "In-progress deep dives are finishing (each is a full analysis and can take a few minutes); " +
+        "remaining tickers are being skipped. Partial results are kept." +
+      "</p></div>"
+    );
   }
 
   // Progress section (only while running)
@@ -334,7 +369,13 @@ function renderSpyScan(scan) {
       "</div>"
     );
   } else if (scan.error) {
-    reportHtml = "<div class=\"panel\"><p style=\"color:var(--accent-red);\">" + escHtml(scan.error) + "</p></div>";
+    reportHtml = (
+      "<div class=\"panel\">" +
+        "<div class=\"panel-title\" style=\"color:var(--accent-red);\">[ Scan Failed ]</div>" +
+        "<p style=\"color:var(--accent-red);white-space:pre-wrap;\">" + escHtml(scan.error) + "</p>" +
+        "<p class=\"dim\" style=\"font-size:12px;margin-top:8px;\">Any partial results above are still available. You can start a new scan from the top of this tab.</p>" +
+      "</div>"
+    );
   }
 
   main.innerHTML = bannerHtml + progressHtml + perfHtml + portfolioHtml + tableHtml + reportHtml;
