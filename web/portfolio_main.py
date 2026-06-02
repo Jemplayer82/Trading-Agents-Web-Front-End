@@ -16,6 +16,7 @@ from typing import Any, Iterator
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.dataflows import schwab_mcp
 from tradingagents.graph.portfolio_graph import run_portfolio_scan
 
 from . import auth_app
@@ -295,12 +296,112 @@ def refresh_spy_prices_latest() -> dict[str, Any]:
     scan = db.latest_spy_scan()
     if not scan:
         raise HTTPException(status_code=404, detail="no scans found")
+    return spy_scanner.refresh_portfolio_prices(int(scan["id"]))
 
 
 @app.post("/api/spy-scans/{scan_id}/refresh-prices")
 def refresh_spy_prices(scan_id: int) -> dict[str, Any]:
     return spy_scanner.refresh_portfolio_prices(scan_id)
-    return spy_scanner.refresh_portfolio_prices(int(scan["id"]))
+
+
+# ---------- Live Schwab account (read-only, via Schwab MCP) ----------
+
+def _parse_schwab_account(accounts: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+    """Reduce a Schwab getAccounts payload to positions + balances."""
+    if not accounts:
+        return None
+    acct = accounts[0]
+    sec = acct.get("securitiesAccount") or acct
+    positions = []
+    for p in sec.get("positions") or []:
+        instr = p.get("instrument") or {}
+        sym = instr.get("symbol")
+        qty = float(p.get("longQuantity") or 0) - float(p.get("shortQuantity") or 0)
+        if not sym or qty == 0:
+            continue
+        positions.append({
+            "symbol": sym,
+            "shares": qty,
+            "market_value": float(p.get("marketValue") or 0),
+            "average_price": float(p.get("averagePrice") or 0),
+        })
+    positions.sort(key=lambda x: -x["market_value"])
+    bal = sec.get("currentBalances") or {}
+    cash = bal.get("cashBalance")
+    if cash is None:
+        cash = bal.get("totalCash") or bal.get("cashAvailableForTrading") or 0
+    return {
+        "positions": positions,
+        "cash": float(cash or 0),
+        "liquidation_value": float(bal.get("liquidationValue") or 0),
+        "account": sec.get("accountNumber") or (accounts[0].get("accountNumber")),
+    }
+
+
+@app.get("/api/spy-account")
+def spy_account() -> dict[str, Any]:
+    """Live Schwab holdings + balances via the Schwab MCP server (read-only)."""
+    try:
+        parsed = _parse_schwab_account(schwab_mcp.get_accounts(fields="positions"))
+    except Exception:
+        log.exception("[spy-account] Schwab MCP read failed")
+        parsed = None
+    if not parsed:
+        return {"connected": False}
+    return {"connected": True, **parsed}
+
+
+@app.get("/api/spy-account/compare")
+def spy_account_compare() -> dict[str, Any]:
+    """Drift between the latest completed paper SPY portfolio and the real account."""
+    try:
+        parsed = _parse_schwab_account(schwab_mcp.get_accounts(fields="positions"))
+    except Exception:
+        log.exception("[spy-account/compare] Schwab MCP read failed")
+        parsed = None
+    if not parsed:
+        return {"connected": False}
+
+    real = {p["symbol"]: p for p in parsed["positions"]}
+    scan = db.get_latest_completed_spy_scan()
+    paper: dict[str, dict[str, Any]] = {}
+    paper_value = 0.0
+    if scan:
+        for a in scan.get("portfolio_json") or []:
+            if a.get("action") == "EXITED":
+                continue
+            shares = a.get("shares") or 0
+            if shares <= 0:
+                continue
+            val = a.get("current_value")
+            if val is None:
+                val = shares * (a.get("current_price") or a.get("entry_price") or 0)
+            paper[a["ticker"]] = {"shares": shares, "value": float(val)}
+            paper_value += float(val)
+
+    rows = []
+    for sym in sorted(set(real) | set(paper)):
+        pp = paper.get(sym)
+        rr = real.get(sym)
+        rows.append({
+            "ticker": sym,
+            "paper_shares": pp["shares"] if pp else 0,
+            "paper_value": round(pp["value"], 2) if pp else 0,
+            "real_shares": rr["shares"] if rr else 0,
+            "real_value": round(rr["market_value"], 2) if rr else 0,
+            "in_paper": pp is not None,
+            "in_real": rr is not None,
+        })
+
+    return {
+        "connected": True,
+        "paper_scan_id": scan.get("id") if scan else None,
+        "paper_value": round(paper_value, 2),
+        "real_positions_value": round(sum(p["market_value"] for p in parsed["positions"]), 2),
+        "real_cash": round(parsed["cash"], 2),
+        "real_total": round(parsed["liquidation_value"], 2),
+        "rows": rows,
+    }
 
 
 def _run_spy_scan_thread(scan_id: int, trade_date: str) -> None:

@@ -12,6 +12,7 @@ from typing import Any
 import yfinance as yf
 from langchain_openai import ChatOpenAI
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.dataflows import schwab_mcp
 from tradingagents.graph.portfolio_graph import run_single_ticker
 
 from . import db
@@ -377,22 +378,39 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
         return {"error": "no portfolio yet"}
 
     tickers = [a["ticker"] for a in portfolio]
-    try:
-        prices_df = yf.download(tickers, period="1d", auto_adjust=True, progress=False)
-        if hasattr(prices_df.columns, "levels"):
-            current_prices = {
-                t: float(prices_df["Close"][t].dropna().iloc[-1])
-                for t in tickers
-                if t in prices_df["Close"] and not prices_df["Close"][t].dropna().empty
-            }
-        else:
-            current_prices = (
-                {tickers[0]: float(prices_df["Close"].dropna().iloc[-1])}
-                if tickers and not prices_df.empty else {}
-            )
-    except Exception as exc:
-        log.exception("Price refresh failed for scan %s: %s", scan_id, exc)
-        return {"error": str(exc)}
+
+    # Prefer real-time Schwab quotes (one bulk call); fall back to yfinance.
+    current_prices: dict[str, float] = {}
+    if schwab_mcp.market_data_enabled():
+        try:
+            quotes = schwab_mcp.get_quotes(tickers)
+            if quotes:
+                for t in tickers:
+                    p = schwab_mcp.quote_price(quotes.get(t, {}))
+                    if p:
+                        current_prices[t] = p
+                if current_prices:
+                    log.info("[spy %s] priced %d/%d via Schwab", scan_id, len(current_prices), len(tickers))
+        except Exception:
+            log.exception("[spy %s] Schwab quotes failed; using yfinance", scan_id)
+
+    if not current_prices:
+        try:
+            prices_df = yf.download(tickers, period="1d", auto_adjust=True, progress=False)
+            if hasattr(prices_df.columns, "levels"):
+                current_prices = {
+                    t: float(prices_df["Close"][t].dropna().iloc[-1])
+                    for t in tickers
+                    if t in prices_df["Close"] and not prices_df["Close"][t].dropna().empty
+                }
+            else:
+                current_prices = (
+                    {tickers[0]: float(prices_df["Close"].dropna().iloc[-1])}
+                    if tickers and not prices_df.empty else {}
+                )
+        except Exception as exc:
+            log.exception("Price refresh failed for scan %s: %s", scan_id, exc)
+            return {"error": str(exc)}
 
     # Basis = the capital this scan started with (100k for week 1, the prior
     # week's value for a rebalance). Anything not deployed is held as cash.

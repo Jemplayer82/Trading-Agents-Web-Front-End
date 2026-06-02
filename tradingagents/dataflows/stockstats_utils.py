@@ -32,6 +32,36 @@ def yf_retry(func, max_retries=3, base_delay=2.0):
                 raise
 
 
+def _schwab_ohlcv(symbol: str, start_str: str, end_str: str) -> pd.DataFrame | None:
+    """Fetch ~5y daily OHLCV from the Schwab MCP server, or None to fall back.
+
+    Returns a DataFrame with Date/Open/High/Low/Close/Volume columns so it
+    drops straight into the existing cache + stockstats pipeline.
+    """
+    try:
+        from . import schwab_mcp
+        if not schwab_mcp.market_data_enabled():
+            return None
+        payload = schwab_mcp.get_price_history(
+            symbol, period_type="year", period=5, frequency_type="daily", frequency=1
+        )
+        candles = (payload or {}).get("candles") or []
+        if not candles:
+            return None
+        df = pd.DataFrame(candles)
+        df["Date"] = pd.to_datetime(df["datetime"], unit="ms")
+        df = df.rename(columns={
+            "open": "Open", "high": "High", "low": "Low",
+            "close": "Close", "volume": "Volume",
+        })
+        cols = [c for c in ["Date", "Open", "High", "Low", "Close", "Volume"] if c in df.columns]
+        logger.info("Loaded %d Schwab candles for %s", len(df), symbol)
+        return df[cols]
+    except Exception:
+        logger.warning("Schwab price history failed for %s; using yfinance", symbol, exc_info=True)
+        return None
+
+
 def _clean_dataframe(data: pd.DataFrame) -> pd.DataFrame:
     """Normalize a stock DataFrame for stockstats: parse dates, drop invalid rows, fill price gaps."""
     # Older cached CSVs and some yfinance outputs name the date column
@@ -84,15 +114,18 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     if os.path.exists(data_file):
         data = pd.read_csv(data_file, on_bad_lines="skip", encoding="utf-8")
     else:
-        data = yf_retry(lambda: yf.download(
-            symbol,
-            start=start_str,
-            end=end_str,
-            multi_level_index=False,
-            progress=False,
-            auto_adjust=True,
-        ))
-        data = data.reset_index()
+        # Prefer Schwab price history; fall back to yfinance on empty/error.
+        data = _schwab_ohlcv(symbol, start_str, end_str)
+        if data is None or data.empty:
+            data = yf_retry(lambda: yf.download(
+                symbol,
+                start=start_str,
+                end=end_str,
+                multi_level_index=False,
+                progress=False,
+                auto_adjust=True,
+            ))
+            data = data.reset_index()
         data.to_csv(data_file, index=False, encoding="utf-8")
 
     data = _clean_dataframe(data)

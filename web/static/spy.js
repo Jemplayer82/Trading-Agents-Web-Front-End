@@ -499,11 +499,92 @@ document.addEventListener("tab-shown", (ev) => {
   }
 });
 
+// ===== Live Schwab account (read-only, via Schwab MCP) =====
+
+async function loadSpyAccount() {
+  const panel = $$spy("spy-account-panel");
+  if (!panel) return;
+  panel.innerHTML = "<div class=\"panel\"><p class=\"dim\">Loading Schwab account…</p></div>";
+  let acct, cmp;
+  try {
+    const [ar, cr] = await Promise.all([
+      fetch("/api/spy-account"),
+      fetch("/api/spy-account/compare"),
+    ]);
+    acct = await ar.json();
+    cmp = await cr.json();
+  } catch (e) {
+    panel.innerHTML = "<div class=\"panel\"><p style=\"color:var(--accent-red);\">Schwab sync failed: " + escHtml(String(e)) + "</p></div>";
+    return;
+  }
+  if (!acct || !acct.connected) {
+    panel.innerHTML = "<div class=\"panel\"><div class=\"panel-title\">[ Live Schwab Account ]</div>" +
+      "<p class=\"dim\">Schwab MCP not reachable / no account. Market data + paper portfolio are unaffected.</p></div>";
+    return;
+  }
+
+  // Holdings table
+  const posRows = (acct.positions || []).map((p) =>
+    "<tr>" +
+      "<td><strong style=\"color:var(--accent-cyan);\">" + escHtml(p.symbol) + "</strong></td>" +
+      "<td>" + p.shares + "</td>" +
+      "<td>$" + (p.average_price || 0).toFixed(2) + "</td>" +
+      "<td style=\"font-weight:600;\">$" + Math.round(p.market_value || 0).toLocaleString() + "</td>" +
+    "</tr>"
+  ).join("");
+  const acctHtml =
+    "<div class=\"panel\">" +
+      "<div class=\"panel-title\">[ Live Schwab Account ]</div>" +
+      "<div style=\"display:flex;gap:24px;align-items:baseline;flex-wrap:wrap;margin-bottom:8px;\">" +
+        "<span>Positions: <strong>$" + Math.round(acct.positions.reduce((s,p)=>s+(p.market_value||0),0)).toLocaleString() + "</strong></span>" +
+        "<span>Cash: <strong>$" + Math.round(acct.cash || 0).toLocaleString() + "</strong></span>" +
+        "<span>Total value: <strong style=\"color:var(--accent-cyan);\">$" + Math.round(acct.liquidation_value || 0).toLocaleString() + "</strong></span>" +
+      "</div>" +
+      "<div style=\"overflow-x:auto;\"><table class=\"spy-table\">" +
+        "<thead><tr><th>Ticker</th><th>Shares</th><th>Avg $</th><th>Market Value</th></tr></thead>" +
+        "<tbody>" + (posRows || "<tr><td colspan=\"4\" class=\"dim\">No positions.</td></tr>") + "</tbody>" +
+      "</table></div>" +
+    "</div>";
+
+  // Drift vs paper
+  let driftHtml = "";
+  if (cmp && cmp.connected && cmp.rows) {
+    const rows = cmp.rows.map((r) => {
+      const onlyPaper = r.in_paper && !r.in_real;
+      const onlyReal = r.in_real && !r.in_paper;
+      const tagCol = onlyPaper ? "var(--accent-yellow)" : (onlyReal ? "var(--accent-magenta)" : "var(--dim)");
+      const tag = onlyPaper ? "paper only" : (onlyReal ? "real only" : "both");
+      return "<tr>" +
+        "<td><strong style=\"color:var(--accent-cyan);\">" + escHtml(r.ticker) + "</strong></td>" +
+        "<td>" + r.paper_shares + " ($" + Math.round(r.paper_value).toLocaleString() + ")</td>" +
+        "<td>" + r.real_shares + " ($" + Math.round(r.real_value).toLocaleString() + ")</td>" +
+        "<td style=\"font-size:10px;font-weight:700;text-transform:uppercase;color:" + tagCol + ";\">" + tag + "</td>" +
+      "</tr>";
+    }).join("");
+    driftHtml =
+      "<div class=\"panel\">" +
+        "<div class=\"panel-title\">[ Drift vs Paper Portfolio" + (cmp.paper_scan_id ? " — scan #" + cmp.paper_scan_id : "") + " ]</div>" +
+        "<div style=\"display:flex;gap:24px;align-items:baseline;flex-wrap:wrap;margin-bottom:8px;font-size:12px;\" class=\"dim\">" +
+          "<span>Paper value: $" + Math.round(cmp.paper_value || 0).toLocaleString() + "</span>" +
+          "<span>Real total: $" + Math.round(cmp.real_total || 0).toLocaleString() + "</span>" +
+        "</div>" +
+        "<div style=\"overflow-x:auto;\"><table class=\"spy-table\">" +
+          "<thead><tr><th>Ticker</th><th>Paper (shares/$)</th><th>Real (shares/$)</th><th>Where</th></tr></thead>" +
+          "<tbody>" + (rows || "<tr><td colspan=\"4\" class=\"dim\">No positions to compare.</td></tr>") + "</tbody>" +
+        "</table></div>" +
+      "</div>";
+  }
+
+  panel.innerHTML = acctHtml + driftHtml;
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   const btn = $$spy("btn-spy-scan");
   if (btn) btn.addEventListener("click", triggerSpyScan);
   const stopBtn = $$spy("btn-spy-stop");
   if (stopBtn) stopBtn.addEventListener("click", triggerSpyStop);
+  const acctBtn = $$spy("btn-spy-account");
+  if (acctBtn) acctBtn.addEventListener("click", loadSpyAccount);
 });
 
 // Auto-refresh history every 15s while tab is visible
