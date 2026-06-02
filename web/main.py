@@ -296,10 +296,23 @@ def ticker_info(ticker: str) -> dict[str, Any]:
 
     name = t
     website = ""
+
+    # Prefer the company name from a real-time Schwab quote (reference.description);
+    # it's fast and avoids a yfinance .info call. yfinance still supplies the website.
+    try:
+        from tradingagents.dataflows import schwab_mcp
+        quotes = schwab_mcp.get_quotes([t]) if schwab_mcp.market_data_enabled() else None
+        desc = ((quotes or {}).get(t, {}).get("reference") or {}).get("description")
+        if isinstance(desc, str) and desc.strip():
+            name = desc.strip().title()
+    except Exception:
+        log.warning("schwab ticker name lookup failed for %s", t)
+
     try:
         import yfinance as yf  # lazy — keeps app startup light
         info = yf.Ticker(t).info or {}
-        name = info.get("longName") or info.get("shortName") or t
+        if name == t:
+            name = info.get("longName") or info.get("shortName") or t
         site = info.get("website") or ""
         if isinstance(site, str) and site.startswith(("http://", "https://")):
             website = site
