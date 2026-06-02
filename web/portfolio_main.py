@@ -287,16 +287,19 @@ def cancel_spy_scan(scan_id: int) -> dict[str, Any]:
     return {"status": "cancelling", "cancelling": True}
 
 
-@app.post("/api/spy-scans/{scan_id}/refresh-prices")
-def refresh_spy_prices(scan_id: int) -> dict[str, Any]:
-    return spy_scanner.refresh_portfolio_prices(scan_id)
-
-
+# NOTE: /latest/... must come BEFORE /{scan_id}/... — FastAPI matches routes
+# in declaration order and would greedily bind "latest" as an int scan_id
+# (returning 422) if the parameterised route is declared first.
 @app.post("/api/spy-scans/latest/refresh-prices")
 def refresh_spy_prices_latest() -> dict[str, Any]:
     scan = db.latest_spy_scan()
     if not scan:
         raise HTTPException(status_code=404, detail="no scans found")
+
+
+@app.post("/api/spy-scans/{scan_id}/refresh-prices")
+def refresh_spy_prices(scan_id: int) -> dict[str, Any]:
+    return spy_scanner.refresh_portfolio_prices(scan_id)
     return spy_scanner.refresh_portfolio_prices(int(scan["id"]))
 
 
