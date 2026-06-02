@@ -702,12 +702,24 @@ def fail_spy_scan(scan_id: int, error: str) -> None:
         )
 
 
-def update_spy_scan_prices(scan_id: int, current_value: float, rebalance_notes: str) -> None:
+def update_spy_scan_prices(
+    scan_id: int,
+    current_value: float,
+    rebalance_notes: str,
+    portfolio_json: list[dict[str, Any]] | None = None,
+) -> None:
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     with connect() as conn:
-        conn.execute(
-            "UPDATE spy_scans SET current_value = ?, last_price_check = ?, rebalance_notes = ? WHERE id = ?",
-            (current_value, datetime.utcnow().isoformat(timespec="seconds") + "Z", rebalance_notes, scan_id),
-        )
+        if portfolio_json is not None:
+            conn.execute(
+                "UPDATE spy_scans SET current_value = ?, last_price_check = ?, rebalance_notes = ?, portfolio_json = ? WHERE id = ?",
+                (current_value, now, rebalance_notes, json.dumps(_serialize(portfolio_json)), scan_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE spy_scans SET current_value = ?, last_price_check = ?, rebalance_notes = ? WHERE id = ?",
+                (current_value, now, rebalance_notes, scan_id),
+            )
 
 
 def upsert_spy_quick_result(

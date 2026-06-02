@@ -26,6 +26,22 @@ function fmtReturn(val, basis) {
   return "<span style=\"color:" + color + ";font-weight:700;\">" + sign + ret.toFixed(2) + "%</span>";
 }
 
+// Colored percent change: green for >= 0, red (with leading -) for < 0.
+function pctCell(pct) {
+  if (pct == null || isNaN(pct)) return "<span class=\"dim\">—</span>";
+  const up = pct >= 0;
+  const color = up ? "var(--accent-green)" : "var(--accent-red)";
+  const sign = up ? "+" : "";
+  return "<span style=\"color:" + color + ";font-weight:700;\">" + sign + pct.toFixed(2) + "%</span>";
+}
+
+// Whole shares for a position, with legacy fallback for pre-whole-share scans.
+function sharesOf(a) {
+  if (a.shares != null) return a.shares;
+  const ep = a.entry_price || 0;
+  return ep > 0 ? Math.floor((a.dollar_amount || 0) / ep) : 0;
+}
+
 async function loadSpyHistory() {
   const ul = $$spy("spy-history");
   if (!ul) return;
@@ -246,8 +262,8 @@ function renderSpyScan(scan) {
     const cv = scan.current_value;
     const isRebalance = scan.previous_scan_id != null;
     const deployed = scan.portfolio_json
-      .filter((a) => a.action !== "EXITED" && (a.dollar_amount || 0) > 0)
-      .reduce((s, a) => s + (a.dollar_amount || 0), 0);
+      .filter((a) => a.action !== "EXITED" && sharesOf(a) > 0)
+      .reduce((s, a) => s + (a.cost_basis != null ? a.cost_basis : sharesOf(a) * (a.entry_price || 0)), 0);
     const cash = Math.max(0, basis - deployed);
     const cashSpan = "<span>Deployed: <strong>$" + Math.round(deployed).toLocaleString() +
       "</strong> · Cash: <strong>$" + Math.round(cash).toLocaleString() +
@@ -327,30 +343,56 @@ function renderSpyScan(scan) {
       NEW: "var(--accent-cyan)", HOLD: "var(--dim)", ADDED: "var(--accent-green)",
       TRIMMED: "var(--accent-yellow)", EXITED: "var(--accent-red)",
     };
-    // Active positions (non-exited) sorted by $ amount, then exits at the bottom
-    const active = scan.portfolio_json.filter(a => a.action !== "EXITED" && (a.dollar_amount || 0) > 0);
-    const exited = scan.portfolio_json.filter(a => a.action === "EXITED" || (a.dollar_amount || 0) === 0);
+    // Active positions (whole shares) sorted by cost basis, exits at the bottom
+    const active = scan.portfolio_json.filter(a => a.action !== "EXITED" && sharesOf(a) > 0);
+    const exited = scan.portfolio_json.filter(a => a.action === "EXITED" || sharesOf(a) === 0);
+    const costOf = (a) => (a.cost_basis != null ? a.cost_basis : sharesOf(a) * (a.entry_price || 0));
+    const valueOf = (a) => (a.current_value != null
+      ? a.current_value
+      : sharesOf(a) * (a.current_price || a.entry_price || 0));
     const allocs = [
-      ...active.sort((a, b) => (b.dollar_amount || 0) - (a.dollar_amount || 0)),
+      ...active.sort((a, b) => costOf(b) - costOf(a)),
       ...exited,
     ];
-    const total = active.reduce((s, a) => s + (a.dollar_amount || 0), 0);
+    const deployed = active.reduce((s, a) => s + costOf(a), 0);
+    const positionsValue = active.reduce((s, a) => s + valueOf(a), 0);
     const basis = scan.starting_value || 100000;
+    const cash = Math.max(0, basis - deployed);
+    const curTotal = scan.current_value != null ? scan.current_value : (positionsValue + cash);
+    const totalPct = basis > 0 ? ((curTotal - basis) / basis) * 100 : 0;
     const isRebalance = scan.previous_scan_id != null;
 
     const rows = allocs.map((a) => {
       const sig = (a.signal || "—").toUpperCase();
       const act = (a.action || "NEW").toUpperCase();
       const actCol = actionColor[act] || "var(--dim)";
-      const dimRow = act === "EXITED" ? " style=\"opacity:0.5;\"" : "";
+      if (act === "EXITED") {
+        return (
+          "<tr style=\"opacity:0.5;\">" +
+            "<td>" + tickerCell(a.ticker) + "</td>" +
+            "<td><span style=\"font-size:10px;font-weight:700;text-transform:uppercase;color:" + actCol + ";\">EXITED</span></td>" +
+            "<td><span class=\"badge " + sig + "\">" + sig + "</span></td>" +
+            "<td class=\"dim\">—</td><td class=\"dim\">—</td><td class=\"dim\">—</td><td class=\"dim\">—</td><td class=\"dim\">—</td>" +
+            "<td style=\"color:var(--dim);font-size:11px;\">" + escHtml((a.rationale || "").slice(0, 100)) + "</td>" +
+          "</tr>"
+        );
+      }
+      const shares = sharesOf(a);
+      const buy = a.entry_price || 0;
+      const cur = a.current_price;
+      const pct = (cur != null && buy > 0) ? ((cur - buy) / buy) * 100 : null;
+      const value = valueOf(a);
       return (
-        "<tr" + dimRow + ">" +
+        "<tr>" +
           "<td>" + tickerCell(a.ticker) + "</td>" +
           "<td><span style=\"font-size:10px;font-weight:700;text-transform:uppercase;color:" + actCol + ";\">" + act + "</span></td>" +
           "<td><span class=\"badge " + sig + "\">" + sig + "</span></td>" +
-          "<td>" + (act === "EXITED" ? "<span class=\"dim\">—</span>" : "$" + Math.round(a.dollar_amount || 0).toLocaleString()) + "</td>" +
-          "<td>" + (act === "EXITED" ? "<span class=\"dim\">—</span>" : (a.allocation_pct || 0).toFixed(1) + "%") + "</td>" +
-          "<td style=\"color:var(--dim);font-size:11px;\">" + escHtml((a.rationale || "").slice(0, 100)) + "</td>" +
+          "<td style=\"font-weight:600;\">" + shares + "</td>" +
+          "<td>$" + buy.toFixed(2) + "</td>" +
+          "<td>" + (cur != null ? "$" + cur.toFixed(2) : "<span class=\"dim\">—</span>") + "</td>" +
+          "<td>" + pctCell(pct) + "</td>" +
+          "<td style=\"font-weight:600;\">$" + Math.round(value).toLocaleString() + "</td>" +
+          "<td style=\"color:var(--dim);font-size:11px;\">" + escHtml((a.rationale || "").slice(0, 90)) + "</td>" +
         "</tr>"
       );
     }).join("");
@@ -364,23 +406,21 @@ function renderSpyScan(scan) {
         "<div class=\"panel-title\">[ " + titleLabel + " — " + active.length + " active positions ]</div>" +
         "<div style=\"overflow-x:auto;\">" +
           "<table class=\"spy-table\">" +
-            "<thead><tr><th>Ticker</th><th>Action</th><th>Signal</th><th>$ Amount</th><th>%</th><th>Rationale</th></tr></thead>" +
+            "<thead><tr><th>Ticker</th><th>Action</th><th>Signal</th><th>Shares</th><th>Buy $</th><th>Cur $</th><th>%</th><th>Value</th><th>Rationale</th></tr></thead>" +
             "<tbody>" + rows + "</tbody>" +
             "<tfoot>" +
-              "<tr style=\"font-weight:700;border-top:1px solid var(--panel-border);\">" +
-                "<td colspan=\"3\">TOTAL DEPLOYED</td>" +
-                "<td>$" + Math.round(total).toLocaleString() + "</td>" +
-                "<td>" + (basis > 0 ? (total / basis * 100).toFixed(1) : "0.0") + "%</td><td></td>" +
+              "<tr style=\"border-top:1px solid var(--panel-border);\">" +
+                "<td colspan=\"7\">Deployed (cost basis)</td>" +
+                "<td>$" + Math.round(deployed).toLocaleString() + "</td><td></td>" +
               "</tr>" +
               "<tr style=\"color:var(--accent-yellow);\">" +
-                "<td colspan=\"3\">CASH (uninvested)</td>" +
-                "<td>$" + Math.round(Math.max(0, basis - total)).toLocaleString() + "</td>" +
-                "<td>" + (basis > 0 ? (Math.max(0, basis - total) / basis * 100).toFixed(1) : "0.0") + "%</td><td></td>" +
+                "<td colspan=\"7\">Cash (uninvested)</td>" +
+                "<td>$" + Math.round(cash).toLocaleString() + "</td><td></td>" +
               "</tr>" +
-              "<tr style=\"font-weight:700;border-top:1px solid var(--panel-border);color:var(--dim);\">" +
-                "<td colspan=\"3\">PORTFOLIO VALUE</td>" +
-                "<td>$" + Math.round(basis).toLocaleString() + "</td>" +
-                "<td>100%</td><td></td>" +
+              "<tr style=\"font-weight:700;border-top:1px solid var(--panel-border);\">" +
+                "<td colspan=\"6\">CURRENT VALUE</td>" +
+                "<td>" + pctCell(totalPct) + "</td>" +
+                "<td>$" + Math.round(curTotal).toLocaleString() + "</td><td></td>" +
               "</tr>" +
             "</tfoot>" +
           "</table>" +

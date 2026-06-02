@@ -195,7 +195,7 @@ def main() -> None:
     )
     sched.add_job(
         job_spy_price_refresh,
-        CronTrigger(day_of_week="sun", hour=9, minute=0, timezone=TIMEZONE),
+        CronTrigger(day_of_week="mon-fri", hour="9-16", minute=0, timezone=TIMEZONE),
         id="spy_price_refresh",
         replace_existing=True,
     )
@@ -204,7 +204,7 @@ def main() -> None:
     log.info(" - morning_newsletter cron 05:00 %s", TIMEZONE)
     log.info(" - token_health       every 1h")
     log.info(" - spy_scan           cron Sat 00:00 %s", TIMEZONE)
-    log.info(" - spy_price_refresh  cron Sun 09:00 %s", TIMEZONE)
+    log.info(" - spy_price_refresh  cron hourly Mon-Fri 09:00-16:00 %s", TIMEZONE)
     try:
         sched.start()
     except (KeyboardInterrupt, SystemExit):

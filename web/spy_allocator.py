@@ -283,7 +283,28 @@ def run(
                 if prev and prev.get("entry_price"):
                     a["entry_price"] = prev["entry_price"]
 
-    total = sum(a.get("dollar_amount", 0) for a in allocations if a.get("action") != "EXITED")
+    # ── Convert dollar targets into WHOLE shares (real paper-trade fills) ─────
+    # shares = floor(target $ / entry price); the rounding remainder stays cash.
+    kept: list[dict[str, Any]] = []
+    for a in allocations:
+        if a.get("action") == "EXITED":
+            a["shares"] = 0
+            a["cost_basis"] = 0.0
+            kept.append(a)
+            continue
+        ep = float(a.get("entry_price") or 0)
+        target = float(a.get("dollar_amount") or 0)
+        shares = int(target // ep) if ep > 0 else 0
+        if shares <= 0:
+            # Can't afford a single whole share — that money stays in cash.
+            continue
+        a["shares"] = shares
+        a["cost_basis"] = round(shares * ep, 2)
+        a["allocation_pct"] = round(a["cost_basis"] / capital * 100, 2) if capital else 0.0
+        kept.append(a)
+    allocations = kept
+
+    total = sum(a.get("cost_basis", 0) for a in allocations if a.get("action") != "EXITED")
     cash = max(0.0, capital - total)
     cash_pct = (cash / capital * 100) if capital else 0.0
 
@@ -307,14 +328,16 @@ def run(
         ]
 
     lines += [
-        "| Ticker | Action | Signal | Conv. | $ Amount | % | Rationale |",
-        "|--------|--------|--------|-------|----------|---|-----------|",
+        "| Ticker | Action | Signal | Shares | Entry $ | Cost | % | Rationale |",
+        "|--------|--------|--------|--------|---------|------|---|-----------|",
     ]
-    for a in sorted(allocations, key=lambda x: -(x.get("dollar_amount") or 0)):
+    for a in sorted(allocations, key=lambda x: -(x.get("cost_basis") or 0)):
+        is_exit = a.get("action") == "EXITED"
         lines.append(
             f"| {a['ticker']} | {a.get('action','—')} | {a.get('signal','').upper() or '—'} "
-            f"| {a.get('conviction','—')} "
-            f"| ${a.get('dollar_amount', 0):,.0f} "
+            f"| {'—' if is_exit else a.get('shares', 0)} "
+            f"| ${a.get('entry_price', 0):,.2f} "
+            f"| {'—' if is_exit else '$' + format(a.get('cost_basis', 0), ',.0f')} "
             f"| {a.get('allocation_pct', 0):.1f}% "
             f"| {(a.get('rationale') or '')[:80]} |"
         )
