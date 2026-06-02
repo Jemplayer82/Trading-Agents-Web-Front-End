@@ -37,11 +37,24 @@ def mcp_url() -> str:
     return (os.environ.get("SCHWAB_MCP_URL") or _DEFAULT_URL).strip() or _DEFAULT_URL
 
 
+def schwab_enabled() -> bool:
+    """Master switch for ALL Schwab features (account + market data).
+
+    When off (SCHWAB_ENABLED=0), the app makes zero Schwab calls and the UI
+    hides every Schwab surface — single-ticker reports and the S&P 500 paper
+    builder still run fully on yfinance. Default on.
+    """
+    return (os.environ.get("SCHWAB_ENABLED", "1").strip().lower()) not in ("0", "false", "no")
+
+
 def market_data_enabled() -> bool:
     """Whether to route market-data (quotes/OHLCV) through Schwab.
 
-    Account-sync endpoints ignore this flag and probe reachability directly.
+    Requires the master Schwab switch on. Account-sync endpoints gate on
+    schwab_enabled() directly. SCHWAB_MARKET_DATA is a finer sub-toggle.
     """
+    if not schwab_enabled():
+        return False
     return (os.environ.get("SCHWAB_MARKET_DATA", "1").strip().lower()) not in ("0", "false", "no", "")
 
 

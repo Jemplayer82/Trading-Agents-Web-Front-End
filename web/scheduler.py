@@ -113,18 +113,19 @@ def job_token_health() -> None:
     except Exception:
         log.exception("[token_health] failed to reach api")
         return
+    # Master switch off → user has no Schwab; nothing to nag about.
+    if not data.get("enabled", True):
+        log.info("[token_health] Schwab disabled — skipping")
+        return
     if not data.get("connected"):
-        log.info("[token_health] Schwab not connected — skipping nag")
-        return
-    days = data.get("days_until_refresh_expires")
-    log.info("[token_health] connected, %s days until refresh expires", days)
-    if days is None:
-        return
-    if int(days) < 1:
+        log.warning("[token_health] Schwab MCP not authorized")
         default_notifier().send(
-            f"⚠️ Schwab refresh token expires within 24h ({days} days left). Re-auth now to keep nightly scans running.",
-            link=f"{DASHBOARD_URL}/#schwab",
+            "⚠️ Schwab MCP session is not authorized — nightly/portfolio scans and live "
+            "quotes are down. Re-authorize at https://schwab.txferguson.net/auth",
+            link="https://schwab.txferguson.net/auth",
         )
+        return
+    log.info("[token_health] Schwab MCP connected")
 
 
 def job_spy_scan() -> None:

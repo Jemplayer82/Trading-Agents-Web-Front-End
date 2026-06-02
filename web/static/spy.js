@@ -504,6 +504,7 @@ document.addEventListener("tab-shown", (ev) => {
 async function loadSpyAccount() {
   const panel = $$spy("spy-account-panel");
   if (!panel) return;
+  if (window.schwabEnabled === false) { panel.innerHTML = ""; return; }
   panel.innerHTML = "<div class=\"panel\"><p class=\"dim\">Loading Schwab account…</p></div>";
   let acct, cmp;
   try {
