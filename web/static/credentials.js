@@ -199,20 +199,44 @@
       tr.appendChild(tdCur);
 
       const tdNew = document.createElement("td");
-      const inp = document.createElement("input");
-      inp.type = s.secret ? "password" : "text";
-      inp.placeholder = s.placeholder || "New value";
-      inp.autocomplete = "off";
-      inp.spellcheck = false;
-      tdNew.appendChild(inp);
+      let inp = null;
+      if (s.type === "toggle") {
+        const cur = s.has_value ? String(s.masked).trim().toLowerCase() : "1";
+        const on = !["0", "false", "no", ""].includes(cur);
+        const lbl = document.createElement("label");
+        lbl.className = "toggle-switch";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = on;
+        const txt = document.createElement("span");
+        txt.className = "toggle-label";
+        txt.style.marginLeft = "6px";
+        txt.textContent = on ? "On (Schwab)" : "Off (free)";
+        cb.addEventListener("change", () => {
+          txt.textContent = cb.checked ? "On (Schwab)" : "Off (free)";
+          saveToggle(s.key, cb.checked, cb);
+        });
+        lbl.appendChild(cb);
+        lbl.appendChild(txt);
+        tdNew.appendChild(lbl);
+      } else {
+        inp = document.createElement("input");
+        inp.type = s.secret ? "password" : "text";
+        inp.placeholder = s.placeholder || "New value";
+        inp.autocomplete = "off";
+        inp.spellcheck = false;
+        tdNew.appendChild(inp);
+      }
       tr.appendChild(tdNew);
 
       const tdAct = document.createElement("td");
       tdAct.className = "keys-actions";
-      const saveBtn = document.createElement("button");
-      saveBtn.type = "button"; saveBtn.className = "primary"; saveBtn.textContent = "Save";
-      saveBtn.addEventListener("click", () => saveSetting(s.key, inp));
-      tdAct.appendChild(saveBtn);
+      if (s.type !== "toggle") {
+        const saveBtn = document.createElement("button");
+        saveBtn.type = "button"; saveBtn.className = "primary"; saveBtn.textContent = "Save";
+        saveBtn.addEventListener("click", () => saveSetting(s.key, inp));
+        tdAct.appendChild(saveBtn);
+      }
       if (s.source === "db") {
         const clr = document.createElement("button");
         clr.type = "button"; clr.className = "ghost"; clr.textContent = "Clear";
@@ -268,6 +292,33 @@
       await loadSettings();
     } catch (e) {
       status.textContent = `save failed: ${e}`;
+    }
+  }
+
+  // Toggle-type settings (e.g. SCHWAB_ENABLED) save "1"/"0" on flip — no Save button.
+  async function saveToggle(key, on, cb) {
+    const status = $("settings-status");
+    status.textContent = `saving ${key}…`;
+    try {
+      const resp = await fetch(`/api/settings/${encodeURIComponent(key)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value: on ? "1" : "0" }),
+      });
+      if (!resp.ok) {
+        const d = await resp.json().catch(() => ({}));
+        status.textContent = `save failed: ${d.detail || resp.status}`;
+        if (cb) cb.checked = !on;
+        return;
+      }
+      await loadSettings();
+      // Flipping the master Schwab switch should hide/show Schwab surfaces live.
+      if (key === "SCHWAB_ENABLED" && window.applySchwabVisibility) {
+        window.applySchwabVisibility();
+      }
+    } catch (e) {
+      status.textContent = `save failed: ${e}`;
+      if (cb) cb.checked = !on;
     }
   }
 
