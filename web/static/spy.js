@@ -45,13 +45,17 @@ async function loadSpyHistory() {
       li.dataset.id = s.id;
       if (String(s.id) === String(activeSpyId)) li.classList.add("active");
       const statusClass = s.status === "completed" ? "BUY" : (s.status.startsWith("running") ? "HOLD" : "SELL");
+      const basis = s.starting_value || 100000;
       const returnBadge = s.current_value != null
-        ? " · " + fmtReturn(s.current_value, 100000)
+        ? " · " + fmtReturn(s.current_value, basis)
         : "";
+      const typeTag = s.previous_scan_id
+        ? "<span style=\"font-size:9px;color:var(--accent-magenta);margin-left:4px;\">REBALANCE</span>"
+        : "<span style=\"font-size:9px;color:var(--dim);margin-left:4px;\">INITIAL</span>";
       li.innerHTML = (
         "<span class=\"h-main\">" +
           "<span class=\"h-top\">" +
-            "<span class=\"h-tk\">#" + s.id + " · " + escHtml(s.trade_date) + "</span>" +
+            "<span class=\"h-tk\">#" + s.id + " · " + escHtml(s.trade_date) + typeTag + "</span>" +
             "<span class=\"h-sig " + statusClass + "\">" + (s.status || "—").toUpperCase() + "</span>" +
           "</span>" +
           "<span class=\"h-ts\">" + fmtTs(s.created_at) + returnBadge + "</span>" +
@@ -61,16 +65,17 @@ async function loadSpyHistory() {
       ul.appendChild(li);
     });
 
-    // Running total across all tracked weeks
-    const tracked = scans.filter((s) => s.current_value != null);
-    if (tracked.length > 0) {
-      const totalReturn = tracked.reduce((acc, s) => acc + s.current_value - 100000, 0);
+    // Cumulative return: latest scan current_value vs the very first scan's starting_value ($100k)
+    const completed = scans.filter((s) => s.status === "completed" && s.current_value != null);
+    if (completed.length > 0) {
+      const latest = completed[0]; // scans are DESC ordered
+      const inception = 100000; // always started with $100k
       const footer = document.createElement("li");
       footer.className = "empty dim";
       footer.style.borderTop = "1px solid var(--panel-border)";
       footer.style.marginTop = "4px";
       footer.style.paddingTop = "6px";
-      footer.innerHTML = "All-time: " + fmtReturn(100000 + totalReturn, 100000) + " over " + tracked.length + " week(s)";
+      footer.innerHTML = "Running portfolio: " + fmtReturn(latest.current_value, inception) + " over " + completed.length + " scan(s)";
       ul.appendChild(footer);
     }
   } catch (e) {
@@ -186,17 +191,21 @@ function renderSpyScan(scan) {
   // Performance card (once we have a portfolio)
   let perfHtml = "";
   if (scan.portfolio_json && scan.portfolio_json.length) {
+    const basis = scan.starting_value || 100000;
     const cv = scan.current_value;
+    const isRebalance = scan.previous_scan_id != null;
     if (cv != null) {
-      const ret = ((cv - 100000) / 100000) * 100;
+      const ret = ((cv - basis) / basis) * 100;
       const sign = ret >= 0 ? "+" : "";
       const retColor = ret >= 0 ? "var(--accent-green)" : "var(--accent-red)";
       perfHtml = (
         "<div class=\"panel\">" +
           "<div class=\"panel-title\">[ Performance ]</div>" +
           "<div style=\"display:flex;gap:24px;align-items:baseline;flex-wrap:wrap;\">" +
-            "<span>Current value: <strong style=\"color:" + retColor + ";\">$" + Math.round(cv).toLocaleString() + "</strong></span>" +
-            "<span>Return: <strong style=\"color:" + retColor + ";\">" + sign + ret.toFixed(2) + "% (" + sign + "$" + Math.abs(Math.round(cv - 100000)).toLocaleString() + ")</strong></span>" +
+            "<span class=\"dim\" style=\"font-size:11px;\">" + (isRebalance ? "Rebalance" : "Initial") + "</span>" +
+            "<span>Basis: <strong>$" + Math.round(basis).toLocaleString() + "</strong></span>" +
+            "<span>Current: <strong style=\"color:" + retColor + ";\">$" + Math.round(cv).toLocaleString() + "</strong></span>" +
+            "<span>Return: <strong style=\"color:" + retColor + ";\">" + sign + ret.toFixed(2) + "% (" + sign + "$" + Math.abs(Math.round(cv - basis)).toLocaleString() + ")</strong></span>" +
             "<span class=\"dim\">Updated: " + fmtTs(scan.last_price_check) + "</span>" +
           "</div>" +
           (scan.rebalance_notes ? "<div style=\"color:var(--accent-yellow);margin-top:8px;white-space:pre-wrap;font-size:12px;\">" + escHtml(scan.rebalance_notes) + "</div>" : "") +
@@ -209,6 +218,9 @@ function renderSpyScan(scan) {
       perfHtml = (
         "<div class=\"panel\">" +
           "<div class=\"panel-title\">[ Performance ]</div>" +
+          "<div style=\"margin-bottom:8px;color:var(--dim);font-size:12px;\">" +
+            (isRebalance ? "Rebalance — starting capital: <strong>$" + Math.round(basis).toLocaleString() + "</strong>" : "Initial portfolio — $100,000 basis") +
+          "</div>" +
           "<p class=\"dim\">Prices not yet refreshed. " +
           "<button class=\"ghost\" style=\"font-size:12px;\" onclick=\"refreshSpyPrices(" + scan.id + ")\">Refresh now</button></p>" +
         "</div>"
@@ -255,31 +267,53 @@ function renderSpyScan(scan) {
   // Portfolio allocation table
   let portfolioHtml = "";
   if (scan.portfolio_json && scan.portfolio_json.length) {
-    const allocs = [...scan.portfolio_json].sort((a, b) => (b.dollar_amount || 0) - (a.dollar_amount || 0));
-    const total = allocs.reduce((s, a) => s + (a.dollar_amount || 0), 0);
+    const actionColor = {
+      NEW: "var(--accent-cyan)", HOLD: "var(--dim)", ADDED: "var(--accent-green)",
+      TRIMMED: "var(--accent-yellow)", EXITED: "var(--accent-red)",
+    };
+    // Active positions (non-exited) sorted by $ amount, then exits at the bottom
+    const active = scan.portfolio_json.filter(a => a.action !== "EXITED" && (a.dollar_amount || 0) > 0);
+    const exited = scan.portfolio_json.filter(a => a.action === "EXITED" || (a.dollar_amount || 0) === 0);
+    const allocs = [
+      ...active.sort((a, b) => (b.dollar_amount || 0) - (a.dollar_amount || 0)),
+      ...exited,
+    ];
+    const total = active.reduce((s, a) => s + (a.dollar_amount || 0), 0);
+    const basis = scan.starting_value || 100000;
+    const isRebalance = scan.previous_scan_id != null;
+
     const rows = allocs.map((a) => {
       const sig = (a.signal || "—").toUpperCase();
+      const act = (a.action || "NEW").toUpperCase();
+      const actCol = actionColor[act] || "var(--dim)";
+      const dimRow = act === "EXITED" ? " style=\"opacity:0.5;\"" : "";
       return (
-        "<tr>" +
+        "<tr" + dimRow + ">" +
           "<td><strong style=\"color:var(--accent-cyan);\">" + escHtml(a.ticker) + "</strong></td>" +
+          "<td><span style=\"font-size:10px;font-weight:700;text-transform:uppercase;color:" + actCol + ";\">" + act + "</span></td>" +
           "<td><span class=\"badge " + sig + "\">" + sig + "</span></td>" +
-          "<td>$" + Math.round(a.dollar_amount || 0).toLocaleString() + "</td>" +
-          "<td>" + (a.allocation_pct || 0).toFixed(1) + "%</td>" +
+          "<td>" + (act === "EXITED" ? "<span class=\"dim\">—</span>" : "$" + Math.round(a.dollar_amount || 0).toLocaleString()) + "</td>" +
+          "<td>" + (act === "EXITED" ? "<span class=\"dim\">—</span>" : (a.allocation_pct || 0).toFixed(1) + "%") + "</td>" +
           "<td style=\"color:var(--dim);font-size:11px;\">" + escHtml((a.rationale || "").slice(0, 100)) + "</td>" +
         "</tr>"
       );
     }).join("");
+
+    const titleLabel = isRebalance
+      ? "Rebalanced Portfolio — $" + Math.round(basis).toLocaleString() + " capital"
+      : "$100k Paper Portfolio";
+
     portfolioHtml = (
       "<div class=\"panel\">" +
-        "<div class=\"panel-title\">[ $100k Paper Portfolio — " + allocs.length + " positions ]</div>" +
+        "<div class=\"panel-title\">[ " + titleLabel + " — " + active.length + " active positions ]</div>" +
         "<div style=\"overflow-x:auto;\">" +
           "<table class=\"spy-table\">" +
-            "<thead><tr><th>Ticker</th><th>Signal</th><th>$ Amount</th><th>%</th><th>Rationale</th></tr></thead>" +
+            "<thead><tr><th>Ticker</th><th>Action</th><th>Signal</th><th>$ Amount</th><th>%</th><th>Rationale</th></tr></thead>" +
             "<tbody>" + rows + "</tbody>" +
             "<tfoot><tr style=\"font-weight:700;border-top:1px solid var(--panel-border);\">" +
-              "<td colspan=\"2\">TOTAL</td>" +
+              "<td colspan=\"3\">TOTAL DEPLOYED</td>" +
               "<td>$" + Math.round(total).toLocaleString() + "</td>" +
-              "<td>100%</td><td></td>" +
+              "<td>" + (basis > 0 ? (total / basis * 100).toFixed(1) : "0.0") + "%</td><td></td>" +
             "</tr></tfoot>" +
           "</table>" +
         "</div>" +
