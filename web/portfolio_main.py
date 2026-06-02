@@ -315,6 +315,31 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
     }
     selected_analysts = prefs.get("analysts") or ["market", "social", "news", "fundamentals"]
 
+    # Look up the previous completed scan to enable rebalancing.
+    prev_scan = db.get_latest_completed_spy_scan(exclude_id=scan_id)
+    previous_portfolio: list[dict[str, Any]] | None = None
+    previous_scan_id: int | None = None
+    starting_value: float = 100_000.0
+
+    if prev_scan:
+        prev_portfolio_raw = prev_scan.get("portfolio_json") or []
+        # Only use previous portfolio if it has active (non-exited) positions.
+        active_prev = [p for p in prev_portfolio_raw if p.get("action") != "EXITED" and p.get("dollar_amount", 0) > 0]
+        if active_prev:
+            previous_portfolio = prev_portfolio_raw
+            previous_scan_id = int(prev_scan["id"])
+            # Use last refreshed value as capital; fall back to sum of allocations.
+            if prev_scan.get("current_value"):
+                starting_value = float(prev_scan["current_value"])
+            else:
+                starting_value = float(sum(
+                    p.get("dollar_amount", 0) for p in active_prev
+                )) or 100_000.0
+            log.info(
+                "[spy %s] rebalancing from scan #%s, capital $%s",
+                scan_id, previous_scan_id, f"{starting_value:,.0f}",
+            )
+
     # Phase 1: quick scan all S&P 500
     tickers = get_sp500_tickers()
     quick_results = spy_scanner.run_quick_scan(scan_id, tickers, config)
@@ -332,15 +357,24 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
     if db.is_spy_scan_cancelled(scan_id):
         raise spy_scanner.ScanCancelled()
 
-    # Phase 3: allocator
+    # Phase 3: allocator (rebalance if a previous portfolio exists, else fresh $100k)
     db.update_spy_scan(scan_id, status="running_alloc")
-    alloc_result = spy_allocator.run(enriched, trade_date, config)
+    alloc_result = spy_allocator.run(
+        enriched,
+        trade_date,
+        config,
+        previous_portfolio=previous_portfolio,
+        starting_value=starting_value,
+    )
     portfolio = alloc_result.get("allocations", [])
 
     db.complete_spy_scan(
         scan_id=scan_id,
         allocator_report=alloc_result.get("report_md", ""),
         portfolio_json=portfolio,
+        previous_scan_id=previous_scan_id,
+        starting_value=alloc_result.get("starting_value", starting_value),
     )
-    log.info("[spy %s] done — %d positions, total $%s", scan_id, len(portfolio),
-             "{:,.0f}".format(alloc_result.get("total", 0)))
+    log.info("[spy %s] done — %d positions, capital $%s → deployed $%s", scan_id,
+             len([p for p in portfolio if p.get("action") != "EXITED"]),
+             f"{starting_value:,.0f}", f"{alloc_result.get('total', 0):,.0f}")

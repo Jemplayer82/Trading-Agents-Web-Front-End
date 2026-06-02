@@ -119,6 +119,8 @@ CREATE TABLE IF NOT EXISTS spy_scans (
     last_price_check TEXT,
     rebalance_notes TEXT,
     cancel_requested INTEGER DEFAULT 0,
+    previous_scan_id INTEGER,
+    starting_value REAL,
     error TEXT
 );
 
@@ -168,6 +170,8 @@ CREATE INDEX IF NOT EXISTS idx_llm_activity_kind ON llm_activity (kind, heartbea
 # existing table — so additive columns need an explicit guarded ALTER.)
 _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("spy_scans", "cancel_requested", "INTEGER DEFAULT 0"),
+    ("spy_scans", "previous_scan_id", "INTEGER"),
+    ("spy_scans", "starting_value", "REAL"),
 ]
 
 
@@ -651,12 +655,35 @@ def complete_spy_scan(
     scan_id: int,
     allocator_report: str,
     portfolio_json: list[dict[str, Any]],
+    previous_scan_id: int | None = None,
+    starting_value: float | None = None,
 ) -> None:
     with connect() as conn:
         conn.execute(
-            "UPDATE spy_scans SET status = 'completed', allocator_report = ?, portfolio_json = ? WHERE id = ?",
-            (allocator_report, json.dumps(_serialize(portfolio_json)), scan_id),
+            """UPDATE spy_scans
+               SET status = 'completed', allocator_report = ?, portfolio_json = ?,
+                   previous_scan_id = ?, starting_value = ?
+               WHERE id = ?""",
+            (allocator_report, json.dumps(_serialize(portfolio_json)),
+             previous_scan_id, starting_value, scan_id),
         )
+
+
+def get_latest_completed_spy_scan(exclude_id: int | None = None) -> dict[str, Any] | None:
+    """Return the most recent completed scan, optionally excluding one scan ID."""
+    with connect() as conn:
+        if exclude_id is not None:
+            row = conn.execute(
+                "SELECT id FROM spy_scans WHERE status = 'completed' AND id != ? ORDER BY id DESC LIMIT 1",
+                (exclude_id,),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT id FROM spy_scans WHERE status = 'completed' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+    if not row:
+        return None
+    return get_spy_scan(int(row["id"]))
 
 
 def fail_spy_scan(scan_id: int, error: str) -> None:
