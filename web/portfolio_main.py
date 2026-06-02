@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import contextmanager
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterator
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 
@@ -235,9 +236,10 @@ def _run_scan(scan_id: int, trade_date: str) -> None:
 async def start_spy_scan(background_tasks: BackgroundTasks) -> dict[str, Any]:
     """Trigger a full S&P 500 scan. Idempotent for today."""
     today = datetime.utcnow().date().isoformat()
+    # A failed or cancelled scan from today must NOT block a fresh run.
     with db.connect() as conn:
         row = conn.execute(
-            "SELECT id, status FROM spy_scans WHERE trade_date = ? AND status != 'failed' ORDER BY id DESC LIMIT 1",
+            "SELECT id, status FROM spy_scans WHERE trade_date = ? AND status NOT IN ('failed', 'cancelled') ORDER BY id DESC LIMIT 1",
             (today,),
         ).fetchone()
     if row:
@@ -259,6 +261,13 @@ def get_spy_scan(scan_id: int) -> dict[str, Any]:
     if not scan:
         raise HTTPException(status_code=404, detail="not found")
     return scan
+
+
+@app.delete("/api/spy-scans/{scan_id}")
+def delete_spy_scan_endpoint(scan_id: int) -> dict[str, Any]:
+    if not db.delete_spy_scan(scan_id):
+        raise HTTPException(status_code=404, detail="not found")
+    return {"status": "deleted", "id": scan_id}
 
 
 @app.post("/api/spy-scans/{scan_id}/cancel")
@@ -303,6 +312,21 @@ def _run_spy_scan_thread(scan_id: int, trade_date: str) -> None:
         db.fail_spy_scan(scan_id, str(exc))
 
 
+@contextmanager
+def _phase(label: str) -> Iterator[None]:
+    """Tag any failure inside a scan phase with a human-readable prefix.
+
+    A user-initiated cancellation (ScanCancelled) is passed through untouched
+    so it is recorded as 'cancelled', not 'failed'.
+    """
+    try:
+        yield
+    except spy_scanner.ScanCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001 — re-raised with friendlier context
+        raise RuntimeError(f"{label}: {exc}") from exc
+
+
 def _run_spy_scan(scan_id: int, trade_date: str) -> None:
     log.info("[spy %s] starting for %s", scan_id, trade_date)
     prefs = db.get_preferences() or {}
@@ -341,8 +365,10 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
             )
 
     # Phase 1: quick scan all S&P 500
-    tickers = get_sp500_tickers()
-    quick_results = spy_scanner.run_quick_scan(scan_id, tickers, config)
+    with _phase("Couldn't fetch the S&P 500 ticker list"):
+        tickers = get_sp500_tickers()
+    with _phase("Quick scan failed"):
+        quick_results = spy_scanner.run_quick_scan(scan_id, tickers, config)
 
     if db.is_spy_scan_cancelled(scan_id):
         raise spy_scanner.ScanCancelled()
@@ -352,20 +378,22 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
     top50 = sorted(buy_or_hold, key=lambda r: -(r.get("conviction") or 0))[:50]
     if not top50:
         top50 = sorted(quick_results, key=lambda r: -(r.get("conviction") or 0))[:50]
-    enriched = spy_scanner.run_deep_dives(scan_id, top50, trade_date, config, selected_analysts)
+    with _phase("Deep-dive analysis failed"):
+        enriched = spy_scanner.run_deep_dives(scan_id, top50, trade_date, config, selected_analysts)
 
     if db.is_spy_scan_cancelled(scan_id):
         raise spy_scanner.ScanCancelled()
 
     # Phase 3: allocator (rebalance if a previous portfolio exists, else fresh $100k)
     db.update_spy_scan(scan_id, status="running_alloc")
-    alloc_result = spy_allocator.run(
-        enriched,
-        trade_date,
-        config,
-        previous_portfolio=previous_portfolio,
-        starting_value=starting_value,
-    )
+    with _phase("Portfolio allocation failed"):
+        alloc_result = spy_allocator.run(
+            enriched,
+            trade_date,
+            config,
+            previous_portfolio=previous_portfolio,
+            starting_value=starting_value,
+        )
     portfolio = alloc_result.get("allocations", [])
 
     db.complete_spy_scan(

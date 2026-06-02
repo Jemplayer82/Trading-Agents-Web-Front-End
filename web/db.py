@@ -778,6 +778,17 @@ def latest_spy_scan() -> dict[str, Any] | None:
     return get_spy_scan(int(row["id"]))
 
 
+def delete_spy_scan(scan_id: int) -> bool:
+    """Delete a scan and its quick results (FK ON DELETE CASCADE).
+
+    Deep-dive `analyses` rows the scan created are intentionally kept — they
+    remain accessible from the Run Analysis history.
+    """
+    with connect() as conn:
+        cur = conn.execute("DELETE FROM spy_scans WHERE id = ?", (scan_id,))
+        return cur.rowcount > 0
+
+
 # ---------- cross-container LLM concurrency registry ----------
 
 def register_activity(kind: str, label: str | None = None) -> int:
