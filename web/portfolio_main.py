@@ -22,7 +22,6 @@ from tradingagents.graph.portfolio_graph import run_portfolio_scan
 from . import auth_app
 from . import credentials as creds
 from . import db
-from .auth import schwab_client, token_store, schwab as schwab_auth
 from .portfolio import aggregator
 from . import spy_scanner, spy_allocator
 from .spy_tickers import get_sp500_tickers
@@ -58,14 +57,23 @@ def health() -> dict[str, str]:
 
 @app.get("/api/auth/schwab/status")
 def schwab_status() -> dict[str, Any]:
-    """Same shape as the api container's endpoint — the scheduler hits whichever."""
-    bundle = token_store.load()
-    if not bundle:
-        return {"connected": False, "days_until_refresh_expires": None}
+    """Schwab connectivity via the MCP server (the scheduler hits whichever container).
+
+    `enabled` is the master SCHWAB_ENABLED switch; `connected` reflects whether
+    the MCP server currently returns account data (its Schwab session is authed).
+    """
+    if not schwab_mcp.schwab_enabled():
+        return {"enabled": False, "connected": False, "source": "mcp"}
+    accounts = None
+    try:
+        accounts = schwab_mcp.get_accounts(fields="positions")
+    except Exception:
+        log.debug("[schwab_status] MCP read failed", exc_info=True)
     return {
-        "connected": True,
-        "days_until_refresh_expires": schwab_auth.refresh_days_remaining(bundle),
-        "refresh_issued_at": bundle.refresh_issued_at,
+        "enabled": True,
+        "connected": bool(accounts),
+        "num_accounts": len(accounts) if isinstance(accounts, list) else 0,
+        "source": "mcp",
     }
 
 
@@ -84,8 +92,10 @@ async def start_scan(background_tasks: BackgroundTasks) -> dict[str, Any]:
     if row:
         return {"scan_id": int(row["id"]), "status": row["status"], "new": False}
 
-    if not token_store.load():
-        raise HTTPException(status_code=400, detail="Schwab not connected — visit /api/auth/schwab first")
+    if not schwab_mcp.schwab_enabled():
+        raise HTTPException(status_code=400, detail="Schwab is disabled (SCHWAB_ENABLED=0). Enable it in Settings to run a portfolio scan.")
+    if not schwab_mcp.get_accounts(fields="positions"):
+        raise HTTPException(status_code=400, detail="Schwab MCP not connected — re-authorize at https://schwab.txferguson.net/auth")
 
     scan_id = db.create_portfolio_scan(today)
     background_tasks.add_task(_run_scan_thread, scan_id, today)
@@ -141,18 +151,39 @@ def _run_scan_thread(scan_id: int, trade_date: str) -> None:
         db.fail_portfolio_scan(scan_id, str(exc))
 
 
+def _mcp_positions() -> list[dict[str, Any]]:
+    """Real holdings via the Schwab MCP, aggregated by symbol across all accounts.
+
+    Returns [{symbol, quantity, market_value, asset_type}], or [] if the MCP is
+    unreachable / its Schwab session is unauthed.
+    """
+    accounts = schwab_mcp.get_accounts(fields="positions")
+    if not accounts:
+        return []
+    agg: dict[str, dict[str, Any]] = {}
+    for a in accounts:
+        sec = a.get("securitiesAccount") or a
+        for p in sec.get("positions") or []:
+            instr = p.get("instrument") or {}
+            sym = instr.get("symbol")
+            qty = float(p.get("longQuantity") or 0) - float(p.get("shortQuantity") or 0)
+            if not sym or qty == 0:
+                continue
+            e = agg.setdefault(sym, {"symbol": sym, "quantity": 0.0, "market_value": 0.0,
+                                     "asset_type": instr.get("assetType") or "EQUITY"})
+            e["quantity"] += qty
+            e["market_value"] += float(p.get("marketValue") or 0)
+    return list(agg.values())
+
+
 def _run_scan(scan_id: int, trade_date: str) -> None:
     log.info("[scan %s] starting for %s", scan_id, trade_date)
 
-    # Step 1: fetch positions from Schwab
-    account_data, bundle = schwab_client.get_account_numbers()
-    if not account_data:
-        raise RuntimeError("Schwab returned no accounts")
-    account_hash = account_data[0].get("hashValue") or account_data[0].get("accountNumber")
-    if not account_hash:
-        raise RuntimeError(f"No accountHash in {account_data[0]}")
-    positions, bundle = schwab_client.get_positions(account_hash, bundle=bundle)
-    log.info("[scan %s] %d positions from Schwab", scan_id, len(positions))
+    # Step 1: fetch positions via the Schwab MCP server
+    pos_dicts = _mcp_positions()
+    if not pos_dicts:
+        raise RuntimeError("Schwab MCP returned no positions — re-authorize at https://schwab.txferguson.net/auth")
+    log.info("[scan %s] %d positions from Schwab MCP", scan_id, len(pos_dicts))
 
     # Step 2: load user preferences for LLM / analyst config
     prefs = db.get_preferences() or {}
@@ -167,8 +198,8 @@ def _run_scan(scan_id: int, trade_date: str) -> None:
     # Step 3: for each position, create an analyses row + run the graph
     per_ticker_payload: list[dict[str, Any]] = []
     pos_dicts = [
-        {"symbol": p.symbol, "quantity": p.quantity, "market_value": p.market_value, "asset_type": p.asset_type}
-        for p in positions
+        {"symbol": p["symbol"], "quantity": p["quantity"], "market_value": p["market_value"], "asset_type": p["asset_type"]}
+        for p in pos_dicts
     ]
 
     from tradingagents.graph.portfolio_graph import run_single_ticker
@@ -368,26 +399,30 @@ def _parse_schwab_account(accounts: list[dict[str, Any]] | None) -> dict[str, An
 @app.get("/api/spy-account")
 def spy_account() -> dict[str, Any]:
     """Live Schwab holdings + balances via the Schwab MCP server (read-only)."""
+    if not schwab_mcp.schwab_enabled():
+        return {"enabled": False, "connected": False}
     try:
         parsed = _parse_schwab_account(schwab_mcp.get_accounts(fields="positions"))
     except Exception:
         log.exception("[spy-account] Schwab MCP read failed")
         parsed = None
     if not parsed:
-        return {"connected": False}
-    return {"connected": True, **parsed}
+        return {"enabled": True, "connected": False}
+    return {"enabled": True, "connected": True, **parsed}
 
 
 @app.get("/api/spy-account/compare")
 def spy_account_compare() -> dict[str, Any]:
     """Drift between the latest completed paper SPY portfolio and the real account."""
+    if not schwab_mcp.schwab_enabled():
+        return {"enabled": False, "connected": False}
     try:
         parsed = _parse_schwab_account(schwab_mcp.get_accounts(fields="positions"))
     except Exception:
         log.exception("[spy-account/compare] Schwab MCP read failed")
         parsed = None
     if not parsed:
-        return {"connected": False}
+        return {"enabled": True, "connected": False}
 
     real = {p["symbol"]: p for p in parsed["positions"]}
     scan = db.get_latest_completed_spy_scan()

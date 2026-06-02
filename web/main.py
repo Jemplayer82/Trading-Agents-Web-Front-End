@@ -531,13 +531,21 @@ def schwab_callback(code: str | None = None, error: str | None = None) -> HTMLRe
 
 @app.get("/api/auth/schwab/status")
 def schwab_status() -> dict[str, Any]:
-    bundle = token_store.load()
-    if not bundle:
-        return {"connected": False, "days_until_refresh_expires": None}
+    """Schwab connectivity via the MCP server. `enabled` is the master switch;
+    `connected` reflects whether the MCP's Schwab session currently returns data."""
+    from tradingagents.dataflows import schwab_mcp
+    if not schwab_mcp.schwab_enabled():
+        return {"enabled": False, "connected": False, "source": "mcp"}
+    accounts = None
+    try:
+        accounts = schwab_mcp.get_accounts(fields="positions")
+    except Exception:
+        log.debug("[schwab_status] MCP read failed", exc_info=True)
     return {
-        "connected": True,
-        "days_until_refresh_expires": schwab_auth.refresh_days_remaining(bundle),
-        "refresh_issued_at": bundle.refresh_issued_at,
+        "enabled": True,
+        "connected": bool(accounts),
+        "num_accounts": len(accounts) if isinstance(accounts, list) else 0,
+        "source": "mcp",
     }
 
 

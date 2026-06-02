@@ -99,6 +99,8 @@ def list_meta() -> list[dict[str, Any]]:
 
 # Each entry: key (env var), label, group, secret (mask?), placeholder.
 SETTINGS_REGISTRY: list[dict[str, Any]] = [
+    # Brokerage (Schwab)
+    {"key": "SCHWAB_ENABLED", "label": "Enable Schwab features (1=on, 0=off)", "group": "Brokerage (Schwab)", "secret": False, "placeholder": "1 — set 0 if you have no Schwab account"},
     # Brokerage (Schwab OAuth app credentials)
     {"key": "SCHWAB_APP_KEY", "label": "Schwab App Key", "group": "Brokerage (Schwab)", "secret": True, "placeholder": "Client ID from the Schwab developer portal"},
     {"key": "SCHWAB_APP_SECRET", "label": "Schwab App Secret", "group": "Brokerage (Schwab)", "secret": True, "placeholder": "Client secret"},

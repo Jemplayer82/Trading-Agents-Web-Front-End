@@ -135,6 +135,46 @@ async function deletePortfolioScan(id) {
   loadPortfolioHistory();
 }
 
+// Run a Schwab portfolio scan now (moved from the old Schwab tab).
+async function runScanNow() {
+  const btn = $$p("btn-scan-now");
+  const out = $$p("scan-now-result");
+  if (btn) btn.disabled = true;
+  if (out) out.textContent = "starting…";
+  try {
+    const r = await fetch("/api/portfolio-scan", { method: "POST" });
+    const data = await r.json();
+    if (!r.ok) {
+      out.innerHTML = `<span style="color: var(--accent-red);">${data.detail || JSON.stringify(data)}</span>`;
+    } else {
+      out.innerHTML = `Scan <strong>#${data.scan_id}</strong> ${data.new ? "started" : "already running (idempotent)"}.`;
+      loadPortfolioHistory();
+    }
+  } catch (e) {
+    out.innerHTML = `<span style="color: var(--accent-red);">${e}</span>`;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// Schwab (MCP) connection status line at the top of the Portfolio tab.
+async function loadSchwabStatusLine() {
+  const el = $$p("schwab-mcp-status");
+  if (!el) return;
+  try {
+    const s = await (await fetch("/api/auth/schwab/status")).json();
+    if (s.enabled === false) {
+      el.innerHTML = '<span class="badge SELL">SCHWAB OFF</span> Enable Schwab in Settings to run a portfolio scan.';
+    } else if (s.connected) {
+      el.innerHTML = `<span class="badge BUY">SCHWAB MCP</span> connected · ${s.num_accounts || 0} account(s).`;
+    } else {
+      el.innerHTML = '<span class="badge SELL">NOT CONNECTED</span> Re-authorize at <a href="https://schwab.txferguson.net/auth" target="_blank" rel="noopener">schwab.txferguson.net/auth</a>.';
+    }
+  } catch (e) {
+    el.textContent = "Schwab status unavailable.";
+  }
+}
+
 // Tab switching
 function setupTabs() {
   document.querySelectorAll(".main-tab").forEach((btn) => {
@@ -153,10 +193,14 @@ function setupTabs() {
 
 document.addEventListener("DOMContentLoaded", () => {
   setupTabs();
+  $$p("btn-scan-now")?.addEventListener("click", runScanNow);
 });
 
 document.addEventListener("tab-shown", (ev) => {
-  if (ev.detail === "portfolio") loadPortfolioHistory();
+  if (ev.detail === "portfolio") {
+    loadPortfolioHistory();
+    loadSchwabStatusLine();
+  }
 });
 
 // Auto-refresh portfolio history every 10s while the tab is visible

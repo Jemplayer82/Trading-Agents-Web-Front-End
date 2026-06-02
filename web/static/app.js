@@ -52,7 +52,31 @@ document.addEventListener("DOMContentLoaded", async () => {
   window.addEventListener("load-analysis", (ev) => {
     if (ev.detail != null) loadHistoryItem(ev.detail);
   });
+  applySchwabVisibility();
 });
+
+// Master Schwab switch (SCHWAB_ENABLED): when off, hide every Schwab surface so
+// users without a brokerage still get reports + the S&P 500 paper builder.
+async function applySchwabVisibility() {
+  let enabled = true;
+  try {
+    const s = await (await fetch("/api/auth/schwab/status")).json();
+    enabled = s.enabled !== false;
+  } catch (e) { /* default to showing */ }
+  window.schwabEnabled = enabled;
+  const tabBtn = $("tab-portfolio");
+  const acctBtn = $("btn-spy-account");
+  if (tabBtn) tabBtn.style.display = enabled ? "" : "none";
+  if (acctBtn) acctBtn.style.display = enabled ? "" : "none";
+  if (!enabled) {
+    const acctPanel = $("spy-account-panel");
+    if (acctPanel) acctPanel.innerHTML = "";
+    const portPane = document.querySelector('[data-pane="portfolio"]');
+    if (portPane && !portPane.hidden) {
+      document.querySelector('.main-tab[data-tab="analyze"]')?.click();
+    }
+  }
+}
 
 // Fetch + render the company name and website link for the loaded analysis.
 async function showCompanyHeader(ticker) {
