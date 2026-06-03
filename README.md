@@ -525,5 +525,5 @@ If you use TradingAgents (original or fork), please cite the original framework:
 ---
 
 **Last Updated:** June 3, 2026
-**Fork:** https://github.com/Jemplayer82/TradingAgents
+**Fork:** https://github.com/Jemplayer82/Trading-Agents-Web-Front-End
 **Original:** https://github.com/TauricResearch/TradingAgents
