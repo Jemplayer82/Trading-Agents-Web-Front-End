@@ -211,9 +211,11 @@
         const txt = document.createElement("span");
         txt.className = "toggle-label";
         txt.style.marginLeft = "6px";
-        txt.textContent = on ? "On (Schwab)" : "Off (free)";
+        const onLabel  = s.on_label  || "On";
+        const offLabel = s.off_label || "Off";
+        txt.textContent = on ? onLabel : offLabel;
         cb.addEventListener("change", () => {
-          txt.textContent = cb.checked ? "On (Schwab)" : "Off (free)";
+          txt.textContent = cb.checked ? onLabel : offLabel;
           saveToggle(s.key, cb.checked, cb);
         });
         lbl.appendChild(cb);
@@ -241,7 +243,12 @@
         const clr = document.createElement("button");
         clr.type = "button"; clr.className = "ghost"; clr.textContent = "Clear";
         clr.style.marginLeft = "6px";
-        clr.addEventListener("click", () => clearSetting(s.key));
+        const confirmMsg = s.type === "toggle"
+          ? `Clear ${s.key}? The switch will revert to the .env default (typically On).`
+          : `Clear ${s.key}? Any .env fallback will be used instead.`;
+        clr.addEventListener("click", () => {
+          if (confirm(confirmMsg)) clearSetting(s.key);
+        });
         tdAct.appendChild(clr);
       }
       tr.appendChild(tdAct);
@@ -314,7 +321,7 @@
       await loadSettings();
       // Flipping the master Schwab switch should hide/show Schwab surfaces live.
       if (key === "SCHWAB_ENABLED" && window.applySchwabVisibility) {
-        window.applySchwabVisibility();
+        await window.applySchwabVisibility();
       }
     } catch (e) {
       status.textContent = `save failed: ${e}`;
