@@ -11,29 +11,18 @@
   <a href="https://github.com/TauricResearch/" target="_blank"><img alt="Community" src="https://img.shields.io/badge/Join_GitHub_Community-TauricResearch-14C290?logo=discourse"/></a>
 </div>
 
-<div align="center">
-  <!-- Keep these links. Translations will automatically update with the README. -->
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=de">Deutsch</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=es">Español</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=fr">français</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=ja">日本語</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=ko">한국어</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=pt">Português</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=ru">Русский</a> | 
-  <a href="https://www.readme-i18n.com/TauricResearch/TradingAgents?lang=zh">中文</a>
-</div>
-
 ---
 
-# TradingAgents: Multi-Agents LLM Financial Trading Framework
+# TradingAgents: Multi-Agent LLM Financial Trading Framework
 
 ## News
-- [2026-05] **TradingAgents v0.2.5** released with the grounded Sentiment Analyst, GPT-5.5 etc. model coverage, Qwen/GLM/MiniMax dual-region support, `TRADINGAGENTS_*` env-var configurability with API-key auto-detection, remote Ollama support, non-US alpha benchmarks, and ticker path-traversal hardening. See [CHANGELOG.md](CHANGELOG.md) for the full list.
-- [2026-04] **TradingAgents v0.2.4** released with structured-output agents (Research Manager, Trader, Portfolio Manager), LangGraph checkpoint resume, persistent decision log, DeepSeek/Qwen/GLM/Azure provider support, Docker, and a Windows UTF-8 encoding fix.
-- [2026-03] **TradingAgents v0.2.3** released with multi-language support, GPT-5.4 family models, unified model catalog, backtesting date fidelity, and proxy support.
-- [2026-03] **TradingAgents v0.2.2** released with GPT-5.4/Gemini 3.1/Claude 4.6 model coverage, five-tier rating scale, OpenAI Responses API, Anthropic effort control, and cross-platform stability.
-- [2026-02] **TradingAgents v0.2.0** released with multi-provider LLM support (GPT-5.x, Gemini 3.x, Claude 4.x, Grok 4.x) and improved system architecture.
-- [2026-01] **Trading-R1** [Technical Report](https://arxiv.org/abs/2509.11420) released, with [Terminal](https://github.com/TauricResearch/Trading-R1) expected to land soon.
+
+- **[2026-05]** **TradingAgents v0.2.5** released with the grounded Sentiment Analyst, GPT-5.5 model coverage, Qwen/GLM/MiniMax dual-region support, `TRADINGAGENTS_*` env-var configurability with API-key auto-detection, remote Ollama support, non-US alpha benchmarks, and ticker path-traversal hardening. See [CHANGELOG.md](CHANGELOG.md) for the full list.
+- **[2026-04]** **TradingAgents v0.2.4** released with structured-output agents (Research Manager, Trader, Portfolio Manager), LangGraph checkpoint resume, persistent decision log, DeepSeek/Qwen/GLM/Azure provider support, Docker, and a Windows UTF-8 encoding fix.
+- **[2026-03]** **TradingAgents v0.2.3** released with multi-language support, GPT-5.4 family models, unified model catalog, backtesting date fidelity, and proxy support.
+- **[2026-03]** **TradingAgents v0.2.2** released with GPT-5.4/Gemini 3.1/Claude 4.6 model coverage, five-tier rating scale, OpenAI Responses API, Anthropic effort control, and cross-platform stability.
+- **[2026-02]** **TradingAgents v0.2.0** released with multi-provider LLM support (GPT-5.x, Gemini 3.x, Claude 4.x, Grok 4.x) and improved system architecture.
+- **[2026-01]** **Trading-R1** [Technical Report](https://arxiv.org/abs/2509.11420) released.
 
 <div align="center">
 <a href="https://www.star-history.com/#TauricResearch/TradingAgents&Date">
@@ -49,228 +38,492 @@
 >
 > So we decided to fully open-source the framework. Looking forward to building impactful projects with you!
 
-<div align="center">
-
-🚀 [TradingAgents](#tradingagents-framework) | ⚡ [Installation & CLI](#installation-and-cli) | 🎬 [Demo](https://www.youtube.com/watch?v=90gr5lwjIho) | 📦 [Package Usage](#tradingagents-package) | 🤝 [Contributing](#contributing) | 📄 [Citation](#citation)
-
-</div>
+---
 
 ## TradingAgents Framework
 
-TradingAgents is a multi-agent trading framework that mirrors the dynamics of real-world trading firms. By deploying specialized LLM-powered agents: from fundamental analysts, sentiment experts, and technical analysts, to trader, risk management team, the platform collaboratively evaluates market conditions and informs trading decisions. Moreover, these agents engage in dynamic discussions to pinpoint the optimal strategy.
+TradingAgents is a multi-agent trading framework that mirrors the dynamics of real-world trading firms. By deploying specialized LLM-powered agents — from fundamental analysts, sentiment experts, and technical analysts, to a trader and risk management team — the platform collaboratively evaluates market conditions and informs trading decisions. Moreover, these agents engage in dynamic discussions to pinpoint the optimal strategy.
 
 <p align="center">
   <img src="assets/schema.png" style="width: 100%; height: auto;">
 </p>
 
-> TradingAgents framework is designed for research purposes. Trading performance may vary based on many factors, including the chosen backbone language models, model temperature, trading periods, the quality of data, and other non-deterministic factors. [It is not intended as financial, investment, or trading advice.](https://tauric.ai/disclaimer/)
+> TradingAgents is designed for **research purposes**. Trading performance may vary based on many factors, including the chosen backbone language models, model temperature, trading periods, the quality of data, and other non-deterministic factors. [It is not intended as financial, investment, or trading advice.](https://tauric.ai/disclaimer/)
 
-Our framework decomposes complex trading tasks into specialized roles. This ensures the system achieves a robust, scalable approach to market analysis and decision-making.
+Our framework decomposes complex trading tasks into specialized roles.
 
 ### Analyst Team
-- Fundamentals Analyst: Evaluates company financials and performance metrics, identifying intrinsic values and potential red flags.
-- Sentiment Analyst: Aggregates news headlines, StockTwits, and Reddit chatter into a single sentiment read to gauge short-term market mood.
-- News Analyst: Monitors global news and macroeconomic indicators, interpreting the impact of events on market conditions.
-- Technical Analyst: Utilizes technical indicators (like MACD and RSI) to detect trading patterns and forecast price movements.
+
+- **Fundamentals Analyst:** Evaluates company financials and performance metrics, identifying intrinsic values and potential red flags.
+- **Sentiment Analyst:** Aggregates news headlines, StockTwits, and Reddit chatter into a single sentiment read to gauge short-term market mood.
+- **News Analyst:** Monitors global news and macroeconomic indicators, interpreting the impact of events on market conditions.
+- **Technical Analyst:** Utilizes technical indicators (like MACD and RSI) to detect trading patterns and forecast price movements.
 
 <p align="center">
-  <img src="assets/analyst.png" width="100%" style="display: inline-block; margin: 0 2%;">
+  <img src="assets/analyst.png" style="width: 100%; height: auto;">
 </p>
 
 ### Researcher Team
-- Comprises both bullish and bearish researchers who critically assess the insights provided by the Analyst Team. Through structured debates, they balance potential gains against inherent risks.
+
+Comprises both bullish and bearish researchers who critically assess the insights provided by the Analyst Team. Through structured debates, they balance potential gains against inherent risks.
 
 <p align="center">
-  <img src="assets/researcher.png" width="70%" style="display: inline-block; margin: 0 2%;">
+  <img src="assets/researcher.png" style="width: 100%; height: auto;">
 </p>
 
 ### Trader Agent
-- Composes reports from the analysts and researchers to make informed trading decisions. It determines the timing and magnitude of trades based on comprehensive market insights.
+
+Composes reports from the analysts and researchers to make informed trading decisions, determining the timing and magnitude of trades.
 
 <p align="center">
-  <img src="assets/trader.png" width="70%" style="display: inline-block; margin: 0 2%;">
+  <img src="assets/trader.png" style="width: 100%; height: auto;">
 </p>
 
 ### Risk Management and Portfolio Manager
-- Continuously evaluates portfolio risk by assessing market volatility, liquidity, and other risk factors. The risk management team evaluates and adjusts trading strategies, providing assessment reports to the Portfolio Manager for final decision.
-- The Portfolio Manager approves/rejects the transaction proposal. If approved, the order will be sent to the simulated exchange and executed.
+
+Continuously evaluates portfolio risk by assessing market volatility, liquidity, and other risk factors. The risk management team evaluates and adjusts trading strategies, providing assessment reports to the Portfolio Manager for final decision. The Portfolio Manager approves/rejects the transaction proposal. If approved, the order will be sent to the simulated exchange and executed.
 
 <p align="center">
-  <img src="assets/risk.png" width="70%" style="display: inline-block; margin: 0 2%;">
+  <img src="assets/risk.png" style="width: 100%; height: auto;">
 </p>
 
-## Installation and CLI
+---
 
-### Installation
+## Fork Enhancements: Web Dashboard & Production Features
 
-Clone TradingAgents:
-```bash
-git clone https://github.com/TauricResearch/TradingAgents.git
-cd TradingAgents
+This fork extends the original **[TradingAgents](https://github.com/TauricResearch/TradingAgents)** framework with a **full-featured web dashboard**, real-time streaming, portfolio scanning, S&P 500 automation, and production-ready deployment infrastructure.
+
+### ⭐ What's New in This Fork
+
+**🖥️ Web Dashboard**
+- Terminal-aesthetic UI with dark theme and color-coded signals
+- 4-tab interface: Run Analysis, Schwab Connection, Portfolio Scan, S&P 500 Scanner
+- Real-time WebSocket streaming of agent progress and reports
+- Interactive technical charts with RSI, MACD, Bollinger Bands overlays
+- Per-analysis Q&A thread (multi-turn conversation without re-running)
+
+**📊 Portfolio & Market Automation**
+- Schwab OAuth integration for brokerage account scanning
+- Selectable data source — Schwab MCP server or built-in collection method (toggle in settings)
+- Automated nightly portfolio analysis of all holdings
+- S&P 500 weekly scanner (all ~500 tickers, deep-dive top 50, $100k portfolio builder)
+- Background job scheduler (APScheduler with cron expressions)
+
+**🔐 Provider & Credential Management**
+- Ollama Cloud as the deployed default backend, with 14+ LLM providers supported (OpenAI, Anthropic, Google, xAI, DeepSeek, Qwen, GLM, MiniMax, OpenRouter, Azure, Ollama, Mistral, custom)
+- Dashboard API key management — add/update/delete provider keys without `.env`
+- Dynamic model selection with custom model name input
+- Secure credential storage in SQLite (masked in UI)
+
+**🏗️ Deployment Architecture**
+- Two pre-built images: `tradingagents` (interactive CLI) and `tradingagents-web` (FastAPI dashboard)
+- FastAPI serves both the REST/WebSocket API and the static dashboard SPA from a single container
+- SQLite with WAL mode for concurrent access and persistence
+- Background job scheduler (APScheduler) for nightly portfolio and weekly S&P 500 scans
+- Deployed as a Portainer edge stack; images built and pushed to `ghcr.io` by GitHub Actions CI
+
+**🔗 Companion: [schwab-mcp](https://github.com/Jemplayer82/schwab-mcp)**
+- Containerized Node.js MCP server that gives TradingAgents a direct, real-time connection to your Schwab brokerage account
+- Enables the dashboard to query live quotes, account positions, orders, and transaction history straight from Schwab
+- Optional — a settings checkbox switches between the MCP server and the built-in data collection method
+
+---
+
+## Screenshots
+
+### Run Analysis
+
+![Run Analysis — live multi-agent streaming](assets/screenshot-agent-team.jpg)
+
+*Submit a ticker and watch each agent — Market, Sentiment, News, Fundamentals, Research, Trader, Risk, and Portfolio Manager — stream its progress in real time, ending in a BUY/SELL/HOLD decision with full reports.*
+
+### Q&A & Technical Chart
+
+![Multi-turn Q&A and interactive technical chart](assets/screenshot-qa-chart.gif)
+
+*Ask follow-up questions grounded in the saved analysis (e.g. "what would a good entrance point be?") and explore the interactive price chart with indicators.*
+
+### Agent Team
+
+![Full agent team completed with strategy report](assets/screenshot-run-analysis.gif)
+
+*Every analyst, the Research and Risk teams, the Trader, and the Portfolio Manager complete in sequence, producing a final decision and a scaling / risk-management strategy.*
+
+### S&P 500 Scanner
+
+![S&P 500 scanner with $100k paper portfolio](assets/screenshot-spy-scanner.jpg)
+
+*Scans all ~500 tickers, deep-dives the top 50 by conviction, and builds a $100k paper portfolio with live performance tracking. Runs automatically every Saturday.*
+
+---
+
+## Quick Start
+
+### Web Dashboard (This Fork)
+
+#### Prerequisites
+
+- Docker & Docker Compose
+- An Ollama Cloud API key (or another supported provider's key)
+- Python 3.12+ (for local CLI development)
+- Portainer (optional — for edge stack deployment on a home lab / remote host)
+
+#### Docker Deployment (Recommended)
+
+The dashboard runs from a pre-built image published to `ghcr.io` by GitHub Actions. A minimal `docker-compose.yml`:
+
+```yaml
+services:
+  tradingagents-web:
+    image: ghcr.io/jemplayer82/tradingagents-web:latest
+    ports:
+      - "8080:8000"        # host 8080 → container 8000
+    environment:
+      - OLLAMA_API_KEY=${OLLAMA_API_KEY}
+      - OLLAMA_BASE_URL=https://ollama.com/v1
+    volumes:
+      - tradingagents-data:/home/appuser/.tradingagents
+    restart: unless-stopped
+
+volumes:
+  tradingagents-data:
 ```
-
-Create a virtual environment in any of your favorite environment managers:
-```bash
-conda create -n tradingagents python=3.13
-conda activate tradingagents
-```
-
-Install the package and its dependencies:
-```bash
-pip install .
-```
-
-### Docker
-
-Alternatively, run with Docker:
-```bash
-cp .env.example .env  # add your API keys
-docker compose run --rm tradingagents
-```
-
-For local models with Ollama:
-```bash
-docker compose --profile ollama run --rm tradingagents-ollama
-```
-
-### Required APIs
-
-TradingAgents supports multiple LLM providers. Set the API key for your chosen provider:
-
-```bash
-export OPENAI_API_KEY=...          # OpenAI (GPT)
-export GOOGLE_API_KEY=...          # Google (Gemini)
-export ANTHROPIC_API_KEY=...       # Anthropic (Claude)
-export XAI_API_KEY=...             # xAI (Grok)
-export DEEPSEEK_API_KEY=...        # DeepSeek
-export DASHSCOPE_API_KEY=...       # Qwen — International (dashscope-intl.aliyuncs.com)
-export DASHSCOPE_CN_API_KEY=...    # Qwen — China (dashscope.aliyuncs.com)
-export ZHIPU_API_KEY=...           # GLM via Z.AI (international)
-export ZHIPU_CN_API_KEY=...        # GLM via BigModel (China, open.bigmodel.cn)
-export MINIMAX_API_KEY=...         # MiniMax — Global (api.minimax.io, M2.x, 204K ctx)
-export MINIMAX_CN_API_KEY=...      # MiniMax — China (api.minimaxi.com, M2.x, 204K ctx)
-export OPENROUTER_API_KEY=...      # OpenRouter
-export ALPHA_VANTAGE_API_KEY=...   # Alpha Vantage
-```
-
-For enterprise providers (e.g. Azure OpenAI, AWS Bedrock), copy `.env.enterprise.example` to `.env.enterprise` and fill in your credentials.
-
-For local models, configure Ollama with `llm_provider: "ollama"`. The default endpoint is `http://localhost:11434/v1`; set `OLLAMA_BASE_URL` to point at a remote `ollama-serve`. Pull models with `ollama pull <name>`, and pick "Custom model ID" in the CLI for any model not listed by default.
-
-Alternatively, copy `.env.example` to `.env` and fill in your keys:
-```bash
-cp .env.example .env
-```
-
-### CLI Usage
-
-Launch the interactive CLI:
-```bash
-tradingagents          # installed command
-python -m cli.main     # alternative: run directly from source
-```
-You will see a screen where you can select your desired tickers, analysis date, LLM provider, research depth, and more.
-
-<p align="center">
-  <img src="assets/cli/cli_init.png" width="100%" style="display: inline-block; margin: 0 2%;">
-</p>
-
-An interface will appear showing results as they load, letting you track the agent's progress as it runs.
-
-<p align="center">
-  <img src="assets/cli/cli_news.png" width="100%" style="display: inline-block; margin: 0 2%;">
-</p>
-
-<p align="center">
-  <img src="assets/cli/cli_transaction.png" width="100%" style="display: inline-block; margin: 0 2%;">
-</p>
-
-## TradingAgents Package
-
-### Implementation Details
-
-We built TradingAgents with LangGraph to ensure flexibility and modularity. The framework supports multiple LLM providers: OpenAI, Google, Anthropic, xAI, DeepSeek, Qwen (Alibaba DashScope, international and China endpoints), GLM (Zhipu), MiniMax (global + China), OpenRouter, Ollama for local models, and Azure OpenAI for enterprise.
-
-### Python Usage
-
-To use TradingAgents inside your code, you can import the `tradingagents` module and initialize a `TradingAgentsGraph()` object. The `.propagate()` function will return a decision. You can run `main.py`, here's also a quick example:
-
-```python
-from tradingagents.graph.trading_graph import TradingAgentsGraph
-from tradingagents.default_config import DEFAULT_CONFIG
-
-ta = TradingAgentsGraph(debug=True, config=DEFAULT_CONFIG.copy())
-
-# forward propagate
-_, decision = ta.propagate("NVDA", "2026-01-15")
-print(decision)
-```
-
-You can also adjust the default configuration to set your own choice of LLMs, debate rounds, etc.
-
-```python
-from tradingagents.graph.trading_graph import TradingAgentsGraph
-from tradingagents.default_config import DEFAULT_CONFIG
-
-config = DEFAULT_CONFIG.copy()
-config["llm_provider"] = "openai"        # openai, google, anthropic, xai, deepseek, qwen, qwen-cn, glm, glm-cn, minimax, minimax-cn, openrouter, ollama, azure
-config["deep_think_llm"] = "gpt-5.4"     # Model for complex reasoning
-config["quick_think_llm"] = "gpt-5.4-mini" # Model for quick tasks
-config["max_debate_rounds"] = 2
-
-ta = TradingAgentsGraph(debug=True, config=config)
-_, decision = ta.propagate("NVDA", "2026-01-15")
-print(decision)
-```
-
-See `tradingagents/default_config.py` for all configuration options.
-
-## Persistence and Recovery
-
-TradingAgents persists two kinds of state across runs.
-
-### Decision log
-
-The decision log is always on. Each completed run appends its decision to `~/.tradingagents/memory/trading_memory.md`. On the next run for the same ticker, TradingAgents fetches the realised return (raw and alpha vs SPY), generates a one-paragraph reflection, and injects the most recent same-ticker decisions plus recent cross-ticker lessons into the Portfolio Manager prompt, so each analysis carries forward what worked and what didn't.
-
-Override the path with `TRADINGAGENTS_MEMORY_LOG_PATH`.
-
-### Checkpoint resume
-
-Checkpoint resume is opt-in via `--checkpoint`. When enabled, LangGraph saves state after each node so a crashed or interrupted run resumes from the last successful step instead of starting over. On a resume run you will see `Resuming from step N for <TICKER> on <date>` in the logs; on a new run you will see `Starting fresh`. Checkpoints are cleared automatically on successful completion.
-
-Per-ticker SQLite databases live at `~/.tradingagents/cache/checkpoints/<TICKER>.db` (override the base with `TRADINGAGENTS_CACHE_DIR`). Use `--clear-checkpoints` to reset all of them before a run.
 
 ```bash
-tradingagents analyze --checkpoint           # enable for this run
-tradingagents analyze --clear-checkpoints    # reset before running
+export OLLAMA_API_KEY=your_key      # never commit this
+docker compose up -d
 ```
 
-```python
-config = DEFAULT_CONFIG.copy()
-config["checkpoint_enabled"] = True
-ta = TradingAgentsGraph(config=config)
-_, decision = ta.propagate("NVDA", "2026-01-15")
+Open **http://localhost:8080** — FastAPI serves the dashboard directly (no separate web server). On a Portainer host, browse to `http://<host>:8080`.
+
+> **Portainer edge stack:** set `OLLAMA_API_KEY` in the stack environment (never in the committed compose file). After each fresh CI build, force-pull `tradingagents-web:latest` on the host before redeploying so the cached image isn't reused.
+
+#### Interactive CLI
+
+The `tradingagents` CLI image is run as a separate container and accessed via the Portainer console (or `docker attach`):
+
+```bash
+docker run -it \
+  -e OLLAMA_API_KEY=your_key \
+  -e OLLAMA_BASE_URL=https://ollama.com/v1 \
+  ghcr.io/jemplayer82/tradingagents:latest
 ```
+
+#### Local Development
+
+```bash
+pip install -e .
+pip install -r web/requirements.txt
+
+export DATABASE_URL=sqlite:///./tradingagents.db
+export OLLAMA_API_KEY=your_key
+export OLLAMA_BASE_URL=https://ollama.com/v1
+
+# Run the FastAPI dashboard (serves API + SPA on one port)
+uvicorn tradingagents.web.main:app --reload --port 8000
+```
+
+Open `http://localhost:8000`.
+
+---
+
+## Features in Detail
+
+### Run Analysis Tab
+
+Single-ticker deep analysis with real-time streaming:
+
+1. **Input Form** — Ticker, date, language, LLM provider, deep/quick models, research depth, analyst selection
+2. **Progress Panel** — Live status of each agent via WebSocket
+3. **Reports** — Market, sentiment, news, fundamentals, research plan, trader plan, final decision
+4. **Technical Chart** — Price candles + RSI + MACD with interactive overlays
+5. **Q&A Thread** — Multi-turn follow-up questions without re-running the full analysis
+6. **Messages Log** — Every agent message and tool call
+
+### Schwab Tab
+
+Connect your Charles Schwab account via OAuth 2.0 to enable automated portfolio scanning. Tokens are stored securely and refresh automatically.
+
+**Data source toggle.** A checkbox in settings lets you choose how account and market data is collected:
+
+- **Schwab MCP server** *(checked)* — Routes all Schwab requests through the [schwab-mcp](https://github.com/Jemplayer82/schwab-mcp) server for live quotes, positions, orders, and transaction history.
+- **Built-in method** *(unchecked)* — Uses the dashboard's own market-data retrieval (yfinance) and does not connect to Schwab at all.
+
+When the MCP server is enabled, account positions and market data come directly from your Schwab brokerage account; the built-in method instead pulls public market data via yfinance.
+
+### Portfolio Scan Tab
+
+View results from automated Schwab portfolio scans:
+
+- Aggregated portfolio briefing
+- Per-ticker analysis cards with signals and rationales
+- Links to full detailed analyses
+
+### S&P 500 Tab
+
+Weekly automated scan of all ~500 S&P 500 tickers, run in three phases:
+
+- **Phase 1 (Quick)** — All ~500 tickers scored via yfinance + lightweight LLM
+- **Phase 2 (Deep)** — Top 50 by conviction via full TradingAgentsGraph
+- **Phase 3 (Allocate)** — Build a $100k portfolio with position sizing
+
+The scan re-runs automatically every Saturday, and the AI agent rebalances the paper portfolio — adding, trimming, or exiting positions as it sees fit. Results include an interactive allocation table with entry prices and performance tracking.
+
+### Credentials Tab
+
+API keys are managed directly from the Credentials tab — no `.env` editing required. Supports all major providers. Keys are masked in the UI (last 4 characters visible).
+
+---
+
+## Schwab MCP Companion
+
+[**schwab-mcp**](https://github.com/Jemplayer82/schwab-mcp) is a companion containerized Node.js MCP server that gives TradingAgents a direct, real-time connection to your Schwab brokerage account. Rather than relying on manual data exports or delayed feeds, the dashboard communicates with Schwab through schwab-mcp to pull live quotes, account positions, open orders, and transaction history — enabling the Portfolio Scan, S&P 500 scanner, and OAuth token management to work seamlessly.
+
+Using schwab-mcp is optional. A checkbox in the Schwab settings lets you switch between the MCP server and the dashboard's built-in data collection method, so you can run with or without the companion server.
+
+### Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `get_quotes` | Real-time quote data for one or more symbols |
+| `get_accounts` | Account balances and positions |
+| `get_orders` | Open and historical orders |
+| `place_order` | Submit equity orders |
+| `get_transactions` | Account transaction history |
+| `get_market_hours` | Market open/close status |
+
+```bash
+docker run -p 3000:3000 \
+  -e SCHWAB_CLIENT_ID=your_client_id \
+  -e SCHWAB_CLIENT_SECRET=your_secret \
+  ghcr.io/jemplayer82/schwab-mcp:latest
+```
+
+See [Jemplayer82/schwab-mcp](https://github.com/Jemplayer82/schwab-mcp) for full setup and MCP client configuration.
+
+---
+
+## Architecture
+
+### Deployment Topology
+
+The fork ships as **two pre-built images**, built by GitHub Actions and pushed to `ghcr.io`, deployed as a Portainer edge stack:
+
+```
+Portainer Edge Stack  (openclaw home lab)
+│
+├─ tradingagents-web    ghcr.io/jemplayer82/tradingagents-web   (FastAPI · Dockerfile.web)
+│    host 8080 → container 8000
+│    ├─ Serves the dashboard SPA      (index.html, app.js, portfolio.js, spy.js …)
+│    ├─ REST + WebSocket API          (analysis, Schwab OAuth, scans, chart data, Q&A)
+│    ├─ APScheduler                   (nightly portfolio · weekly S&P 500 · token health)
+│    └─ SQLite (WAL)                  (preferences · analyses · portfolio_scans · spy_scans · credentials)
+│
+└─ tradingagents        ghcr.io/jemplayer82/tradingagents       (CLI · Dockerfile)
+     Interactive single-ticker analysis via Portainer console attach
+
+LLM backend:  Ollama Cloud  (https://ollama.com/v1, OLLAMA_API_KEY)
+```
+
+FastAPI (via Uvicorn) serves both the API and the static SPA from the single `tradingagents-web` container — there is no separate reverse proxy. Secrets such as `OLLAMA_API_KEY` live in the Portainer stack environment and are never committed.
+
+### Data Models
+
+| Model | Purpose |
+|-------|---------|
+| **Preferences** | User settings (LLM provider, models, language, analysts, research depth) |
+| **Analyses** | Single-ticker runs with reports and signals (BUY/SELL/HOLD) |
+| **Portfolio Scans** | Batch analysis of Schwab holdings |
+| **S&P 500 Scans** | Multi-phase SPX analysis with portfolio allocations |
+| **Provider Credentials** | API keys (encrypted, masked in UI) |
+
+---
+
+## Configuration
+
+### Environment Variables
+
+```bash
+# Database (persisted to a Docker volume)
+DATABASE_URL=sqlite:////home/appuser/.tradingagents/tradingagents.db
+
+# LLM backend — Ollama Cloud (deployed default)
+OLLAMA_API_KEY=your_key                 # Portainer stack env only — never commit
+OLLAMA_BASE_URL=https://ollama.com/v1
+
+# Optional additional providers
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Schwab OAuth (required for portfolio scans)
+SCHWAB_CLIENT_ID=your_client_id
+SCHWAB_REDIRECT_URI=http://localhost:8080/api/auth/schwab/callback
+
+# Logging
+LOG_LEVEL=INFO
+```
+
+> **Security:** `OLLAMA_API_KEY` and all other secrets must never be committed to the public fork — inject them via the Portainer stack environment or local environment variables only.
+
+---
+
+## Technical Stack
+
+| Layer | Technology |
+|-------|------------|
+| Backend & Web Server | FastAPI + Uvicorn (serves API and SPA from one container) |
+| Frontend | Vanilla JS + HTML5 (no build step) |
+| Database | SQLite with WAL mode |
+| Charting | lightweight-charts |
+| Task Scheduling | APScheduler |
+| Markdown Rendering | marked.js |
+| Containers | Docker, deployed via Portainer edge stack |
+| CI/CD | GitHub Actions matrix → `ghcr.io` images |
+| LLM Backend | Ollama Cloud (default), LangChain multi-provider abstraction |
+| Stock Data | yfinance + 5-year caching |
+| Technical Indicators | stockstats |
+| Schwab Integration | OAuth 2.0 + [schwab-mcp](https://github.com/Jemplayer82/schwab-mcp) |
+
+---
+
+## Project Structure
+
+```
+tradingagents/
+├── tradingagents/
+│   ├── graph/              # Core multi-agent graph
+│   ├── dataflows/          # Data fetching & indicators
+│   └── tools/              # LLM tool definitions
+├── web/
+│   ├── main.py             # FastAPI app — API + serves the SPA
+│   ├── scheduler.py        # APScheduler background jobs
+│   ├── db.py               # SQLite schema
+│   ├── credentials.py      # API key management
+│   ├── llm_helpers.py      # Multi-provider LLM abstraction
+│   ├── spy_scanner.py      # S&P 500 3-phase scanner
+│   ├── spy_allocator.py    # $100k portfolio builder
+│   └── static/             # SPA files
+│       ├── index.html
+│       ├── app.js
+│       ├── portfolio.js
+│       ├── spy.js
+│       ├── credentials.js
+│       └── styles.css
+├── Dockerfile              # CLI image  → ghcr.io/jemplayer82/tradingagents
+├── Dockerfile.web          # Web image  → ghcr.io/jemplayer82/tradingagents-web
+└── docker-compose.yml
+```
+
+### Running Tests
+
+```bash
+pytest tradingagents/tests/
+pytest web/tests/ -v
+```
+
+---
+
+## Troubleshooting
+
+### Chart endpoint returns 500 error
+
+**Cause:** Legacy cached OHLCV CSV files have an `index` column instead of `Date`.
+
+**Fix:** Code normalizes column names automatically. If it persists, clear the cache:
+
+```bash
+rm -rf ~/.tradingagents/cache/*.csv
+```
+
+### Schwab scan doesn't start
+
+**Cause:** OAuth token not saved or expired.
+
+**Fix:** Click "Connect to Schwab" in the Schwab tab, complete the OAuth flow, and check token status.
+
+### S&P 500 scan hangs
+
+**Cause:** Network slowness, LLM provider overload, or database lock.
+
+**Fix:** Check logs, retry, and verify the Ollama Cloud key:
+
+```bash
+docker logs tradingagents-web
+```
+
+### API key not taking effect
+
+**Cause:** Process running with stale config.
+
+**Fix:**
+
+```bash
+docker restart tradingagents-web
+```
+
+### Stale image after a fresh CI build
+
+**Cause:** The host reused a cached `tradingagents-web:latest` (the name previously existed as a different image).
+
+**Fix:** Force-pull the latest image before redeploying the stack:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+### Port 8080 already in use
+
+**Fix:** Change the host side of the port mapping in `docker-compose.yml`:
+
+```yaml
+ports:
+  - "9090:8000"   # change 9090 to any free host port
+```
+
+---
 
 ## Contributing
 
-We welcome contributions from the community! Whether it's fixing a bug, improving documentation, or suggesting a new feature, your input helps make this project better. If you are interested in this line of research, please consider joining our open-source financial AI research community [Tauric Research](https://tauric.ai/).
+Pull requests welcome! Areas of focus:
 
-Past contributions, including code, design feedback, and bug reports, are credited per release in [`CHANGELOG.md`](CHANGELOG.md).
+- UI/UX improvements (mobile responsiveness, keyboard shortcuts)
+- New LLM providers
+- Chart enhancements (more indicators, drawing tools)
+- Performance optimizations
+- Testing (unit, integration, E2E)
+- Documentation
+
+---
+
+## License
+
+Respects the original TradingAgents license. See [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents) for details.
+
+---
+
+## Acknowledgments
+
+- **TauricResearch** — Original TradingAgents framework and multi-agent architecture
+- **Community** — All contributors and users providing feedback
+- **Libraries** — FastAPI, LangChain, yfinance, stockstats, lightweight-charts, and many others
+
+---
 
 ## Citation
 
-Please reference our work if you find *TradingAgents* provides you with some help :)
+If you use TradingAgents (original or fork), please cite the original framework:
 
-```
-@misc{xiao2025tradingagentsmultiagentsllmfinancial,
-      title={TradingAgents: Multi-Agents LLM Financial Trading Framework}, 
-      author={Yijia Xiao and Edward Sun and Di Luo and Wei Wang},
-      year={2025},
-      eprint={2412.20138},
-      archivePrefix={arXiv},
-      primaryClass={q-fin.TR},
-      url={https://arxiv.org/abs/2412.20138}, 
+```bibtex
+@article{Trading-R1,
+  title  = {Trading-R1: Technical Report},
+  author = {TauricResearch},
+  year   = {2026},
+  url    = {https://arxiv.org/abs/2509.11420}
 }
 ```
+
+---
+
+**Last Updated:** June 3, 2026
+**Fork:** https://github.com/Jemplayer82/TradingAgents
+**Original:** https://github.com/TauricResearch/TradingAgents
