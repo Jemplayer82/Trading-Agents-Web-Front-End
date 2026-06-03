@@ -215,8 +215,7 @@
         const offLabel = s.off_label || "Off";
         txt.textContent = on ? onLabel : offLabel;
         cb.addEventListener("change", () => {
-          txt.textContent = cb.checked ? onLabel : offLabel;
-          saveToggle(s.key, cb.checked, cb);
+          saveToggle(s.key, cb.checked, cb, txt, onLabel, offLabel);
         });
         lbl.appendChild(cb);
         lbl.appendChild(txt);
@@ -246,9 +245,7 @@
         const confirmMsg = s.type === "toggle"
           ? `Clear ${s.key}? The switch will revert to the .env default (typically On).`
           : `Clear ${s.key}? Any .env fallback will be used instead.`;
-        clr.addEventListener("click", () => {
-          if (confirm(confirmMsg)) clearSetting(s.key);
-        });
+        clr.addEventListener("click", () => clearSetting(s.key, confirmMsg));
         tdAct.appendChild(clr);
       }
       tr.appendChild(tdAct);
@@ -303,9 +300,18 @@
   }
 
   // Toggle-type settings (e.g. SCHWAB_ENABLED) save "1"/"0" on flip — no Save button.
-  async function saveToggle(key, on, cb) {
+  async function saveToggle(key, on, cb, txt, onLabel, offLabel) {
     const status = $("settings-status");
+    const setLabel = (state) => {
+      if (txt) txt.textContent = state ? (onLabel || "On") : (offLabel || "Off");
+    };
+    const revert = () => {
+      if (cb) { cb.checked = !on; cb.disabled = false; }
+      setLabel(!on);
+    };
+    setLabel(on);
     status.textContent = `saving ${key}…`;
+    if (cb) cb.disabled = true;   // block overlapping flips while this save is in flight
     try {
       const resp = await fetch(`/api/settings/${encodeURIComponent(key)}`, {
         method: "PUT",
@@ -315,22 +321,24 @@
       if (!resp.ok) {
         const d = await resp.json().catch(() => ({}));
         status.textContent = `save failed: ${d.detail || resp.status}`;
-        if (cb) cb.checked = !on;
+        revert();
         return;
       }
-      await loadSettings();
-      // Flipping the master Schwab switch should hide/show Schwab surfaces live.
+      // Drive Schwab surfaces directly from the value we just saved — pass it to
+      // applySchwabVisibility so it skips the /api/auth/schwab/status fetch, which
+      // can block on a 30s MCP call when enabled and would freeze "saving…".
       if (key === "SCHWAB_ENABLED" && window.applySchwabVisibility) {
-        await window.applySchwabVisibility();
+        await window.applySchwabVisibility(on);
       }
+      await loadSettings();   // rebuilds the table with a fresh, enabled checkbox
     } catch (e) {
       status.textContent = `save failed: ${e}`;
-      if (cb) cb.checked = !on;
+      revert();
     }
   }
 
-  async function clearSetting(key) {
-    if (!confirm(`Clear ${key}? Any .env fallback will be used instead.`)) return;
+  async function clearSetting(key, confirmMsg) {
+    if (!confirm(confirmMsg || `Clear ${key}? Any .env fallback will be used instead.`)) return;
     try {
       const resp = await fetch(`/api/settings/${encodeURIComponent(key)}`, { method: "DELETE" });
       if (!resp.ok) {

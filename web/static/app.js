@@ -57,12 +57,19 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 // Master Schwab switch (SCHWAB_ENABLED): when off, hide every Schwab surface so
 // users without a brokerage still get reports + the S&P 500 paper builder.
-async function applySchwabVisibility() {
+async function applySchwabVisibility(enabledOverride) {
+  // Callers may pass the known master-switch value (e.g. right after saving the
+  // toggle) to skip the /api/auth/schwab/status round-trip, which can block on a
+  // 30s MCP call when Schwab is enabled.
   let enabled = true;
-  try {
-    const s = await (await fetch("/api/auth/schwab/status")).json();
-    enabled = s.enabled !== false;
-  } catch (e) { /* default to showing */ }
+  if (typeof enabledOverride === "boolean") {
+    enabled = enabledOverride;
+  } else {
+    try {
+      const s = await (await fetch("/api/auth/schwab/status")).json();
+      enabled = s.enabled !== false;
+    } catch (e) { /* default to showing */ }
+  }
   window.schwabEnabled = enabled;
   const tabBtn = $("tab-portfolio");
   const acctBtn = $("btn-spy-account");
