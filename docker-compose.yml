@@ -2,6 +2,7 @@ services:
   # Interactive CLI — use via Portainer console attach.
   tradingagents:
     image: ghcr.io/jemplayer82/tradingagents:latest
+    pull_policy: always
     environment:
       LLM_PROVIDER: ollama
       TRADINGAGENTS_LLM_PROVIDER: ollama
@@ -15,6 +16,7 @@ services:
   # Single-ticker analysis backend + Schwab OAuth.
   tradingagents-api:
     image: ghcr.io/jemplayer82/tradingagents:latest
+    pull_policy: always
     entrypoint: ["uvicorn", "web.main:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
       LLM_PROVIDER: ollama
@@ -32,6 +34,7 @@ services:
   # Portfolio scan backend — separate container so long scans don't block ad-hoc.
   tradingagents-portfolio:
     image: ghcr.io/jemplayer82/tradingagents:latest
+    pull_policy: always
     entrypoint: ["uvicorn", "web.portfolio_main:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
       LLM_PROVIDER: ollama
@@ -50,6 +53,7 @@ services:
   # Cron daemon — fires nightly scan + 5am newsletter + hourly token health.
   tradingagents-scheduler:
     image: ghcr.io/jemplayer82/tradingagents:latest
+    pull_policy: always
     entrypoint: ["python", "-m", "web.scheduler"]
     environment:
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
@@ -73,6 +77,7 @@ services:
   # Pure nginx frontend — no secrets, just static files + reverse proxy.
   tradingagents-web:
     image: ghcr.io/jemplayer82/tradingagents-web:latest
+    pull_policy: always
     ports:
       - "8080:8000"
     restart: unless-stopped
