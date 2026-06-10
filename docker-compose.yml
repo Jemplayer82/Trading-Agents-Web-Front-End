@@ -27,9 +27,14 @@ services:
       SCHWAB_APP_SECRET: ${SCHWAB_APP_SECRET}
       SCHWAB_CALLBACK_URL: ${SCHWAB_CALLBACK_URL}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
+      SWITCHBOARD_URL: http://switchboard:3107
+      SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN}
+      BUS_MIRROR: ${BUS_MIRROR:-analysis}
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
     restart: unless-stopped
+    depends_on:
+      - switchboard
 
   # Portfolio scan backend — separate container so long scans don't block ad-hoc.
   tradingagents-portfolio:
@@ -85,5 +90,18 @@ services:
       - tradingagents-api
       - tradingagents-portfolio
 
+  # Agent message bus — internal only; the dashboard streams it via /api/bus.
+  switchboard:
+    image: ghcr.io/jemplayer82/mcp-switchboard:latest
+    restart: unless-stopped
+    environment:
+      PORT: "3107"
+      SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN}
+      SWITCHBOARD_DB_PATH: /data/switchboard.db
+    volumes:
+      - switchboard_data:/data
+    # ports: ["3109:3107"]   # uncomment for ops debugging only — keep the bus internal in production
+
 volumes:
   tradingagents_data:
+  switchboard_data:
