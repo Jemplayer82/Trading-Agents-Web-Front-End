@@ -450,10 +450,11 @@ class TestCircuitBreaker:
 @pytest.mark.unit
 class TestGetPublisher:
     def _reset_singleton(self):
-        """Clear the module-level singleton between tests."""
+        """Clear the module-level singleton and failure flag between tests."""
         import web.bus as bus_mod
         with bus_mod._publisher_lock:
             bus_mod._publisher_instance = None
+            bus_mod._publisher_failed = False
 
     def test_returns_none_without_env_vars(self, monkeypatch):
         monkeypatch.delenv("SWITCHBOARD_URL", raising=False)
@@ -511,3 +512,90 @@ class TestGetPublisher:
         self._reset_singleton()
         pub2 = get_publisher()
         assert pub1 is not pub2
+
+    def test_malformed_url_returns_none(self, monkeypatch):
+        """A URL with a non-numeric port causes httpx to raise on first use.
+
+        get_publisher() must catch the error on construction and return None.
+        """
+        monkeypatch.setenv("SWITCHBOARD_URL", "http://host:notaport")
+        monkeypatch.setenv("SWITCHBOARD_MCP_TOKEN", "tok")
+        self._reset_singleton()
+
+        from web.bus import get_publisher
+        result = get_publisher()
+        assert result is None
+
+    def test_malformed_url_no_retry(self, monkeypatch):
+        """After a failed construction, subsequent calls must return None immediately
+        without re-attempting construction (the _publisher_failed flag prevents retry).
+        """
+        monkeypatch.setenv("SWITCHBOARD_URL", "http://host:notaport")
+        monkeypatch.setenv("SWITCHBOARD_MCP_TOKEN", "tok")
+        self._reset_singleton()
+
+        from web.bus import get_publisher
+        import web.bus as bus_mod
+
+        result1 = get_publisher()
+        assert result1 is None
+        assert bus_mod._publisher_failed is True
+
+        # Second call — must not raise and must return None
+        result2 = get_publisher()
+        assert result2 is None
+
+
+# ---------------------------------------------------------------------------
+# 8. New tests — flush timeout, parse_mcp_response no-data-line, 100-item burst
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestNewBehaviours:
+    def test_flush_returns_false_on_timeout(self):
+        """flush() returns False when the client is so slow the deadline expires."""
+        from web.bus import BusPublisher
+
+        mock_client = MagicMock()
+        # Block indefinitely so items never finish
+        block_event = threading.Event()
+        mock_client.call.side_effect = lambda *a, **kw: block_event.wait()
+
+        pub = BusPublisher(mock_client, _queue_maxsize=10)
+        pub.publish("heartbeat", {"agent_id": "test"})
+
+        # Very short timeout — worker is blocked, so flush cannot drain
+        result = pub.flush(timeout=0.1)
+        assert result is False
+
+        # Cleanup
+        block_event.set()
+        pub.flush(timeout=2.0)
+
+    def test_parse_mcp_response_raises_on_no_data_line(self):
+        """_parse_mcp_response raises BusError when SSE body has no data: line."""
+        from web.bus import _parse_mcp_response, BusError
+
+        # SSE body with only an event line, no data: line
+        sse_body = "event: message\n\n"
+        resp = _make_response(sse_body, "text/event-stream")
+        with pytest.raises(BusError, match="No data"):
+            _parse_mcp_response(resp)
+
+    def test_100_item_burst_drains_flush_returns_true(self):
+        """A burst of 100 items through a fast fake client must fully drain,
+        and flush() must return True — proving all_tasks_done semantics work.
+        """
+        from web.bus import BusPublisher
+
+        mock_client = MagicMock()
+        mock_client.call.return_value = {"ok": True}
+
+        pub = BusPublisher(mock_client, _queue_maxsize=200)
+        for i in range(100):
+            pub.publish("heartbeat", {"seq": i})
+
+        drained = pub.flush(timeout=10.0)
+        assert drained is True
+        assert mock_client.call.call_count == 100

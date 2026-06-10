@@ -28,6 +28,9 @@ import httpx
 
 log = logging.getLogger(__name__)
 
+# Set to True after a failed construction attempt so we never retry.
+_publisher_failed: bool = False
+
 
 # ---------------------------------------------------------------------------
 # Public exception
@@ -93,11 +96,14 @@ class SwitchboardClient:
             },
         )
 
-    def call(self, tool: str, args: dict) -> dict | list:
+    def call(self, tool: str, args: dict, *, timeout: float | None = None) -> dict | list:
         """Invoke a switchboard tool and return the decoded payload.
 
         Raises:
+            httpx.RequestError — on connection-level failures (ConnectError,
+                ReadTimeout, etc.).
             httpx.HTTPStatusError — on non-2xx HTTP status.
+            json.JSONDecodeError — if the response body is not valid JSON.
             BusError — on JSON-RPC error or tool-level isError.
         """
         body = {
@@ -106,7 +112,10 @@ class SwitchboardClient:
             "method": "tools/call",
             "params": {"name": tool, "arguments": args},
         }
-        resp = self._http.post("/mcp", json=body)
+        kwargs: dict[str, Any] = {}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        resp = self._http.post("/mcp", json=body, **kwargs)
         resp.raise_for_status()
         rpc = _parse_mcp_response(resp)
 
@@ -223,28 +232,7 @@ class SwitchboardClient:
         # Give httpx 5s more headroom beyond the server's long-poll window
         per_req_timeout = timeout_s + 5.0
         args: dict[str, Any] = {"agent_id": agent_id, "timeout_seconds": int(timeout_s)}
-        body = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": "wait_for_message", "arguments": args},
-        }
-        resp = self._http.post("/mcp", json=body, timeout=per_req_timeout)
-        resp.raise_for_status()
-        rpc = _parse_mcp_response(resp)
-        if rpc.get("error"):
-            err = rpc["error"]
-            msg = err.get("message") if isinstance(err, dict) else str(err)
-            raise BusError(f"JSON-RPC error: {msg}")
-        result = rpc.get("result") or {}
-        if result.get("isError"):
-            content = result.get("content") or []
-            text = content[0].get("text", "") if content else str(result)
-            raise BusError(f"Tool error: {text}")
-        content = result.get("content") or []
-        if not content:
-            return {}
-        return json.loads(content[0].get("text", "{}"))
+        return self.call("wait_for_message", args, timeout=per_req_timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +274,7 @@ class BusPublisher:
         _breaker_open_seconds: float = _CB_DEFAULT_OPEN_SECONDS,
     ) -> None:
         self._client = client
-        self._queue: queue.Queue[tuple[str, dict] | None] = queue.Queue(
+        self._queue: queue.Queue[tuple[str, dict]] = queue.Queue(
             maxsize=_queue_maxsize
         )
         self._breaker_open_seconds = _breaker_open_seconds
@@ -318,20 +306,22 @@ class BusPublisher:
                     )
 
     def flush(self, timeout: float = 5.0) -> bool:
-        """Block until the queue is empty or ``timeout`` seconds elapse.
+        """Block until the queue is fully drained or ``timeout`` seconds elapse.
 
-        Returns True if the queue drained, False if the timeout was reached.
+        "Drained" means every enqueued item has been processed and
+        task_done() called — i.e. queue.join() semantics.  Returns True if
+        the queue drained within the deadline, False otherwise.
         Any remaining items past the deadline are not discarded — they stay
         in the queue for the worker to process eventually.
         """
-        deadline = time.monotonic() + timeout
-        while True:
-            if self._queue.empty():
-                return True
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False
-            time.sleep(min(0.01, remaining))
+        with self._queue.all_tasks_done:
+            deadline = time.monotonic() + timeout
+            while self._queue.unfinished_tasks > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._queue.all_tasks_done.wait(timeout=remaining)
+        return True
 
     # ------------------------------------------------------------------
     # Worker thread
@@ -343,11 +333,6 @@ class BusPublisher:
             try:
                 item = self._queue.get(timeout=1.0)
             except queue.Empty:
-                continue
-            if item is None:
-                # Sentinel — put it back so flush() sees an empty queue
-                # and re-enqueue for any future drain attempt.
-                # (In practice we never send None; this is defensive.)
                 continue
             tool, args = item
             try:
@@ -367,8 +352,10 @@ class BusPublisher:
             if elapsed < self._breaker_open_seconds:
                 # Still open — drop silently
                 return
-            # Transition to half-open for a probe
+            # Transition to half-open for a probe; reset failure counter so
+            # the "opened after N consecutive failures" log is accurate.
             self._cb_state = _CB_HALF_OPEN
+            self._cb_failures = 0
             log.debug("bus circuit breaker: half-open (probe)")
 
         try:
@@ -408,8 +395,12 @@ def get_publisher() -> BusPublisher | None:
 
     Lazy-initialised on first call.  Thread-safe.  Missing env vars → None,
     which callers treat as "bus unavailable — skip mirroring".
+
+    Never raises.  If construction fails (e.g. malformed URL, thread start
+    error), logs the error once, sets a module-level flag so subsequent calls
+    return None immediately without retrying, and returns None.
     """
-    global _publisher_instance
+    global _publisher_instance, _publisher_failed
 
     url = os.environ.get("SWITCHBOARD_URL")
     token = os.environ.get("SWITCHBOARD_MCP_TOKEN")
@@ -419,11 +410,22 @@ def get_publisher() -> BusPublisher | None:
     if _publisher_instance is not None:
         return _publisher_instance
 
+    if _publisher_failed:
+        return None
+
     with _publisher_lock:
         # Double-checked locking
         if _publisher_instance is not None:
             return _publisher_instance
-        client = SwitchboardClient(url=url, token=token)
-        _publisher_instance = BusPublisher(client)
-        log.info("bus publisher initialised (url=%s)", url)
-        return _publisher_instance
+        if _publisher_failed:
+            return None
+        try:
+            client = SwitchboardClient(url=url, token=token)
+            instance = BusPublisher(client)
+            _publisher_instance = instance
+            log.info("bus publisher initialised (url=%s)", url)
+            return _publisher_instance
+        except Exception as exc:
+            _publisher_failed = True
+            log.error("bus publisher init failed — bus unavailable: %s", exc)
+            return None
