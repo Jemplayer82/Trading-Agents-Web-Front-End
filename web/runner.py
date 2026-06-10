@@ -21,6 +21,11 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 from . import db
 
+try:
+    from .bus_mirror import RunMirror
+except Exception:
+    RunMirror = None  # type: ignore[assignment,misc]
+
 
 REPORT_KEYS = (
     "market_report",
@@ -184,6 +189,7 @@ def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Qu
     def emit(frame: dict[str, Any]) -> None:
         frames.put(frame)
 
+    mirror = None
     try:
         ticker = params["ticker"].strip().upper()
         trade_date = params["trade_date"]
@@ -195,6 +201,7 @@ def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Qu
             "message": f"Initializing {len(analysts)} analyst(s) for {ticker} on {trade_date}",
             "analysts": analysts,
         })
+        mirror = RunMirror.maybe_create(params, analysis_id) if RunMirror else None
 
         cfg = build_config(params)
         graph = TradingAgentsGraph(
@@ -237,6 +244,8 @@ def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Qu
 
             # ---- full-state values ----
             final_state = chunk
+            if mirror:
+                mirror.on_state(chunk)
 
             # Report deltas (+ synthesised bull/bear & risk debate transcripts)
             delta = _diff_reports(seen_reports, chunk)
@@ -248,6 +257,8 @@ def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Qu
                 for key, val in delta.items():
                     seen_reports[key] = val
                 emit({"type": "report_update", "reports": delta})
+                if mirror:
+                    mirror.on_report_delta(delta)
 
             # Messages tail
             messages = chunk.get("messages") or []
@@ -308,6 +319,8 @@ def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Qu
             "signal": signal,
             "final_decision": final_state.get("final_trade_decision", ""),
         })
+        if mirror:
+            mirror.on_done(signal, final_state.get("final_trade_decision", ""))
     except Exception as exc:
         tb = traceback.format_exc()
         try:
@@ -315,5 +328,9 @@ def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Qu
         except Exception:
             pass
         emit({"type": "error", "message": str(exc), "traceback": tb})
+        if mirror:
+            mirror.on_error(str(exc))
     finally:
+        if mirror:
+            mirror.close()
         frames.put(None)  # sentinel
