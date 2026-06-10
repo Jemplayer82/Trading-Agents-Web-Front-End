@@ -93,14 +93,15 @@ services:
   # Agent message bus — internal only; the dashboard streams it via /api/bus.
   switchboard:
     image: ghcr.io/jemplayer82/mcp-switchboard:latest
-    restart: unless-stopped
     environment:
       PORT: "3107"
-      SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN}
+      SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN:?SWITCHBOARD_MCP_TOKEN required}
       SWITCHBOARD_DB_PATH: /data/switchboard.db
     volumes:
       - switchboard_data:/data
-    # ports: ["3109:3107"]   # uncomment for ops debugging only — keep the bus internal in production
+    restart: unless-stopped
+    # ports:
+    #   - "3109:3107"   # ops debugging only (3109 host-side: 3107/3108 taken by mcp-shared elsewhere)
 
 volumes:
   tradingagents_data:
