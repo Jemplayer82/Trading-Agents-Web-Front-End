@@ -370,6 +370,64 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .pcard-link a { color: var(--accent-cyan); text-decoration: none; }
 .pcard-link a:hover { text-decoration: underline; }
 
+/* Holding card — per-line rows and gain/loss */
+.pcard-line {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--dim);
+  margin-top: 3px;
+}
+.pcard-line span:last-child { color: var(--text); }
+.pcard-gain {
+  font-size: 12px;
+  font-weight: 600;
+  margin-top: 7px;
+}
+.up   { color: var(--accent-green); }
+.down { color: var(--accent-red); }
+
+/* Account sub-tabs strip */
+.account-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+.account-tab {
+  background: transparent;
+  border: 1px solid var(--panel-border);
+  color: var(--dim);
+  padding: 5px 12px;
+  font-family: inherit;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.account-tab:hover { color: var(--text); border-color: var(--accent-cyan); }
+.account-tab.active {
+  color: var(--accent-cyan);
+  border-color: var(--accent-cyan);
+  background: rgba(108, 213, 230, 0.08);
+}
+
+/* Portfolio totals row */
+.totals-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  align-items: baseline;
+}
+.totals-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.totals-item .dim { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+.totals-item strong { font-size: 15px; }
+
 /* ----- S&P 500 Scanner tab ----- */
 .scan-progress {
   flex: 1;

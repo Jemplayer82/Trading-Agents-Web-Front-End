@@ -159,6 +159,8 @@
     </aside>
 
     <section class="main">
+      <div class="account-tabs" id="account-tabs"></div>
+
       <div class="panel">
         <div class="panel-title">[ Run Scan Now ]</div>
         <div id="schwab-mcp-status" class="dim" style="margin-bottom: 10px;">Checking Schwab…</div>
@@ -167,6 +169,11 @@
           <button id="btn-scan-now" type="button" class="primary">Run scan now</button>
           <span id="scan-now-result" class="dim" style="margin-left: 12px;"></span>
         </div>
+      </div>
+
+      <div class="panel" id="portfolio-totals-panel" hidden>
+        <div class="panel-title">[ Portfolio Totals ]</div>
+        <div id="portfolio-totals" class="totals-row"></div>
       </div>
 
       <div class="panel">
@@ -178,7 +185,7 @@
       </div>
 
       <div class="panel">
-        <div class="panel-title">[ Per-Ticker Results ]</div>
+        <div class="panel-title">[ Holdings ]</div>
         <div id="portfolio-tickers" class="ticker-grid-web"></div>
       </div>
     </section>

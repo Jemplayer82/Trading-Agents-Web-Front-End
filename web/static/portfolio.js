@@ -1,8 +1,24 @@
-// Portfolio Scan tab — history list, briefing render, per-ticker grid
+// Portfolio Scan tab — history list, briefing render, per-ticker grid, live holdings
 
 const $$p = (id) => document.getElementById(id);
 
 let activePortfolioId = null;
+let _accountsData = null;
+let _activeAccountId = "all";
+
+// ---- number formatters ----
+function fmt$(v) {
+  return "$" + Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function fmtAbs$(v) {
+  return "$" + Math.abs(Number(v)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function fmtShares(v) {
+  return Number(v).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 4 });
+}
+function fmtPct(v) {
+  return (v >= 0 ? "+" : "") + Number(v).toFixed(2) + "%";
+}
 
 function fmtTs(iso) {
   if (!iso) return "—";
@@ -157,6 +173,122 @@ async function runScanNow() {
   }
 }
 
+// ---- Live account holdings ----
+
+async function loadAccountHoldings() {
+  const tabsEl = $$p("account-tabs");
+  if (!tabsEl) return;
+  try {
+    const r = await fetch("/api/accounts");
+    const data = await r.json();
+    if (!data.enabled || !data.connected || !data.accounts) {
+      tabsEl.innerHTML = "";
+      const panel = $$p("portfolio-totals-panel");
+      if (panel) panel.hidden = true;
+      return;
+    }
+    _accountsData = data.accounts;
+    renderAccountTabs(_accountsData);
+    selectAccount(_activeAccountId);
+  } catch (e) {
+    tabsEl.innerHTML = "";
+  }
+}
+
+function renderAccountTabs(accounts) {
+  const tabsEl = $$p("account-tabs");
+  if (!tabsEl) return;
+  tabsEl.innerHTML = "";
+  accounts.forEach((acct) => {
+    const btn = document.createElement("button");
+    btn.className = "account-tab" + (acct.id === _activeAccountId ? " active" : "");
+    btn.textContent = acct.label;
+    btn.addEventListener("click", () => selectAccount(acct.id));
+    tabsEl.appendChild(btn);
+  });
+}
+
+function selectAccount(id) {
+  _activeAccountId = id;
+  if (!_accountsData) return;
+  const acct = _accountsData.find((a) => a.id === id) || _accountsData[0];
+  if (!acct) return;
+
+  document.querySelectorAll(".account-tab").forEach((btn) => {
+    btn.classList.toggle("active", btn.textContent === acct.label);
+  });
+
+  renderTotals(acct);
+
+  const grid = $$p("portfolio-tickers");
+  if (!grid) return;
+  grid.innerHTML = "";
+  if (!acct.positions.length) {
+    grid.innerHTML = '<p class="dim">No positions in this account.</p>';
+    return;
+  }
+  acct.positions.forEach((pos) => grid.appendChild(renderHoldingCard(pos)));
+}
+
+function renderTotals(acct) {
+  const panel = $$p("portfolio-totals-panel");
+  const el = $$p("portfolio-totals");
+  if (!panel || !el) return;
+
+  const gainCls = acct.gain_dollars >= 0 ? "up" : "down";
+  const gainSign = acct.gain_dollars >= 0 ? "+" : "-";
+
+  el.innerHTML = `
+    <span class="totals-item">
+      <span class="dim">Total Value</span>
+      <strong>${fmt$(acct.total_value)}</strong>
+    </span>
+    <span class="totals-item">
+      <span class="dim">Gain / Loss</span>
+      <strong class="${gainCls}">${gainSign}${fmtAbs$(acct.gain_dollars)}</strong>
+    </span>
+    <span class="totals-item">
+      <strong class="${gainCls}">${fmtPct(acct.gain_percent)}</strong>
+    </span>
+    <span class="totals-item">
+      <span class="dim">Cash</span>
+      <strong>${fmt$(acct.cash)}</strong>
+    </span>
+  `;
+  panel.hidden = false;
+}
+
+function renderHoldingCard(pos) {
+  const card = document.createElement("div");
+  card.className = "pcard";
+  const sig = (pos.signal || "").toUpperCase();
+  const gainCls = pos.gain_dollars >= 0 ? "up" : "down";
+  const gainSign = pos.gain_dollars >= 0 ? "+" : "-";
+
+  card.innerHTML = `
+    <div class="pcard-row">
+      <span class="pcard-tk">${escapeHtml(pos.symbol)}</span>
+      ${sig ? `<span class="badge ${sig}">${sig}</span>` : ""}
+    </div>
+    <div class="pcard-line"><span>Shares</span><span>${fmtShares(pos.shares)}</span></div>
+    <div class="pcard-line"><span>Buy</span><span>${fmt$(pos.average_price)}</span></div>
+    <div class="pcard-line"><span>Now</span><span>${fmt$(pos.current_price)}</span></div>
+    <div class="pcard-line"><span>Value</span><span>${fmt$(pos.market_value)}</span></div>
+    <div class="pcard-gain ${gainCls}">${gainSign}${fmtAbs$(pos.gain_dollars)} (${fmtPct(pos.gain_percent)})</div>
+    ${pos.analysis_id ? `<div class="pcard-link"><a href="#" data-analysis="${pos.analysis_id}">Open full analysis →</a></div>` : ""}
+  `;
+
+  const link = card.querySelector("[data-analysis]");
+  if (link) {
+    link.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      window.dispatchEvent(new CustomEvent("load-analysis", { detail: parseInt(link.dataset.analysis, 10) }));
+      document.querySelector('.main-tab[data-tab="analyze"]')?.click();
+    });
+  }
+  return card;
+}
+
 // Schwab (MCP) connection status line at the top of the Portfolio tab.
 async function loadSchwabStatusLine() {
   const el = $$p("schwab-mcp-status");
@@ -200,6 +332,7 @@ document.addEventListener("tab-shown", (ev) => {
   if (ev.detail === "portfolio") {
     loadPortfolioHistory();
     loadSchwabStatusLine();
+    loadAccountHoldings();
   }
 });
 

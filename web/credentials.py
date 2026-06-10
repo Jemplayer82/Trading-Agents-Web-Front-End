@@ -121,6 +121,11 @@ SETTINGS_REGISTRY: list[dict[str, Any]] = [
     {"key": "NEWSLETTER_TO", "label": "Newsletter To", "group": "Email / Newsletter", "secret": False, "placeholder": "recipient@example.com"},
     # Notifications
     {"key": "FRED_NOTIFY_URL", "label": "Notify Webhook URL", "group": "Notifications", "secret": True, "placeholder": "WhatsApp/webhook URL (leave blank to disable)"},
+    # Brokerage (Alpaca) — credential fields stored, no live holdings integration yet
+    {"key": "ALPACA_ENABLED", "label": "Alpaca (credential fields only — holdings not yet wired)", "group": "Brokerage (Alpaca)", "secret": False, "type": "toggle", "on_label": "On", "off_label": "Off", "placeholder": ""},
+    {"key": "ALPACA_API_KEY", "label": "Alpaca API Key", "group": "Brokerage (Alpaca)", "secret": True, "placeholder": "API key ID from alpaca.markets"},
+    {"key": "ALPACA_API_SECRET", "label": "Alpaca API Secret", "group": "Brokerage (Alpaca)", "secret": True, "placeholder": "API secret"},
+    {"key": "ALPACA_BASE_URL", "label": "Alpaca Base URL", "group": "Brokerage (Alpaca)", "secret": False, "placeholder": "https://api.alpaca.markets"},
 ]
 
 _REGISTRY_BY_KEY = {s["key"]: s for s in SETTINGS_REGISTRY}

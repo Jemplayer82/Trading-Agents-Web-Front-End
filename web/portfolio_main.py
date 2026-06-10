@@ -396,6 +396,160 @@ def _parse_schwab_account(accounts: list[dict[str, Any]] | None) -> dict[str, An
     }
 
 
+def _accounts_split() -> list[dict[str, Any]]:
+    """Per-account live holdings for the live-holdings UI panel.
+
+    Returns [all_entry, ...per_account]. Each entry has:
+      id, label, positions, total_value, cash, cost_basis, gain_dollars, gain_percent.
+    Each position has: symbol, shares, average_price, current_price, market_value,
+      cost_basis, gain_dollars, gain_percent, asset_type, and optionally signal/analysis_id
+      merged from the latest completed portfolio scan.
+    """
+    accounts = schwab_mcp.get_accounts(fields="positions")
+    if not accounts:
+        return []
+
+    per_account: list[dict[str, Any]] = []
+    all_syms: dict[str, dict[str, Any]] = {}
+
+    for a in accounts:
+        sec = a.get("securitiesAccount") or a
+        account_num = str(sec.get("accountNumber") or "")
+        acct_type = (sec.get("type") or "Account").title()
+        label = f"{acct_type} ••{account_num[-4:]}" if len(account_num) >= 4 else acct_type
+
+        positions: list[dict[str, Any]] = []
+        acct_cost = 0.0
+        acct_mv = 0.0
+
+        for p in sec.get("positions") or []:
+            instr = p.get("instrument") or {}
+            sym = instr.get("symbol")
+            shares = float(p.get("longQuantity") or 0) - float(p.get("shortQuantity") or 0)
+            if not sym or shares == 0:
+                continue
+            avg_price = float(p.get("averagePrice") or 0)
+            mv = float(p.get("marketValue") or 0)
+            cp = mv / shares if shares else 0.0
+            cost = avg_price * shares
+            gain = mv - cost
+            gain_pct = (gain / cost * 100) if cost else 0.0
+
+            pos: dict[str, Any] = {
+                "symbol": sym,
+                "shares": round(shares, 4),
+                "average_price": round(avg_price, 4),
+                "current_price": round(cp, 4),
+                "market_value": round(mv, 2),
+                "cost_basis": round(cost, 2),
+                "gain_dollars": round(gain, 2),
+                "gain_percent": round(gain_pct, 4),
+                "asset_type": instr.get("assetType") or "EQUITY",
+            }
+            positions.append(pos)
+            acct_cost += cost
+            acct_mv += mv
+
+            ae = all_syms.setdefault(sym, {
+                "symbol": sym, "shares": 0.0, "market_value": 0.0, "_cost": 0.0,
+                "asset_type": instr.get("assetType") or "EQUITY",
+            })
+            ae["shares"] += shares
+            ae["market_value"] += mv
+            ae["_cost"] += cost
+
+        positions.sort(key=lambda x: -x["market_value"])
+        cur = sec.get("currentBalances") or {}
+        init = sec.get("initialBalances") or {}
+        tv = (cur.get("liquidationValue") or cur.get("equity")
+              or init.get("liquidationValue") or init.get("accountValue") or acct_mv)
+        c = cur.get("cashBalance") or init.get("cashBalance") or init.get("totalCash") or 0
+        acct_gain = acct_mv - acct_cost
+        acct_gain_pct = (acct_gain / acct_cost * 100) if acct_cost else 0.0
+
+        per_account.append({
+            "id": account_num,
+            "label": label,
+            "positions": positions,
+            "total_value": round(float(tv), 2),
+            "cash": round(float(c), 2),
+            "cost_basis": round(acct_cost, 2),
+            "gain_dollars": round(acct_gain, 2),
+            "gain_percent": round(acct_gain_pct, 4),
+        })
+
+    # Build "All Accounts" aggregate
+    all_positions: list[dict[str, Any]] = []
+    all_cost = 0.0
+    all_mv = 0.0
+    for ae in all_syms.values():
+        sh = ae["shares"]
+        mv = ae["market_value"]
+        cost = ae["_cost"]
+        gain = mv - cost
+        gain_pct = (gain / cost * 100) if cost else 0.0
+        all_positions.append({
+            "symbol": ae["symbol"],
+            "shares": round(sh, 4),
+            "average_price": round(cost / sh, 4) if sh else 0.0,
+            "current_price": round(mv / sh, 4) if sh else 0.0,
+            "market_value": round(mv, 2),
+            "cost_basis": round(cost, 2),
+            "gain_dollars": round(gain, 2),
+            "gain_percent": round(gain_pct, 4),
+            "asset_type": ae["asset_type"],
+        })
+        all_cost += cost
+        all_mv += mv
+    all_positions.sort(key=lambda x: -x["market_value"])
+    all_gain = all_mv - all_cost
+    all_entry: dict[str, Any] = {
+        "id": "all",
+        "label": "All Accounts",
+        "positions": all_positions,
+        "total_value": round(sum(a["total_value"] for a in per_account), 2),
+        "cash": round(sum(a["cash"] for a in per_account), 2),
+        "cost_basis": round(all_cost, 2),
+        "gain_dollars": round(all_gain, 2),
+        "gain_percent": round((all_gain / all_cost * 100) if all_cost else 0.0, 4),
+    }
+
+    # Merge latest scan signals onto matching positions (best-effort)
+    try:
+        with db.connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM portfolio_scans WHERE status='completed' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if row:
+            latest = db.get_portfolio_scan(row["id"])
+            ticker_map = {t["ticker"]: t for t in (latest.get("tickers") or [])}
+            for acct in [all_entry] + per_account:
+                for pos in acct["positions"]:
+                    t = ticker_map.get(pos["symbol"])
+                    if t:
+                        pos["signal"] = t.get("signal")
+                        pos["analysis_id"] = t.get("analysis_id")
+    except Exception:
+        pass
+
+    return [all_entry] + per_account
+
+
+@app.get("/api/accounts")
+def accounts() -> dict[str, Any]:
+    """Live per-account holdings with cost basis, gain/loss, and optional AI scan signals."""
+    if not schwab_mcp.schwab_enabled():
+        return {"enabled": False, "connected": False}
+    try:
+        data = _accounts_split()
+    except Exception:
+        log.exception("[accounts] Schwab MCP read failed")
+        data = None
+    if not data:
+        return {"enabled": True, "connected": False}
+    return {"enabled": True, "connected": True, "accounts": data}
+
+
 @app.get("/api/spy-account")
 def spy_account() -> dict[str, Any]:
     """Live Schwab holdings + balances via the Schwab MCP server (read-only)."""
