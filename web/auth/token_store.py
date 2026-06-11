@@ -11,9 +11,10 @@ import json
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Optional
 
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import InvalidToken
+
+from web.secret_box import require_fernet
 
 _HOME = Path(os.path.expanduser("~")) / ".tradingagents"
 TOKEN_PATH = Path(os.environ.get("SCHWAB_TOKEN_PATH", str(_HOME / "schwab_tokens.enc")))
@@ -27,19 +28,12 @@ class TokenBundle:
     refresh_issued_at: str   # ISO timestamp — when the *refresh* token was minted
 
 
-def _key() -> bytes:
-    raw = os.environ.get("TOKEN_ENCRYPTION_KEY")
-    if not raw:
-        raise RuntimeError("TOKEN_ENCRYPTION_KEY env var is required")
-    return raw.encode()
-
-
-def load() -> Optional[TokenBundle]:
+def load() -> TokenBundle | None:
     if not TOKEN_PATH.exists():
         return None
     try:
         encrypted = TOKEN_PATH.read_bytes()
-        plain = Fernet(_key()).decrypt(encrypted)
+        plain = require_fernet().decrypt(encrypted)
         data = json.loads(plain.decode())
         return TokenBundle(**data)
     except (InvalidToken, json.JSONDecodeError, TypeError, ValueError):
@@ -49,7 +43,7 @@ def load() -> Optional[TokenBundle]:
 def save(bundle: TokenBundle) -> None:
     TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(asdict(bundle)).encode()
-    encrypted = Fernet(_key()).encrypt(payload)
+    encrypted = require_fernet().encrypt(payload)
     tmp = TOKEN_PATH.with_suffix(".tmp")
     tmp.write_bytes(encrypted)
     try:
