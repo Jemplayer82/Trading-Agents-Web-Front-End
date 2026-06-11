@@ -101,6 +101,7 @@ This fork extends the original **[TradingAgents](https://github.com/TauricResear
 - Real-time WebSocket streaming of agent progress and reports
 - Interactive technical charts with RSI, MACD, Bollinger Bands overlays
 - Per-analysis Q&A thread (multi-turn conversation without re-running)
+- Live Agent Bus feed — watch analysts, researchers, and the risk team communicate in real time as the pipeline runs
 
 **📊 Portfolio & Market Automation**
 - Schwab OAuth integration for brokerage account scanning
@@ -275,6 +276,81 @@ API keys are managed directly from the Credentials tab — no `.env` editing req
 
 ---
 
+## Agent Bus — Watch the Agents Talk
+
+The **Agent Bus** mirrors every inter-agent handoff from the LangGraph pipeline onto a dedicated [mcp-switchboard](https://github.com/Jemplayer82/mcp-switchboard) instance running inside the stack, then streams the messages to a live feed panel in the dashboard. A visitor can watch analysts deliver reports, bull/bear researchers debate, the risk team stress-test, and the portfolio manager reach a final decision — in real time, as the run happens.
+
+LangGraph remains the pipeline orchestrator. The bus is a **read-only mirror** — graph code is untouched; all taps live in the `web/` layer.
+
+### Architecture
+
+```
+  LangGraph Pipeline               Bus Mirror                     Dashboard
+  ─────────────────    ──────────────────────────────────    ──────────────────
+
+  4 Analysts ────────→ on_report_delta → result messages  →┐
+  Bull/Bear debate ──→ on_state        → chat turns        →├─ switchboard :3107
+  Research Mgr ──────→ handoff         → instructions      →│  analysis-{id}
+  Trader ────────────→ handoff         → instructions      →│       │
+  Risk team ─────────→ on_state        → chat turns        →│       │ /api/bus WS
+  Portfolio Mgr ─────→ on_done         → FINAL decision    →┘       │ (poll + backfill)
+                                                                     ↓
+  LangGraph stays as the orchestrator.                       [ Agent Bus ]  ●
+  Bus is a read-only mirror of handoffs.                     Orchestrator   instruction
+                                                             Market Analyst result
+                                                             Bull           chat
+                                                             Bear           chat
+                                                             Portfolio Mgr  result
+```
+
+### Enabling the Agent Bus
+
+The switchboard service is already in `docker-compose.yml`. Set one environment variable and it starts on the next `docker compose up`:
+
+```bash
+# Generate a fresh bearer token — keep this secret, like a password
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Add the output to your `.env` (or Portainer stack environment):
+
+```bash
+SWITCHBOARD_MCP_TOKEN=<your-generated-token>
+```
+
+The `switchboard` container starts automatically, `tradingagents-web` connects to it at `http://switchboard:3107`, and the **[ Agent Bus ]** panel appears live on the Run Analysis tab.
+
+### Fresh-Stack Quickstart
+
+```bash
+git clone https://github.com/Jemplayer82/Trading-Agents-Web-Front-End.git
+cd Trading-Agents-Web-Front-End
+cp .env.example .env
+
+# Edit .env — fill in the three required values:
+#   OLLAMA_API_KEY=        your Ollama Cloud key (https://ollama.com)
+#   TOKEN_ENCRYPTION_KEY=  python -c "import base64,os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())"
+#   SWITCHBOARD_MCP_TOKEN= python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+docker compose up -d
+```
+
+Open `http://localhost:8080` → Run Analysis tab → **[ Agent Bus ]** panel at the bottom.
+
+### Agent Bus Environment Variables
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `SWITCHBOARD_MCP_TOKEN` | Yes | — | Bearer token for the in-stack switchboard. Generate: `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `BUS_MIRROR` | No | `analysis` | Set to `off` to disable all bus publishing without stopping the switchboard container |
+| `SWITCHBOARD_URL` | Auto | `http://switchboard:3107` | Resolved by compose — only override if running the switchboard outside the stack |
+
+### Future: Bus-Native Orchestration
+
+Bus-native orchestration — replacing LangGraph edges with agents that long-poll `wait_for_message` so they react to each other rather than following a fixed graph — is pinned as a future branch (`bus-native-orchestration`). The `BUS_MIRROR=all` env value and the `wait_for_message` method in `web/bus.py` are its hooks. Nothing in this branch builds bus-native orchestration.
+
+---
+
 ## Schwab MCP Companion
 
 [**schwab-mcp**](https://github.com/Jemplayer82/schwab-mcp) is a companion containerized Node.js MCP server that gives TradingAgents a direct, real-time connection to your Schwab brokerage account. Rather than relying on manual data exports or delayed feeds, the dashboard communicates with Schwab through schwab-mcp to pull live quotes, account positions, open orders, and transaction history — enabling the Portfolio Scan, S&P 500 scanner, and OAuth token management to work seamlessly.
@@ -361,6 +437,10 @@ SCHWAB_REDIRECT_URI=http://localhost:8080/api/auth/schwab/callback
 
 # Logging
 LOG_LEVEL=INFO
+
+# Agent Bus (in-stack switchboard — optional but recommended)
+SWITCHBOARD_MCP_TOKEN=<generated>       # bearer token — generate: python -c "import secrets; print(secrets.token_urlsafe(32))"
+BUS_MIRROR=analysis                      # set to "off" to disable bus publishing without stopping the container
 ```
 
 > **Security:** `OLLAMA_API_KEY` and all other secrets must never be committed to the public fork — inject them via the Portainer stack environment or local environment variables only.
@@ -402,9 +482,12 @@ tradingagents/
 │   ├── llm_helpers.py      # Multi-provider LLM abstraction
 │   ├── spy_scanner.py      # S&P 500 3-phase scanner
 │   ├── spy_allocator.py    # $100k portfolio builder
+│   ├── bus.py              # Switchboard MCP client + resilient publisher
+│   ├── bus_mirror.py       # Mirror LangGraph handoffs onto the agent bus
 │   └── static/             # SPA files
 │       ├── index.html
 │       ├── app.js
+│       ├── bus.js          # Agent Bus WebSocket client + live feed panel
 │       ├── portfolio.js
 │       ├── spy.js
 │       ├── credentials.js
@@ -524,6 +607,6 @@ If you use TradingAgents (original or fork), please cite the original framework:
 
 ---
 
-**Last Updated:** June 3, 2026
+**Last Updated:** June 11, 2026
 **Fork:** https://github.com/Jemplayer82/Trading-Agents-Web-Front-End
 **Original:** https://github.com/TauricResearch/TradingAgents
