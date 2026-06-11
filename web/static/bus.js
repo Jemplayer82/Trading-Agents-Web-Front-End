@@ -4,7 +4,7 @@
   "use strict";
 
   // ===== Agent display name map =====
-  var AGENT_NAMES = {
+  const AGENT_NAMES = {
     "market-analyst":        "Market Analyst",
     "sentiment-analyst":     "Sentiment",
     "news-analyst":          "News",
@@ -21,21 +21,20 @@
   };
 
   // ===== State =====
-  var ws = null;
-  var desiredChannel = null;   // channel to join on connect/reconnect
-  var reconnectAttempt = 0;
-  var reconnectTimer = null;
-  var busConfigured = true;    // flips false when server says "bus not configured"
-  var lastBusStatusOk = null;  // null = unknown, true/false from bus_status frames
-  var DOM_CAP = 300;
+  let ws = null;
+  let desiredChannel = null;   // channel to join on connect/reconnect
+  let reconnectAttempt = 0;
+  let reconnectTimer = null;
+  let lastBusStatusOk = null;  // null = unknown, true/false from bus_status frames
+  const DOM_CAP = 300;
 
-  var feed     = null;
-  var dotEl    = null;
-  var chanEl   = null;
-  var pillEl   = null;         // "↓ live" pill (created on first need)
+  let feed  = null;
+  let dotEl = null;
+  let chanEl = null;
+  let pillEl = null;           // "↓ live" pill (created on first need)
 
   // ===== Auto-scroll state =====
-  var stuckToBottom = true;
+  let stuckToBottom = true;
 
   // ===== DOM helpers =====
   function $(id) { return document.getElementById(id); }
@@ -59,39 +58,39 @@
 
   // ===== Time formatting =====
   function fmtTime(ms) {
-    var d = new Date(ms);
-    var pad = function (n) { return String(n).padStart(2, "0"); };
+    const d = new Date(ms);
+    const pad = (n) => String(n).padStart(2, "0");
     return pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
   }
 
   // ===== Feed rendering =====
   function clearFeed() {
-    if (feed) feed.innerHTML = "";
+    if (feed) feed.replaceChildren();
   }
 
   function renderMessage(msg) {
     if (!feed) return;
-    var agentId = msg.agent || "";
-    var displayName = AGENT_NAMES[agentId] || agentId;
+    const agentId = msg.agent || "";
+    const displayName = AGENT_NAMES[agentId] || agentId;
 
-    var li = document.createElement("li");
+    const li = document.createElement("li");
     li.className = "bus-msg";
     li.dataset.agent = agentId;
 
-    var badge = document.createElement("span");
+    const badge = document.createElement("span");
     badge.className = "bus-badge";
     badge.textContent = displayName;
 
-    var timeEl = document.createElement("span");
+    const timeEl = document.createElement("span");
     timeEl.className = "bus-time";
     timeEl.textContent = fmtTime(msg.ts);
 
-    var header = document.createElement("div");
+    const header = document.createElement("div");
     header.className = "bus-msg-header";
     header.appendChild(badge);
 
     if (msg.msg_type === "result" || msg.msg_type === "instruction") {
-      var chip = document.createElement("span");
+      const chip = document.createElement("span");
       chip.className = "bus-chip bus-chip-" + msg.msg_type;
       chip.textContent = msg.msg_type;
       header.appendChild(chip);
@@ -99,14 +98,14 @@
 
     header.appendChild(timeEl);
 
-    var content = document.createElement("div");
+    const content = document.createElement("div");
     content.className = "bus-msg-content";
     content.textContent = msg.content || "";  // NEVER innerHTML for content
 
     li.appendChild(header);
     li.appendChild(content);
 
-    var wasAtBottom = isAtBottom();
+    const wasAtBottom = isAtBottom();
     feed.appendChild(li);
 
     // Enforce DOM cap
@@ -141,9 +140,9 @@
     pillEl.className = "bus-live-pill";
     pillEl.textContent = "↓ live";
     pillEl.addEventListener("click", scrollToBottom);
-    // Insert after the feed's parent panel
-    var panel = feed && feed.parentElement;
-    if (panel) panel.appendChild(pillEl);
+    // Append to the positioned wrapper that contains the feed
+    const wrap = feed && feed.parentElement;
+    if (wrap) wrap.appendChild(pillEl);
   }
 
   function showPill() {
@@ -169,11 +168,11 @@
   // other: 1s, 2s, 5s, max 10s
   function scheduleReconnect(code) {
     if (reconnectTimer) return;
-    var delay;
+    let delay;
     if (code === 4401) {
       delay = 10000;
     } else {
-      var steps = [1000, 2000, 5000, 10000];
+      const steps = [1000, 2000, 5000, 10000];
       delay = steps[Math.min(reconnectAttempt, steps.length - 1)];
     }
     reconnectTimer = setTimeout(function () {
@@ -189,8 +188,8 @@
     setDot("amber", "connecting…");
     lastBusStatusOk = null;
 
-    var proto = location.protocol === "https:" ? "wss" : "ws";
-    var url = proto + "://" + location.host + "/api/bus";
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    let url = proto + "://" + location.host + "/api/bus";
     if (desiredChannel) url += "?channel=" + encodeURIComponent(desiredChannel);
 
     try {
@@ -203,18 +202,12 @@
 
     ws.addEventListener("open", function () {
       reconnectAttempt = 0;
-      // If we have a desired channel and didn't put it in the URL (e.g. reconnect
-      // without constructing a fresh URL), send a switch frame.
-      // Actually we always put it in the URL above, so this is belt-and-suspenders.
-      if (desiredChannel) {
-        try { ws.send(JSON.stringify({ channel: desiredChannel })); } catch (e) {}
-      }
       // Dot will go green when we receive a bus_status ok:true
       setDot("amber", "connected, awaiting bus status…");
     });
 
     ws.addEventListener("message", function (ev) {
-      var frame;
+      let frame;
       try { frame = JSON.parse(ev.data); } catch (e) { return; }
       handleFrame(frame);
     });
@@ -227,7 +220,7 @@
         setDot("amber", "disconnected, reconnecting…");
       }
       reconnectAttempt++;
-      if (reconnectAttempt > 1) {
+      if (reconnectAttempt >= 1) {
         console.warn("[bus] disconnected (code " + ev.code + "), reconnecting (attempt " + reconnectAttempt + ")");
       }
       scheduleReconnect(ev.code);
@@ -244,13 +237,10 @@
       case "bus_status":
         lastBusStatusOk = frame.ok;
         if (!frame.ok && frame.reason === "bus not configured") {
-          busConfigured = false;
           setDot("grey", "bus not configured");
         } else if (!frame.ok) {
-          busConfigured = true;
           setDot("red", "bus outage: " + (frame.reason || "unknown"));
         } else {
-          busConfigured = true;
           setDot("green", "bus connected");
         }
         break;
@@ -282,7 +272,7 @@
 
   // ===== analysis-started event =====
   window.addEventListener("analysis-started", function (ev) {
-    var channel = "analysis-" + ev.detail;
+    const channel = "analysis-" + ev.detail;
     desiredChannel = channel;
     if (ws && ws.readyState === WebSocket.OPEN) {
       try { ws.send(JSON.stringify({ channel: channel })); } catch (e) {}

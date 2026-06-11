@@ -837,14 +837,18 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .bus-dot-red    { color: var(--accent-red); }
 .bus-dot-grey   { color: var(--dim); }
 
+.bus-feed-wrap {
+  position: relative;
+}
+
 /* "↓ live" pill */
 .bus-live-pill {
-  position: sticky;
-  bottom: 4px;
+  position: absolute;
+  bottom: 8px;
   left: 50%;
   transform: translateX(-50%);
   display: block;
-  margin: 4px auto 0;
+  z-index: 1;
   background: var(--accent-cyan);
   color: #04161b;
   border: none;
