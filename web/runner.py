@@ -201,7 +201,7 @@ def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Qu
             "message": f"Initializing {len(analysts)} analyst(s) for {ticker} on {trade_date}",
             "analysts": analysts,
         })
-        mirror = RunMirror.maybe_create(params, analysis_id) if RunMirror else None
+        mirror = RunMirror.maybe_create(params, analysis_id, analysts=analysts) if RunMirror else None
 
         cfg = build_config(params)
         graph = TradingAgentsGraph(
@@ -331,6 +331,6 @@ def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Qu
         if mirror:
             mirror.on_error(str(exc))
     finally:
+        frames.put(None)  # sentinel — must run before mirror.close() to avoid WS delay
         if mirror:
             mirror.close()
-        frames.put(None)  # sentinel

@@ -6,10 +6,6 @@ reset in the fixture that needs registration isolation.
 """
 from __future__ import annotations
 
-import os
-import importlib
-from typing import Any
-
 import pytest
 
 
@@ -24,12 +20,14 @@ class FakePublisher:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
         self.flush_count: int = 0
+        self.last_flush_timeout: float = 0.0
 
     def publish(self, tool: str, args: dict) -> None:
         self.calls.append((tool, args))
 
     def flush(self, timeout: float = 5.0) -> bool:
         self.flush_count += 1
+        self.last_flush_timeout = timeout
         return True
 
     # -- Query helpers for tests --
@@ -56,10 +54,9 @@ def _reset_module_flag():
     mod._agents_registered = False
 
 
-def _make_mirror(pub: FakePublisher, params: dict | None = None, analysis_id: int = 1):
+def _make_mirror(pub: FakePublisher, analysis_id: int = 1) -> "RunMirror":
     """Directly construct a RunMirror (bypasses maybe_create gating)."""
     from web.bus_mirror import RunMirror
-    p = params or {"ticker": "AAPL", "trade_date": "2024-01-15"}
     return RunMirror(pub, f"analysis-{analysis_id}", analysis_id)
 
 
@@ -149,13 +146,24 @@ class TestAgentRegistration:
 @pytest.mark.unit
 class TestKickoffSequence:
 
-    def _create_and_get_pub(self, monkeypatch, ticker="AAPL", trade_date="2024-01-15", analysis_id=5):
+    def _create_and_get_pub(
+        self,
+        monkeypatch,
+        ticker="AAPL",
+        trade_date="2024-01-15",
+        analysis_id=5,
+        analysts=None,
+    ):
         _reset_module_flag()
         monkeypatch.delenv("BUS_MIRROR", raising=False)
         pub = FakePublisher()
         monkeypatch.setattr("web.bus_mirror.get_publisher", lambda: pub)
         from web.bus_mirror import RunMirror
-        RunMirror.maybe_create({"ticker": ticker, "trade_date": trade_date}, analysis_id)
+        RunMirror.maybe_create(
+            {"ticker": ticker, "trade_date": trade_date},
+            analysis_id,
+            analysts=analysts,
+        )
         return pub
 
     def test_register_before_create_channel(self, monkeypatch):
@@ -197,6 +205,30 @@ class TestKickoffSequence:
         status_calls = [s for s in pub.statuses() if s["agent_id"] == "langgraph-orchestrator"]
         assert len(status_calls) >= 1
         assert "AAPL" in status_calls[0]["activity"]
+
+    def test_kickoff_lists_only_selected_analysts(self, monkeypatch):
+        """A 2-analyst run's kickoff contains exactly those display names, not the others."""
+        pub = self._create_and_get_pub(
+            monkeypatch,
+            ticker="AAPL",
+            analysts=["market", "news"],
+        )
+        msgs = pub.messages_from("langgraph-orchestrator")
+        kickoff = msgs[0]["content"]
+        # Selected analysts must appear by display name
+        assert "Market Analyst" in kickoff
+        assert "News Analyst" in kickoff
+        # Non-selected analysts must NOT appear
+        assert "Sentiment Analyst" not in kickoff
+        assert "Fundamentals Analyst" not in kickoff
+
+    def test_kickoff_default_analysts_lists_all_four(self, monkeypatch):
+        """When analysts=None all four display names appear in the kickoff."""
+        pub = self._create_and_get_pub(monkeypatch, ticker="AAPL", analysts=None)
+        msgs = pub.messages_from("langgraph-orchestrator")
+        kickoff = msgs[0]["content"]
+        for name in ("Market Analyst", "Sentiment Analyst", "News Analyst", "Fundamentals Analyst"):
+            assert name in kickoff, f"{name!r} missing from default kickoff"
 
 
 # ---------------------------------------------------------------------------
@@ -638,11 +670,12 @@ class TestClose:
         assert pub.flush_count == 1
 
     def test_close_flush_timeout_is_5s(self):
-        """Verify flush is called — FakePublisher.flush accepts the 5.0 arg."""
+        """Flush must be called with a 5.0-second timeout."""
         pub = FakePublisher()
         m = _make_mirror(pub)
-        m.close()  # would raise TypeError if arg mismatch
+        m.close()
         assert pub.flush_count == 1
+        assert pub.last_flush_timeout == 5.0
 
 
 # ---------------------------------------------------------------------------
