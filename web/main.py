@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import auth_app
+from . import bus
 from . import credentials as creds
 from . import db
 from .auth import schwab as schwab_auth
@@ -644,3 +645,312 @@ async def analyze(ws: WebSocket) -> None:
             await ws.close()
         except Exception:
             pass
+
+
+# ---------- bus WebSocket bridge (/api/bus) ----------
+
+# Poll cadence for the bus bridge. Override in tests via BUS_POLL_INTERVAL env
+# var (e.g. "0.05") to avoid slow test suites.
+def _bus_poll_interval() -> float:
+    try:
+        return float(os.environ.get("BUS_POLL_INTERVAL", "1.0"))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _pick_latest_analysis_channel(channels: list[dict]) -> str | None:
+    """Return the channel_id of the analysis-* channel with the highest numeric suffix.
+
+    channels is the list returned by list_channels(): each entry has an 'id' key
+    (the channel_id string) plus 'name' and 'member_count'.
+
+    Returns None if no analysis-* channel exists.
+    """
+    best_id: str | None = None
+    best_num: int = -1
+    for ch in channels:
+        cid = ch.get("id") or ""
+        if not cid.startswith("analysis-"):
+            continue
+        suffix = cid[len("analysis-"):]
+        try:
+            num = int(suffix)
+        except ValueError:
+            continue
+        if num > best_num:
+            best_num = num
+            best_id = cid
+    return best_id
+
+
+def _to_frame(row: dict, channel: str) -> dict:
+    """Map a raw bus message row to the /api/bus wire frame.
+
+    Field naming note: the frame envelope uses "type" for the frame kind
+    ("bus_message").  The bus message's own type field (chat/result/instruction)
+    is carried as "msg_type" to avoid clobbering the envelope key.
+    """
+    return {
+        "type": "bus_message",
+        "id": row.get("id"),
+        "agent": row.get("from"),          # bus field is 'from' (Python reserved)
+        "channel": channel,
+        "msg_type": row.get("type"),       # chat | result | instruction | status ...
+        "content": row.get("content"),
+        "ts": row.get("created_at"),
+        "thread_id": row.get("thread_id"),  # may be None — that's fine
+    }
+
+
+@app.websocket("/api/bus")
+async def bus_ws(ws: WebSocket) -> None:
+    """Stream switchboard bus messages to the dashboard.
+
+    Auth gate is identical to /api/analyze: valid session cookie OR
+    X-Internal-Token header matching INTERNAL_API_TOKEN env var (code 4401 on
+    failure).
+
+    Channel resolution order:
+      1. ?channel= query param
+      2. list_channels() → newest analysis-* by numeric suffix
+      3. Poll until one appears (still serving pings)
+
+    Live poll sends bus_message frames every BUS_POLL_INTERVAL seconds.
+    Client may send {"channel": "analysis-N"} text frames to switch channel.
+    Bus failures send bus_status ok:false once per outage; recovery sends
+    bus_status ok:true.  Bus failures never close the socket.
+    """
+    # ---- auth gate (identical to /api/analyze) ----
+    token = ws.cookies.get(auth_app.COOKIE_NAME)
+    internal = ws.headers.get("x-internal-token")
+    expected = os.environ.get("INTERNAL_API_TOKEN")
+    authed = bool(token and db.get_session(token)) or bool(
+        internal and expected and internal == expected
+    )
+    if not authed:
+        await ws.close(code=4401)
+        return
+
+    await ws.accept()
+
+    client = bus.get_reader()
+    if client is None:
+        await ws.send_json({"type": "bus_status", "ok": False, "reason": "bus not configured"})
+        # Keep open — frontend shows a grey dot; just idle with periodic pings.
+        try:
+            while True:
+                await asyncio.sleep(25)
+                try:
+                    await ws.send_json({"type": "ping"})
+                except (WebSocketDisconnect, RuntimeError):
+                    return
+        except (WebSocketDisconnect, asyncio.CancelledError):
+            return
+
+    # ---- receive task: feed inbound client frames into a variable ----
+    # We use a simple asyncio.Queue so the poll loop can non-blockingly check
+    # for channel-switch requests without coupling to WebSocket.receive().
+    incoming: asyncio.Queue[str | None] = asyncio.Queue()
+
+    async def _reader_task() -> None:
+        try:
+            while True:
+                data = await ws.receive_text()
+                await incoming.put(data)
+        except (WebSocketDisconnect, RuntimeError):
+            await incoming.put(None)  # sentinel: client gone
+
+    reader_task = asyncio.create_task(_reader_task())
+
+    # ---- channel resolution from ?channel= query param ----
+    channel: str | None = ws.query_params.get("channel") or None
+
+    # ---- per-outage status tracking ----
+    bus_ok: bool = True  # assume healthy until first failure
+
+    async def _send_bus_status(ok: bool, reason: str = "") -> None:
+        nonlocal bus_ok
+        frame: dict[str, Any] = {"type": "bus_status", "ok": ok}
+        if not ok and reason:
+            frame["reason"] = reason
+        try:
+            await ws.send_json(frame)
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        bus_ok = ok
+
+    cursor: int = 0
+    last_ping = asyncio.get_event_loop().time()
+    poll_interval = _bus_poll_interval()
+
+    try:
+        while True:
+            # ---- channel discovery / wait loop ----
+            if channel is None:
+                # Try to pick a channel from the bus.
+                try:
+                    result = await asyncio.to_thread(client.list_channels)
+                    ch_list = result.get("channels") or []
+                    channel = _pick_latest_analysis_channel(ch_list)
+                    if bus_ok is False:
+                        await _send_bus_status(True)
+                except Exception as exc:
+                    if bus_ok:
+                        await _send_bus_status(False, str(exc))
+                    # No channel yet; wait with a ping then retry.
+                    now = asyncio.get_event_loop().time()
+                    if now - last_ping >= 25:
+                        last_ping = now
+                        try:
+                            await ws.send_json({"type": "ping"})
+                        except (WebSocketDisconnect, RuntimeError):
+                            return
+                    # Poll incoming for channel-switch before sleeping.
+                    try:
+                        msg = incoming.get_nowait()
+                        if msg is None:
+                            return
+                        _maybe_channel = _parse_channel_switch(msg)
+                        if _maybe_channel:
+                            channel = _maybe_channel
+                            cursor = 0
+                            continue
+                    except asyncio.QueueEmpty:
+                        pass
+                    await asyncio.sleep(5.0)
+                    continue
+
+                if channel is None:
+                    # Bus is reachable but no analysis-* channel yet — send status
+                    # and idle until one appears.
+                    await ws.send_json({"type": "bus_status", "ok": True})
+                    now = asyncio.get_event_loop().time()
+                    if now - last_ping >= 25:
+                        last_ping = now
+                        try:
+                            await ws.send_json({"type": "ping"})
+                        except (WebSocketDisconnect, RuntimeError):
+                            return
+                    try:
+                        msg = incoming.get_nowait()
+                        if msg is None:
+                            return
+                        _maybe_channel = _parse_channel_switch(msg)
+                        if _maybe_channel:
+                            channel = _maybe_channel
+                            cursor = 0
+                            continue
+                    except asyncio.QueueEmpty:
+                        pass
+                    await asyncio.sleep(5.0)
+                    continue
+
+            # ---- announce channel + backfill ----
+            try:
+                await ws.send_json({"type": "channel", "channel": channel, "name": channel})
+            except (WebSocketDisconnect, RuntimeError):
+                return
+
+            # Backfill: history read with channel_id+since_id is cursor-free
+            # (no read_cursors side-effect per bus.js getMessages).
+            try:
+                backfill = await asyncio.to_thread(
+                    client.get_messages,
+                    "dashboard-bridge",
+                    channel_id=channel,
+                    since_id=0,
+                    limit=200,
+                    peek=True,
+                )
+                if bus_ok is False:
+                    await _send_bus_status(True)
+                msgs = backfill.get("messages") or []
+                frames = [_to_frame(r, channel) for r in msgs]
+                try:
+                    await ws.send_json({"type": "backfill", "messages": frames})
+                except (WebSocketDisconnect, RuntimeError):
+                    return
+                if msgs:
+                    cursor = max(r.get("id", 0) for r in msgs)
+                else:
+                    cursor = 0
+            except Exception as exc:
+                if bus_ok:
+                    await _send_bus_status(False, str(exc))
+
+            # ---- live poll loop ----
+            while True:
+                # Check for client text frames (channel-switch or disconnect).
+                try:
+                    raw = incoming.get_nowait()
+                    if raw is None:
+                        return  # client disconnected
+                    new_channel = _parse_channel_switch(raw)
+                    if new_channel and new_channel != channel:
+                        channel = new_channel
+                        cursor = 0
+                        break  # re-announce + re-backfill
+                except asyncio.QueueEmpty:
+                    pass
+
+                # Poll for new messages.
+                try:
+                    result = await asyncio.to_thread(
+                        client.get_messages,
+                        "dashboard-bridge",
+                        channel_id=channel,
+                        since_id=cursor,
+                        limit=50,
+                        peek=True,
+                    )
+                    if bus_ok is False:
+                        await _send_bus_status(True)
+                    new_msgs = result.get("messages") or []
+                    for row in new_msgs:
+                        frame = _to_frame(row, channel)
+                        try:
+                            await ws.send_json(frame)
+                        except (WebSocketDisconnect, RuntimeError):
+                            return
+                        if row.get("id", 0) > cursor:
+                            cursor = row["id"]
+                except Exception as exc:
+                    if bus_ok:
+                        await _send_bus_status(False, str(exc))
+                    # Back off during outage before retrying.
+                    await asyncio.sleep(5.0)
+                    continue
+
+                # Periodic ping.
+                now = asyncio.get_event_loop().time()
+                if now - last_ping >= 25:
+                    last_ping = now
+                    try:
+                        await ws.send_json({"type": "ping"})
+                    except (WebSocketDisconnect, RuntimeError):
+                        return
+
+                await asyncio.sleep(poll_interval)
+
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        pass
+    finally:
+        reader_task.cancel()
+        try:
+            await reader_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+def _parse_channel_switch(raw: str) -> str | None:
+    """Parse a client text frame for a channel-switch request.
+
+    Expected: {"channel": "analysis-N"}.  Invalid JSON → None.  Missing or
+    non-string channel key → None.
+    """
+    try:
+        data = __import__("json").loads(raw)
+    except Exception:
+        return None
+    ch = data.get("channel") if isinstance(data, dict) else None
+    return ch if isinstance(ch, str) and ch else None

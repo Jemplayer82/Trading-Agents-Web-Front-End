@@ -389,6 +389,53 @@ class BusPublisher:
 _publisher_lock = threading.Lock()
 _publisher_instance: BusPublisher | None = None
 
+# ---------------------------------------------------------------------------
+# Lazy reader singleton (read-only SwitchboardClient for the /api/bus bridge)
+# ---------------------------------------------------------------------------
+
+_reader_lock = threading.Lock()
+_reader_instance: SwitchboardClient | None = None
+_reader_failed: bool = False
+
+
+def get_reader() -> SwitchboardClient | None:
+    """Return a process-global SwitchboardClient for reading bus messages.
+
+    Lazy-initialised on first call.  Thread-safe.  Gated on the same env vars
+    as get_publisher() (SWITCHBOARD_URL + SWITCHBOARD_MCP_TOKEN).
+
+    Never raises.  Construction failure sets a flag and returns None permanently
+    (same _publisher_failed pattern).  Callers treat None as "bus unavailable".
+    """
+    global _reader_instance, _reader_failed
+
+    url = os.environ.get("SWITCHBOARD_URL")
+    token = os.environ.get("SWITCHBOARD_MCP_TOKEN")
+    if not url or not token:
+        return None
+
+    if _reader_instance is not None:
+        return _reader_instance
+
+    if _reader_failed:
+        return None
+
+    with _reader_lock:
+        # Double-checked locking
+        if _reader_instance is not None:
+            return _reader_instance
+        if _reader_failed:
+            return None
+        try:
+            instance = SwitchboardClient(url=url, token=token)
+            _reader_instance = instance
+            log.info("bus reader initialised (url=%s)", url)
+            return _reader_instance
+        except Exception as exc:
+            _reader_failed = True
+            log.error("bus reader init failed — bus unavailable: %s", exc)
+            return None
+
 
 def get_publisher() -> BusPublisher | None:
     """Return the process-global BusPublisher, or None if env vars are unset.
