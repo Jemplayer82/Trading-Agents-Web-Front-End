@@ -7,25 +7,22 @@ at 22:00 ET nightly.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Iterator
+from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 
 from tradingagents.constants import SIGNALS
-from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.dataflows import schwab_mcp
-from tradingagents.graph.portfolio_graph import run_portfolio_scan
+from tradingagents.default_config import DEFAULT_CONFIG
 
-from . import auth_app
+from . import auth_app, db, spy_allocator, spy_scanner
 from . import credentials as creds
-from . import db
 from ._logging import configure_logging
 from .portfolio import aggregator
-from . import spy_scanner, spy_allocator
 from .spy_tickers import get_sp500_tickers
 
 log = logging.getLogger(__name__)

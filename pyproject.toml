@@ -57,6 +57,32 @@ include = ["tradingagents*", "cli*", "web*"]
 cli = ["static/*"]
 web = ["static/*", "templates/*"]
 
+# Ruff is the project's linter/formatter. The repo had no linter before, so a
+# repo-wide cleanup is intentionally incremental: this config defines the target
+# standard, and modules are brought into compliance as they are touched. Run
+# `ruff check .` to see the remaining backlog; `ruff check <path>` for one module.
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+# F = pyflakes (unused imports/vars, undefined names)
+# I = isort (import ordering)   UP = pyupgrade (modern syntax)   B = flake8-bugbear
+select = ["F", "I", "UP", "B"]
+ignore = [
+    "B008",  # function call in default arg — idiomatic for FastAPI's Depends()/Query()
+]
+
+[tool.ruff.lint.per-file-ignores]
+# A few modules deliberately re-export via `from x import *`; don't flag the
+# resulting star-import warnings there.
+"cli/main.py" = ["F403", "F405"]
+"tradingagents/graph/setup.py" = ["F403", "F405"]
+"tradingagents/graph/trading_graph.py" = ["F403", "F405"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["tradingagents", "web", "cli"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"

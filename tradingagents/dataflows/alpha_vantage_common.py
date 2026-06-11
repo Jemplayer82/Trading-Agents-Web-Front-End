@@ -1,10 +1,11 @@
+import json
 import logging
 import os
-import requests
-import pandas as pd
-import json
 from datetime import datetime
 from io import StringIO
+
+import pandas as pd
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +32,8 @@ def format_datetime_for_api(date_input) -> str:
             try:
                 dt = datetime.strptime(date_input, "%Y-%m-%d %H:%M")
                 return dt.strftime("%Y%m%dT%H%M")
-            except ValueError:
-                raise ValueError(f"Unsupported date format: {date_input}")
+            except ValueError as e:
+                raise ValueError(f"Unsupported date format: {date_input}") from e
     elif isinstance(date_input, datetime):
         return date_input.strftime("%Y%m%dT%H%M")
     else:
