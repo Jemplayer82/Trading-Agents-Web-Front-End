@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import logging
 import os
 import queue
@@ -799,6 +800,7 @@ async def bus_ws(ws: WebSocket) -> None:
 
     # ---- per-outage status tracking ----
     bus_ok: bool = True  # assume healthy until first failure
+    waiting_announced: bool = False  # sent the "healthy but no channel yet" status?
 
     async def _send_bus_status(ok: bool, reason: str = "") -> None:
         nonlocal bus_ok
@@ -853,9 +855,14 @@ async def bus_ws(ws: WebSocket) -> None:
                     continue
 
                 if channel is None:
-                    # Bus is reachable but no analysis-* channel yet — send status
-                    # and idle until one appears.
-                    await ws.send_json({"type": "bus_status", "ok": True})
+                    # Bus is reachable but no analysis-* channel yet — announce
+                    # once and idle until one appears.
+                    if not waiting_announced:
+                        try:
+                            await ws.send_json({"type": "bus_status", "ok": True})
+                        except (WebSocketDisconnect, RuntimeError):
+                            return
+                        waiting_announced = True
                     now = asyncio.get_event_loop().time()
                     if now - last_ping >= 25:
                         last_ping = now
@@ -909,6 +916,9 @@ async def bus_ws(ws: WebSocket) -> None:
             except Exception as exc:
                 if bus_ok:
                     await _send_bus_status(False, str(exc))
+                # Fall through to the live poll loop with cursor as-is: once the
+                # bus recovers, history arrives as individual bus_message frames
+                # (no backfill envelope) — acceptable degraded path.
 
             # ---- live poll loop ----
             while True:
@@ -981,7 +991,7 @@ def _parse_channel_switch(raw: str) -> str | None:
     non-string channel key → None.
     """
     try:
-        data = __import__("json").loads(raw)
+        data = json.loads(raw)
     except Exception:
         return None
     ch = data.get("channel") if isinstance(data, dict) else None
