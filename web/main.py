@@ -782,7 +782,7 @@ async def bus_ws(ws: WebSocket) -> None:
         bus_ok = ok
 
     cursor: int = 0
-    last_ping = asyncio.get_event_loop().time()
+    last_ping = asyncio.get_running_loop().time()
     poll_interval = _bus_poll_interval()
 
     try:
@@ -800,7 +800,7 @@ async def bus_ws(ws: WebSocket) -> None:
                     if bus_ok:
                         await _send_bus_status(False, str(exc))
                     # No channel yet; wait with a ping then retry.
-                    now = asyncio.get_event_loop().time()
+                    now = asyncio.get_running_loop().time()
                     if now - last_ping >= 25:
                         last_ping = now
                         try:
@@ -831,7 +831,7 @@ async def bus_ws(ws: WebSocket) -> None:
                         except (WebSocketDisconnect, RuntimeError):
                             return
                         waiting_announced = True
-                    now = asyncio.get_event_loop().time()
+                    now = asyncio.get_running_loop().time()
                     if now - last_ping >= 25:
                         last_ping = now
                         try:
@@ -932,7 +932,7 @@ async def bus_ws(ws: WebSocket) -> None:
                     continue
 
                 # Periodic ping.
-                now = asyncio.get_event_loop().time()
+                now = asyncio.get_running_loop().time()
                 if now - last_ping >= 25:
                     last_ping = now
                     try:
