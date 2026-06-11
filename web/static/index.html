@@ -14,6 +14,7 @@
   <script src="/static/auth.js" defer></script>
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js" defer></script>
   <script src="/static/app.js" defer></script>
+  <script src="/static/bus.js" defer></script>
   <script src="/static/portfolio.js" defer></script>
   <script src="/static/spy.js" defer></script>
   <script src="/static/credentials.js" defer></script>
@@ -152,6 +153,14 @@
       <div class="panel messages-panel">
         <div class="panel-title">[ Messages / Tool Calls ]</div>
         <ul id="messages" class="messages"></ul>
+      </div>
+
+      <div class="panel bus-panel">
+        <div class="panel-title">[ Agent Bus ]
+          <span id="bus-channel" class="dim"></span>
+          <span id="bus-dot" class="bus-dot" title="bus connection">●</span>
+        </div>
+        <ul id="bus-feed" class="bus-feed"></ul>
       </div>
     </section>
   </main>
