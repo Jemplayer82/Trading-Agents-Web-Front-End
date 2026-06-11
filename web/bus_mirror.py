@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Any
 
 from .bus import get_publisher
 
@@ -108,7 +109,7 @@ class RunMirror:
         params: dict,
         analysis_id: int,
         analysts: list[str] | None = None,
-    ) -> "RunMirror | None":
+    ) -> RunMirror | None:
         """Return a RunMirror instance, or None if mirroring is disabled.
 
         Returns None when:

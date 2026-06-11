@@ -5,7 +5,6 @@ content without touching the network. Module-level _agents_registered flag is
 reset in the fixture that needs registration isolation.
 """
 from __future__ import annotations
-
 import pytest
 
 
@@ -54,7 +53,7 @@ def _reset_module_flag():
     mod._agents_registered = False
 
 
-def _make_mirror(pub: FakePublisher, analysis_id: int = 1) -> "RunMirror":
+def _make_mirror(pub: FakePublisher, analysis_id: int = 1) -> RunMirror:
     """Directly construct a RunMirror (bypasses maybe_create gating)."""
     from web.bus_mirror import RunMirror
     return RunMirror(pub, f"analysis-{analysis_id}", analysis_id)
@@ -115,7 +114,7 @@ class TestAgentRegistration:
         monkeypatch.delenv("BUS_MIRROR", raising=False)
         pub = FakePublisher()
         monkeypatch.setattr("web.bus_mirror.get_publisher", lambda: pub)
-        from web.bus_mirror import RunMirror, _AGENTS
+        from web.bus_mirror import _AGENTS, RunMirror
         RunMirror.maybe_create({"ticker": "AAPL", "trade_date": "2024-01-15"}, 1)
         reg_calls = pub.calls_for("register_agent")
         registered_ids = [a["agent_id"] for a in reg_calls]
@@ -127,7 +126,7 @@ class TestAgentRegistration:
         monkeypatch.delenv("BUS_MIRROR", raising=False)
         pub = FakePublisher()
         monkeypatch.setattr("web.bus_mirror.get_publisher", lambda: pub)
-        from web.bus_mirror import RunMirror, _AGENTS
+        from web.bus_mirror import _AGENTS, RunMirror
         # First mirror
         RunMirror.maybe_create({"ticker": "AAPL", "trade_date": "2024-01-15"}, 1)
         count_after_first = len(pub.calls_for("register_agent"))

@@ -8,14 +8,14 @@ the browser.
 
 from __future__ import annotations
 
-import json
 import os
 import queue
 import traceback
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from cli.models import AssetType
-from cli.utils import detect_asset_type, filter_analysts_for_asset_type
+from cli.utils import detect_asset_type
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
