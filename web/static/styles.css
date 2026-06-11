@@ -676,3 +676,124 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
   word-break: break-word;
   margin: 4px 0;
 }
+
+/* ===== Agent Bus panel ===== */
+
+.bus-feed {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 340px;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.bus-msg {
+  padding: 4px 0;
+  border-bottom: 1px dashed #0f1820;
+}
+
+.bus-msg-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 2px;
+}
+
+.bus-msg-content {
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding-left: 2px;
+}
+
+/* Agent badges */
+.bus-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 2px;
+  background: var(--panel-border);
+  color: var(--text);
+}
+
+/* Analysts — cyan family */
+.bus-msg[data-agent="market-analyst"]       .bus-badge { background: #103040; color: var(--accent-cyan); }
+.bus-msg[data-agent="sentiment-analyst"]    .bus-badge { background: #0d2e3a; color: #5bc8d8; }
+.bus-msg[data-agent="news-analyst"]         .bus-badge { background: #0c2c38; color: #4abece; }
+.bus-msg[data-agent="fundamentals-analyst"] .bus-badge { background: #0b2a36; color: #3ab4c4; }
+
+/* Bull — green */
+.bus-msg[data-agent="bull-researcher"]      .bus-badge { background: #0a2818; color: var(--accent-green); }
+
+/* Bear — red */
+.bus-msg[data-agent="bear-researcher"]      .bus-badge { background: #2e0e0e; color: var(--accent-red); }
+
+/* Research Mgr / Portfolio Mgr — gold */
+.bus-msg[data-agent="research-manager"]     .bus-badge { background: #2e2204; color: var(--accent-yellow); }
+.bus-msg[data-agent="portfolio-manager"]    .bus-badge { background: #2a1f04; color: var(--accent-yellow); }
+
+/* Trader — purple */
+.bus-msg[data-agent="trader"]               .bus-badge { background: #1e1030; color: var(--accent-magenta); }
+
+/* Risk variants */
+.bus-msg[data-agent="risk-aggressive"]      .bus-badge { background: #2e1a04; color: #f0a040; }
+.bus-msg[data-agent="risk-conservative"]    .bus-badge { background: #07162e; color: #7aabf0; }
+.bus-msg[data-agent="risk-neutral"]         .bus-badge { background: #141c24; color: var(--dim); }
+
+/* Orchestrator — dim */
+.bus-msg[data-agent="langgraph-orchestrator"] .bus-badge { background: #0d1219; color: var(--dim); }
+
+/* msg_type chips */
+.bus-chip {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 2px;
+}
+.bus-chip-result      { background: #0a2818; color: var(--accent-green); }
+.bus-chip-instruction { background: #2e2204; color: var(--accent-yellow); }
+
+/* Timestamp */
+.bus-time {
+  color: var(--dim);
+  font-size: 10px;
+  margin-left: auto;
+}
+
+/* Connection dot */
+.bus-dot {
+  font-size: 10px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.bus-dot-green  { color: var(--accent-green); }
+.bus-dot-amber  { color: var(--accent-yellow); }
+.bus-dot-red    { color: var(--accent-red); }
+.bus-dot-grey   { color: var(--dim); }
+
+/* "↓ live" pill */
+.bus-live-pill {
+  position: sticky;
+  bottom: 4px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: block;
+  margin: 4px auto 0;
+  background: var(--accent-cyan);
+  color: #04161b;
+  border: none;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 12px;
+  cursor: pointer;
+  letter-spacing: 0.4px;
+}

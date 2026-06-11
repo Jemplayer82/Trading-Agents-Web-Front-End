@@ -387,6 +387,7 @@ function handleFrame(frame) {
     case "started":
       activeHistoryId = frame.analysis_id;
       setStatus("running", `running #${frame.analysis_id}`);
+      window.dispatchEvent(new CustomEvent("analysis-started", { detail: frame.analysis_id }));
       break;
     case "status":
       setStatus("running", frame.message);
