@@ -1,22 +1,8 @@
 // S&P 500 Scanner tab — scan history, progress, quick results table, portfolio view
-
-const $$spy = (id) => document.getElementById(id);
+// $, escapeHtml, fmtTs, renderMarkdown and apiFetch live in utils.js (loaded first).
 
 let activeSpyId = null;
 let spyPollTimer = null;
-
-function fmtTs(iso) {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso;
-  const p = (n) => String(n).padStart(2, "0");
-  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
-}
-
-function escHtml(s) {
-  if (s == null) return "";
-  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
 
 function fmtReturn(val, basis) {
   basis = basis || 100000;
@@ -43,13 +29,11 @@ function sharesOf(a) {
 }
 
 async function loadSpyHistory() {
-  const ul = $$spy("spy-history");
+  const ul = $("spy-history");
   if (!ul) return;
   ul.innerHTML = "<li class=\"dim empty\">loading…</li>";
   try {
-    const r = await fetch("/api/spy-scans");
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    const data = await r.json();
+    const data = await apiFetch("/api/spy-scans");
     const scans = data.scans || [];
     ul.innerHTML = "";
     if (!scans.length) {
@@ -75,7 +59,7 @@ async function loadSpyHistory() {
       li.innerHTML = (
         "<span class=\"h-main\">" +
           "<span class=\"h-top\">" +
-            "<span class=\"h-tk\">#" + s.id + " · " + escHtml(s.trade_date) + typeTag + "</span>" +
+            "<span class=\"h-tk\">#" + s.id + " · " + escapeHtml(s.trade_date) + typeTag + "</span>" +
             "<span class=\"h-sig " + statusClass + "\">" + statusLabel + "</span>" +
           "</span>" +
           "<span class=\"h-ts\">" + fmtTs(s.created_at) + returnBadge + "</span>" +
@@ -142,7 +126,7 @@ function stopSpyPoll() {
 
 // Show the Stop button only while the active scan is running.
 function updateStopButton(scan) {
-  const btn = $$spy("btn-spy-stop");
+  const btn = $("btn-spy-stop");
   if (!btn) return;
   const running = scan && scan.status && scan.status.startsWith("running");
   btn.hidden = !running;
@@ -158,8 +142,8 @@ function updateStopButton(scan) {
 async function triggerSpyStop() {
   if (!activeSpyId) return;
   if (!confirm("Stop scan #" + activeSpyId + "?\n\nIn-progress deep dives are full analyses and will finish first (this can take a few minutes). Partial results are kept.")) return;
-  const btn = $$spy("btn-spy-stop");
-  const status = $$spy("spy-scan-status");
+  const btn = $("btn-spy-stop");
+  const status = $("spy-scan-status");
   if (btn) { btn.disabled = true; btn.textContent = "Stopping…"; }
   if (status) status.textContent = "Cancelling scan #" + activeSpyId + "…";
   try {
@@ -181,7 +165,7 @@ async function deleteSpyScan(id) {
     if (String(activeSpyId) === String(id)) {
       activeSpyId = null;
       stopSpyPoll();
-      const main = $$spy("spy-main");
+      const main = $("spy-main");
       if (main) main.innerHTML = "";
       updateStopButton(null);
     }
@@ -192,12 +176,12 @@ async function deleteSpyScan(id) {
 }
 
 function renderSpyScanError(msg) {
-  const main = $$spy("spy-main");
-  if (main) main.innerHTML = "<div class=\"panel\"><p style=\"color:var(--accent-red);\">" + escHtml(msg) + "</p></div>";
+  const main = $("spy-main");
+  if (main) main.innerHTML = "<div class=\"panel\"><p style=\"color:var(--accent-red);\">" + escapeHtml(msg) + "</p></div>";
 }
 
 function renderSpyScan(scan) {
-  const main = $$spy("spy-main");
+  const main = $("spy-main");
   if (!main) return;
 
   // Map ticker -> deep-dive analysis id (only deep-dived tickers have one).
@@ -211,9 +195,9 @@ function renderSpyScan(scan) {
     if (aid) {
       return "<a href=\"#\" class=\"spy-analysis-link\" data-id=\"" + aid +
         "\" title=\"Open full report\" style=\"color:var(--accent-cyan);font-weight:700;\">" +
-        escHtml(ticker) + " ↗</a>";
+        escapeHtml(ticker) + " ↗</a>";
     }
-    return "<strong style=\"color:var(--accent-cyan);\">" + escHtml(ticker) + "</strong>";
+    return "<strong style=\"color:var(--accent-cyan);\">" + escapeHtml(ticker) + "</strong>";
   }
 
   // Status banner for terminal/cancel states
@@ -283,7 +267,7 @@ function renderSpyScan(scan) {
             "<span>Return: <strong style=\"color:" + retColor + ";\">" + sign + ret.toFixed(2) + "% (" + sign + "$" + Math.abs(Math.round(cv - basis)).toLocaleString() + ")</strong></span>" +
             "<span class=\"dim\">Updated: " + fmtTs(scan.last_price_check) + "</span>" +
           "</div>" +
-          (scan.rebalance_notes ? "<div style=\"color:var(--accent-yellow);margin-top:8px;white-space:pre-wrap;font-size:12px;\">" + escHtml(scan.rebalance_notes) + "</div>" : "") +
+          (scan.rebalance_notes ? "<div style=\"color:var(--accent-yellow);margin-top:8px;white-space:pre-wrap;font-size:12px;\">" + escapeHtml(scan.rebalance_notes) + "</div>" : "") +
           "<div style=\"margin-top:10px;\">" +
             "<button class=\"ghost\" style=\"font-size:12px;\" onclick=\"refreshSpyPrices(" + scan.id + ")\">Refresh prices</button>" +
           "</div>" +
@@ -317,7 +301,7 @@ function renderSpyScan(scan) {
           "<td>" + tickerCell(r.ticker) + "</td>" +
           "<td><span class=\"badge " + sig + "\">" + sig + "</span></td>" +
           "<td><span class=\"conviction-badge\" style=\"color:" + convColor + ";font-weight:700;\">" + conv + "/10</span></td>" +
-          "<td style=\"color:var(--dim);font-size:11px;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;\">" + escHtml(r.reasoning || "") + "</td>" +
+          "<td style=\"color:var(--dim);font-size:11px;max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;\">" + escapeHtml(r.reasoning || "") + "</td>" +
         "</tr>"
       );
     }).join("");
@@ -373,7 +357,7 @@ function renderSpyScan(scan) {
             "<td><span style=\"font-size:10px;font-weight:700;text-transform:uppercase;color:" + actCol + ";\">EXITED</span></td>" +
             "<td><span class=\"badge " + sig + "\">" + sig + "</span></td>" +
             "<td class=\"dim\">—</td><td class=\"dim\">—</td><td class=\"dim\">—</td><td class=\"dim\">—</td><td class=\"dim\">—</td>" +
-            "<td style=\"color:var(--dim);font-size:11px;\">" + escHtml((a.rationale || "").slice(0, 100)) + "</td>" +
+            "<td style=\"color:var(--dim);font-size:11px;\">" + escapeHtml((a.rationale || "").slice(0, 100)) + "</td>" +
           "</tr>"
         );
       }
@@ -392,7 +376,7 @@ function renderSpyScan(scan) {
           "<td>" + (cur != null ? "$" + cur.toFixed(2) : "<span class=\"dim\">—</span>") + "</td>" +
           "<td>" + pctCell(pct) + "</td>" +
           "<td style=\"font-weight:600;\">$" + Math.round(value).toLocaleString() + "</td>" +
-          "<td style=\"color:var(--dim);font-size:11px;\">" + escHtml((a.rationale || "").slice(0, 90)) + "</td>" +
+          "<td style=\"color:var(--dim);font-size:11px;\">" + escapeHtml((a.rationale || "").slice(0, 90)) + "</td>" +
         "</tr>"
       );
     }).join("");
@@ -436,16 +420,14 @@ function renderSpyScan(scan) {
     reportHtml = (
       "<div class=\"panel\">" +
         "<div class=\"panel-title\">[ Allocator Report ]</div>" +
-        "<div class=\"report-body\">" +
-          (window.marked ? window.marked.parse(md) : "<pre>" + escHtml(md) + "</pre>") +
-        "</div>" +
+        "<div class=\"report-body\">" + renderMarkdown(md) + "</div>" +
       "</div>"
     );
   } else if (scan.error) {
     reportHtml = (
       "<div class=\"panel\">" +
         "<div class=\"panel-title\" style=\"color:var(--accent-red);\">[ Scan Failed ]</div>" +
-        "<p style=\"color:var(--accent-red);white-space:pre-wrap;\">" + escHtml(scan.error) + "</p>" +
+        "<p style=\"color:var(--accent-red);white-space:pre-wrap;\">" + escapeHtml(scan.error) + "</p>" +
         "<p class=\"dim\" style=\"font-size:12px;margin-top:8px;\">Any partial results above are still available. You can start a new scan from the top of this tab.</p>" +
       "</div>"
     );
@@ -464,8 +446,8 @@ function renderSpyScan(scan) {
 }
 
 async function triggerSpyScan() {
-  const btn = $$spy("btn-spy-scan");
-  const status = $$spy("spy-scan-status");
+  const btn = $("btn-spy-scan");
+  const status = $("spy-scan-status");
   if (btn) btn.disabled = true;
   if (status) status.textContent = "Starting scan…";
   try {
@@ -506,8 +488,8 @@ document.addEventListener("tab-shown", (ev) => {
 // spy_scanner.refresh_portfolio_prices. No real-account data is shown here.
 
 async function refreshActiveSpy() {
-  const btn = $$spy("btn-spy-account");
-  const status = $$spy("spy-scan-status");
+  const btn = $("btn-spy-account");
+  const status = $("spy-scan-status");
   let scanId = activeSpyId;
   if (btn) { btn.disabled = true; btn.textContent = "Refreshing…"; }
   if (status) status.textContent = "Refreshing prices…";
@@ -531,11 +513,11 @@ async function refreshActiveSpy() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  const btn = $$spy("btn-spy-scan");
+  const btn = $("btn-spy-scan");
   if (btn) btn.addEventListener("click", triggerSpyScan);
-  const stopBtn = $$spy("btn-spy-stop");
+  const stopBtn = $("btn-spy-stop");
   if (stopBtn) stopBtn.addEventListener("click", triggerSpyStop);
-  const acctBtn = $$spy("btn-spy-account");
+  const acctBtn = $("btn-spy-account");
   if (acctBtn) acctBtn.addEventListener("click", refreshActiveSpy);
 });
 

@@ -1,9 +1,13 @@
-import os
-import requests
-import pandas as pd
 import json
+import logging
+import os
 from datetime import datetime
 from io import StringIO
+
+import pandas as pd
+import requests
+
+logger = logging.getLogger(__name__)
 
 API_BASE_URL = "https://www.alphavantage.co/query"
 
@@ -28,8 +32,8 @@ def format_datetime_for_api(date_input) -> str:
             try:
                 dt = datetime.strptime(date_input, "%Y-%m-%d %H:%M")
                 return dt.strftime("%Y%m%dT%H%M")
-            except ValueError:
-                raise ValueError(f"Unsupported date format: {date_input}")
+            except ValueError as e:
+                raise ValueError(f"Unsupported date format: {date_input}") from e
     elif isinstance(date_input, datetime):
         return date_input.strftime("%Y%m%dT%H%M")
     else:
@@ -118,5 +122,5 @@ def _filter_csv_by_date_range(csv_data: str, start_date: str, end_date: str) -> 
 
     except Exception as e:
         # If filtering fails, return original data with a warning
-        print(f"Warning: Failed to filter CSV data by date range: {e}")
+        logger.warning("Failed to filter CSV data by date range: %s", e)
         return csv_data

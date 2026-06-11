@@ -9,20 +9,23 @@ lose per-ticker work.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
 log = logging.getLogger(__name__)
 
-ProgressCb = Optional[Callable[[dict[str, Any]], None]]
+ProgressCb = Callable[[dict[str, Any]], None] | None
 
 
 def _signal_from_decision(text: str) -> str:
     if not text:
         return ""
     upper = text.upper()
+    # Priority-ordered, not the generic SIGNALS set: we return the first tag that
+    # appears, so a decision mentioning both "SELL" and "HOLD" resolves to SELL.
     for tag in ("BUY", "SELL", "HOLD"):
         if tag in upper:
             return tag

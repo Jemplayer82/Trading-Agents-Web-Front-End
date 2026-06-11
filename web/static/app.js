@@ -29,7 +29,7 @@ let activeHistoryId = null;
 let lastRunMeta = null;
 let reasoningNodes = {}; // node -> {el, buffer}
 
-const $ = (id) => document.getElementById(id);
+// $, escapeHtml, fmtTs and renderMarkdown live in utils.js (loaded first).
 
 document.addEventListener("DOMContentLoaded", async () => {
   await loadProviders();
@@ -226,14 +226,6 @@ async function loadPreferences() {
   });
 }
 
-function formatTimestamp(iso) {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso;
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
 async function loadHistory() {
   const resp = await fetch("/api/analyses");
   const { analyses } = await resp.json();
@@ -258,7 +250,7 @@ async function loadHistory() {
           <span class="h-tk">${escapeHtml(a.ticker)}</span>
           <span class="h-sig ${sig}">${sig}</span>
         </span>
-        <span class="h-ts">${formatTimestamp(a.created_at)}</span>
+        <span class="h-ts">${fmtTs(a.created_at)}</span>
       </span>
       <button class="h-del" title="Delete this run" aria-label="Delete">×</button>
     `;
@@ -293,7 +285,7 @@ async function loadHistoryItem(id) {
   resetReasoning(); // reasoning timeline is live-only
   refreshReportTabs();
   if (a.processed_signal || a.final_decision) {
-    showDecision(a.processed_signal, a.final_decision, `${a.ticker} • ${a.trade_date} • ${formatTimestamp(a.created_at)}`);
+    showDecision(a.processed_signal, a.final_decision, `${a.ticker} • ${a.trade_date} • ${fmtTs(a.created_at)}`);
   }
   showCompanyHeader(a.ticker);
   setupQaForAnalysis(a);
@@ -503,7 +495,7 @@ function renderActiveReport() {
     return;
   }
   const md = currentReports[activeReportKey];
-  body.innerHTML = window.marked ? window.marked.parse(md) : `<pre>${escapeHtml(md)}</pre>`;
+  body.innerHTML = renderMarkdown(md);
 }
 
 function debateToMarkdown(state) {
@@ -639,16 +631,6 @@ function startElapsedTimer() {
 function stopElapsedTimer() {
   if (elapsedTimer) clearInterval(elapsedTimer);
   elapsedTimer = null;
-}
-
-function escapeHtml(s) {
-  if (s == null) return "";
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }
 
 // ===== Technical chart + Q&A panels (per-analysis) =====
@@ -862,7 +844,7 @@ async function submitQaQuestion(input) {
     } else {
       const data = await resp.json();
       const answer = data.answer || "(empty response)";
-      placeholder.innerHTML = window.marked ? window.marked.parse(answer) : escapeHtml(answer);
+      placeholder.innerHTML = renderMarkdown(answer);
       qaState.history.push({ role: "user", content: question });
       qaState.history.push({ role: "assistant", content: answer });
       input.value = "";

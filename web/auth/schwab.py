@@ -29,11 +29,18 @@ def _basic_auth_header() -> dict[str, str]:
     return {"Authorization": f"Basic {creds}"}
 
 
-def build_auth_url() -> str:
+def build_auth_url(state: str) -> str:
+    """Build the Schwab authorization URL.
+
+    `state` is an opaque anti-CSRF nonce the caller also stores client-side (a
+    cookie) and re-checks on the callback, so an attacker can't forge a callback
+    that links their Schwab account to a victim's dashboard session.
+    """
     params = {
         "response_type": "code",
         "client_id": os.environ["SCHWAB_APP_KEY"],
         "redirect_uri": os.environ["SCHWAB_CALLBACK_URL"],
+        "state": state,
     }
     return f"{AUTH_URL}?{urlencode(params)}"
 

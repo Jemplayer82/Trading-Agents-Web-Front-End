@@ -1,7 +1,7 @@
 // TradingAgents Web — API Keys tab
 
 (function () {
-  const $ = (id) => document.getElementById(id);
+  // $ comes from utils.js (loaded first).
 
   function providerLabel(key) {
     // Match labels used elsewhere in the UI

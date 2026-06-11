@@ -5,8 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>TradingAgents Console</title>
   <link rel="stylesheet" href="/static/styles.css" />
-  <script src="/static/auth.js" defer></script>
+  <!-- Shared helpers ($, escapeHtml, fmtTs, renderMarkdown, apiFetch). Must load
+       first: the other scripts are classic (non-module) and rely on its globals. -->
+  <script src="/static/utils.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>
+  <!-- DOMPurify sanitizes LLM-authored markdown before it reaches innerHTML. -->
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.7/dist/purify.min.js" defer></script>
+  <script src="/static/auth.js" defer></script>
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js" defer></script>
   <script src="/static/app.js" defer></script>
   <script src="/static/portfolio.js" defer></script>

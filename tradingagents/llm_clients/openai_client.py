@@ -1,5 +1,5 @@
 import os
-from typing import Any, Optional
+from typing import Any
 
 from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
@@ -7,6 +7,7 @@ from langchain_openai import ChatOpenAI
 from .api_key_env import get_api_key_env
 from .base_client import BaseLLMClient, normalize_content
 from .capabilities import get_capabilities
+from .defaults import DEFAULT_OLLAMA_BASE_URL, resolve_ollama_base_url
 from .validators import validate_model
 
 
@@ -83,7 +84,7 @@ class DeepSeekChatOpenAI(NormalizedChatOpenAI):
     def _get_request_payload(self, input_, *, stop=None, **kwargs):
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
         outgoing = payload.get("messages", [])
-        for message_dict, message in zip(outgoing, _input_to_messages(input_)):
+        for message_dict, message in zip(outgoing, _input_to_messages(input_), strict=False):
             if not isinstance(message, AIMessage):
                 continue
             reasoning = message.additional_kwargs.get("reasoning_content")
@@ -101,7 +102,7 @@ class DeepSeekChatOpenAI(NormalizedChatOpenAI):
             )
         )
         for generation, choice in zip(
-            chat_result.generations, response_dict.get("choices", [])
+            chat_result.generations, response_dict.get("choices", []), strict=False
         ):
             reasoning = choice.get("message", {}).get("reasoning_content")
             if reasoning is not None:
@@ -157,23 +158,19 @@ _PROVIDER_BASE_URL = {
     "minimax":    "https://api.minimax.io/v1",
     "minimax-cn": "https://api.minimaxi.com/v1",
     "openrouter": "https://openrouter.ai/api/v1",
-    "ollama":     "http://localhost:11434/v1",
+    "ollama":     DEFAULT_OLLAMA_BASE_URL,
 }
 
 
-def _resolve_provider_base_url(provider: str) -> Optional[str]:
+def _resolve_provider_base_url(provider: str) -> str | None:
     """Default base URL for ``provider``, with env-var overrides where defined.
 
     Currently only Ollama supports an env-var override (``OLLAMA_BASE_URL``),
-    matching the convention in the broader Ollama tooling ecosystem so users
-    can point at a remote ollama-serve without editing code. The check is
-    call-time, not import-time, so tests that monkeypatch the env after
-    import behave correctly.
+    resolved via :func:`resolve_ollama_base_url`. The check is call-time, not
+    import-time, so tests that monkeypatch the env after import behave correctly.
     """
     if provider == "ollama":
-        env_url = os.environ.get("OLLAMA_BASE_URL")
-        if env_url:
-            return env_url
+        return resolve_ollama_base_url()
     return _PROVIDER_BASE_URL.get(provider)
 
 
@@ -189,7 +186,7 @@ class OpenAIClient(BaseLLMClient):
     def __init__(
         self,
         model: str,
-        base_url: Optional[str] = None,
+        base_url: str | None = None,
         provider: str = "openai",
         **kwargs,
     ):

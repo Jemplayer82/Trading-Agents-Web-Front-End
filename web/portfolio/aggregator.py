@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from langchain_openai import ChatOpenAI
+from tradingagents.constants import SIGNALS
 from tradingagents.default_config import DEFAULT_CONFIG
 
 from ..llm_helpers import llm_for
@@ -56,10 +56,6 @@ PER_TICKER_TEMPLATE = """
 """
 
 
-def _llm_for(config: dict[str, Any]) -> ChatOpenAI:
-    return llm_for(config, deep=True, temperature=0.2)
-
-
 def run(per_ticker: list[dict[str, Any]], trade_date: str, config: dict[str, Any]) -> str:
     if not per_ticker:
         return (
@@ -68,7 +64,7 @@ def run(per_ticker: list[dict[str, Any]], trade_date: str, config: dict[str, Any
             "## Rebalance Suggestions\n—\n\n"
             "## Watch List\n—\n"
         )
-    counts = {"BUY": 0, "HOLD": 0, "SELL": 0}
+    counts = {sig: 0 for sig in SIGNALS}
     for p in per_ticker:
         s = (p.get("signal") or "").upper()
         if s in counts:
@@ -84,7 +80,7 @@ def run(per_ticker: list[dict[str, Any]], trade_date: str, config: dict[str, Any
             trader_plan=(p.get("trader_plan") or "(no trader plan)")[:2000],
             final_decision=(p.get("final_decision") or "(no decision)")[:2000],
         )
-    llm = _llm_for({**DEFAULT_CONFIG, **config})
+    llm = llm_for({**DEFAULT_CONFIG, **config}, deep=True, temperature=0.2)
     try:
         resp = llm.invoke([
             {"role": "system", "content": SYSTEM_PROMPT},

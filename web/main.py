@@ -6,10 +6,12 @@ Nginx routes /api/portfolio* there and everything else here.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 import os
 import queue
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -20,9 +22,8 @@ from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSoc
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth_app
+from . import auth_app, db
 from . import credentials as creds
-from . import db
 from .auth import schwab as schwab_auth
 from .auth import token_store
 from .llm_helpers import llm_for
@@ -166,7 +167,7 @@ def auth_add_user(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         db.create_user(username, auth_app.hash_password(password))
     except sqlite3.IntegrityError:
-        raise HTTPException(status_code=409, detail="username already exists")
+        raise HTTPException(status_code=409, detail="username already exists") from None
     return {"status": "created", "username": username}
 
 
@@ -282,9 +283,17 @@ def ticker_info(ticker: str) -> dict[str, Any]:
     available, so the link is always usable.
     """
     t = (ticker or "").strip().upper()
-    yahoo = f"https://finance.yahoo.com/quote/{t}"
     if not t:
         raise HTTPException(status_code=400, detail="missing ticker")
+    # Validate before the value reaches yfinance / the Schwab MCP / a URL or the
+    # cache path. safe_ticker_component enforces a strict charset and rejects
+    # path-traversal-style input.
+    try:
+        from tradingagents.dataflows.utils import safe_ticker_component
+        safe_ticker_component(t)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid ticker") from None
+    yahoo = f"https://finance.yahoo.com/quote/{t}"
 
     cached = db.get_ticker_info(t)
     if cached:
@@ -395,7 +404,7 @@ async def ask_about_analysis(analysis_id: int, payload: dict[str, Any]) -> dict[
         answer = response.content if hasattr(response, "content") else str(response)
     except Exception as exc:
         log.exception("Q&A LLM call failed for analysis %s", analysis_id)
-        raise HTTPException(status_code=500, detail=f"LLM error: {exc}")
+        raise HTTPException(status_code=500, detail=f"LLM error: {exc}") from exc
 
     return {"answer": answer}
 
@@ -417,7 +426,7 @@ async def get_analysis_chart_data(
         result = await asyncio.to_thread(_build_chart_data, ticker, trade_date, lookback_days)
     except Exception as exc:
         log.exception("chart data failed for %s on %s", ticker, trade_date)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     return result
 
 
@@ -501,24 +510,45 @@ def _build_chart_data(ticker: str, trade_date: str, lookback_days: int) -> dict[
 
 # ---------- Schwab OAuth ----------
 
+# Short-lived cookie carrying the OAuth anti-CSRF state nonce between the
+# /api/auth/schwab redirect and the Schwab callback. SameSite=lax (not strict)
+# so it survives the top-level cross-site redirect back from Schwab.
+_SCHWAB_STATE_COOKIE = "schwab_oauth_state"
+
+
 @app.get("/api/auth/schwab")
 def schwab_login() -> RedirectResponse:
-    return RedirectResponse(url=schwab_auth.build_auth_url(), status_code=302)
+    state = secrets.token_urlsafe(32)
+    resp = RedirectResponse(url=schwab_auth.build_auth_url(state), status_code=302)
+    resp.set_cookie(
+        _SCHWAB_STATE_COOKIE, state,
+        max_age=600, httponly=True, samesite="lax", secure=True, path="/api/auth/schwab",
+    )
+    return resp
 
 
 @app.get("/api/auth/schwab/callback")
-def schwab_callback(code: str | None = None, error: str | None = None) -> HTMLResponse:
+def schwab_callback(
+    request: Request, code: str | None = None, error: str | None = None, state: str | None = None
+) -> HTMLResponse:
+    # Verify the anti-CSRF state matches the nonce we set when starting the flow.
+    expected_state = request.cookies.get(_SCHWAB_STATE_COOKIE)
+    if not expected_state or not state or not hmac.compare_digest(state, expected_state):
+        log.warning("Schwab callback rejected: missing or mismatched OAuth state")
+        return HTMLResponse("<h1>Invalid or expired authorization request</h1>", status_code=400)
     if error:
-        return HTMLResponse(f"<h1>Schwab auth error</h1><pre>{error}</pre>", status_code=400)
+        # Don't echo the raw upstream error back to the browser; log it instead.
+        log.warning("Schwab auth returned error: %s", error)
+        return HTMLResponse("<h1>Schwab authorization failed</h1>", status_code=400)
     if not code:
         return HTMLResponse("<h1>Missing ?code= parameter</h1>", status_code=400)
     try:
         bundle = schwab_auth.exchange_code(code)
         token_store.save(bundle)
-    except Exception as exc:
+    except Exception:
         log.exception("Schwab code exchange failed")
-        return HTMLResponse(f"<h1>Exchange failed</h1><pre>{exc}</pre>", status_code=500)
-    return HTMLResponse(
+        return HTMLResponse("<h1>Authorization failed. Please try again.</h1>", status_code=500)
+    resp = HTMLResponse(
         """
         <html><body style='background:#0b0f14;color:#d6e1ea;font-family:monospace;padding:48px;text-align:center;'>
           <h2 style='color:#7be38c;'>✅ Schwab connected.</h2>
@@ -527,6 +557,9 @@ def schwab_callback(code: str | None = None, error: str | None = None) -> HTMLRe
         </body></html>
         """.strip()
     )
+    # One-time nonce; drop it now that the flow is complete.
+    resp.delete_cookie(_SCHWAB_STATE_COOKIE, path="/api/auth/schwab")
+    return resp
 
 
 @app.get("/api/auth/schwab/status")
@@ -565,7 +598,7 @@ async def analyze(ws: WebSocket) -> None:
     internal = ws.headers.get("x-internal-token")
     expected = os.environ.get("INTERNAL_API_TOKEN")
     authed = bool(token and db.get_session(token)) or bool(
-        internal and expected and internal == expected
+        internal and expected and hmac.compare_digest(internal, expected)
     )
     if not authed:
         await ws.close(code=4401)
