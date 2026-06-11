@@ -14,9 +14,32 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
 
 from .bus import get_publisher
+
+# ---------------------------------------------------------------------------
+# Module constants
+# ---------------------------------------------------------------------------
+
+_REPORT_EXCERPT_CHARS = 500
+_DEBATE_TURN_CHARS = 700
+_DECISION_CHARS = 300
+
+# Analyst short-key → display name (used in kickoff message)
+_ANALYST_DISPLAY: dict[str, str] = {
+    "market":       "Market Analyst",
+    "social":       "Sentiment Analyst",
+    "news":         "News Analyst",
+    "fundamentals": "Fundamentals Analyst",
+}
+
+
+def _strip_prefix(text: str, prefixes: tuple[str, ...]) -> str:
+    """Strip the first matching prefix from text, if any."""
+    for prefix in prefixes:
+        if text.startswith(prefix):
+            return text[len(prefix):]
+    return text
 
 log = logging.getLogger(__name__)
 
@@ -80,12 +103,21 @@ class RunMirror:
     # ------------------------------------------------------------------
 
     @classmethod
-    def maybe_create(cls, params: dict, analysis_id: int) -> "RunMirror | None":
+    def maybe_create(
+        cls,
+        params: dict,
+        analysis_id: int,
+        analysts: list[str] | None = None,
+    ) -> "RunMirror | None":
         """Return a RunMirror instance, or None if mirroring is disabled.
 
         Returns None when:
         - Env var BUS_MIRROR == "off"  (default value is "analysis", which enables it)
         - get_publisher() returns None (bus not configured)
+
+        analysts: normalized analyst keys (e.g. ["market", "social"]).  When
+        provided, the kickoff message lists only those analysts' display names.
+        Falls back to all four when None.
         """
         if os.environ.get("BUS_MIRROR", "analysis") == "off":
             return None
@@ -111,16 +143,14 @@ class RunMirror:
             # Create the run channel
             publisher.publish("create_channel", {"channel_id": channel_id, "name": channel_name})
 
-            # Kickoff instruction from orchestrator
-            analyst_ids = ", ".join(
-                a_id for a_id, _ in _AGENTS
-                if a_id not in {"langgraph-orchestrator", "portfolio-manager", "trader",
-                                "research-manager", "bull-researcher", "bear-researcher",
-                                "risk-aggressive", "risk-conservative", "risk-neutral"}
+            # Kickoff instruction from orchestrator — list selected analysts by display name
+            selected_keys = analysts if analysts is not None else list(_ANALYST_DISPLAY.keys())
+            on_deck = ", ".join(
+                _ANALYST_DISPLAY[k] for k in selected_keys if k in _ANALYST_DISPLAY
             )
             kickoff_msg = (
                 f"Begin analysis of {ticker} for {trade_date}. "
-                f"Analysts on deck: {analyst_ids}."
+                f"Analysts on deck: {on_deck}."
             )
             publisher.publish("send_message", {
                 "from": "langgraph-orchestrator",
@@ -138,7 +168,7 @@ class RunMirror:
             return cls(publisher, channel_id, analysis_id)
 
         except Exception:
-            log.debug("bus_mirror.maybe_create failed", exc_info=True)
+            log.warning("bus_mirror.maybe_create failed", exc_info=True)
             return None
 
     # ------------------------------------------------------------------
@@ -161,10 +191,11 @@ class RunMirror:
                     continue
 
                 # Truncate content and add full-report marker
-                if len(val) > 500:
-                    content = val[:500] + f" …\n[full report: {key}]"
+                marker = f"\n[full report: {key}]"
+                if len(val) > _REPORT_EXCERPT_CHARS:
+                    content = val[:_REPORT_EXCERPT_CHARS] + f" …{marker}"
                 else:
-                    content = val + f"\n[full report: {key}]"
+                    content = val + marker
 
                 self._pub.publish("send_message", {
                     "from": sender,
@@ -191,18 +222,18 @@ class RunMirror:
                     })
 
         except Exception:
-            log.debug("bus_mirror.on_report_delta failed", exc_info=True)
+            log.warning("bus_mirror.on_report_delta failed", exc_info=True)
 
     def on_state(self, chunk: dict) -> None:
         """Detect and publish debate turns from investment_debate_state and risk_debate_state."""
         try:
             self._handle_investment_debate(chunk)
         except Exception:
-            log.debug("bus_mirror.on_state investment failed", exc_info=True)
+            log.warning("bus_mirror.on_state investment failed", exc_info=True)
         try:
             self._handle_risk_debate(chunk)
         except Exception:
-            log.debug("bus_mirror.on_state risk failed", exc_info=True)
+            log.warning("bus_mirror.on_state risk failed", exc_info=True)
 
     def _handle_investment_debate(self, chunk: dict) -> None:
         inv = chunk.get("investment_debate_state")
@@ -232,18 +263,22 @@ class RunMirror:
         # Determine sender from response prefix
         if current_response.startswith("Bull"):
             sender = "bull-researcher"
+        elif current_response.startswith("Bear"):
+            sender = "bear-researcher"
         else:
             sender = "bear-researcher"
+            log.warning(
+                "bus_mirror: investment debate response has unexpected prefix "
+                "(expected Bull/Bear) — attributing to bear-researcher. "
+                "response[:40]=%r",
+                current_response[:40],
+            )
 
         # Strip the "Bull Analyst: " / "Bear Analyst: " prefix
-        stripped = current_response
-        for prefix in ("Bull Analyst: ", "Bear Analyst: "):
-            if stripped.startswith(prefix):
-                stripped = stripped[len(prefix):]
-                break
+        stripped = _strip_prefix(current_response, ("Bull Analyst: ", "Bear Analyst: "))
 
-        # Cap at 700 chars
-        content = stripped[:700]
+        # Cap at _DEBATE_TURN_CHARS
+        content = stripped[:_DEBATE_TURN_CHARS]
 
         # Note: if count jumps by >1 in one chunk, only current_response is available —
         # we publish it once and sync the counter to the new count value.
@@ -275,9 +310,17 @@ class RunMirror:
         elif latest_speaker.startswith("Conservative"):
             sender = "risk-conservative"
             response_field = "current_conservative_response"
+        elif latest_speaker.startswith("Neutral"):
+            sender = "risk-neutral"
+            response_field = "current_neutral_response"
         else:
             sender = "risk-neutral"
             response_field = "current_neutral_response"
+            log.warning(
+                "bus_mirror: unknown latest_speaker %r in risk_debate_state "
+                "— attributing to risk-neutral",
+                latest_speaker,
+            )
 
         current_response = risk.get(response_field) or ""
 
@@ -289,14 +332,13 @@ class RunMirror:
             })
 
         # Strip the "Aggressive Analyst: " / "Conservative Analyst: " / "Neutral Analyst: " prefix
-        stripped = current_response
-        for prefix in ("Aggressive Analyst: ", "Conservative Analyst: ", "Neutral Analyst: "):
-            if stripped.startswith(prefix):
-                stripped = stripped[len(prefix):]
-                break
+        stripped = _strip_prefix(
+            current_response,
+            ("Aggressive Analyst: ", "Conservative Analyst: ", "Neutral Analyst: "),
+        )
 
-        # Cap at 700 chars
-        content = stripped[:700]
+        # Cap at _DEBATE_TURN_CHARS
+        content = stripped[:_DEBATE_TURN_CHARS]
 
         # Note: if count jumps by >1 in one chunk, only the latest speaker's
         # current response is available — publish it once and sync the counter.
@@ -313,7 +355,7 @@ class RunMirror:
     def on_done(self, signal: str, decision: str) -> None:
         """Publish final decision and reset orchestrator status."""
         try:
-            decision_excerpt = decision[:300]
+            decision_excerpt = decision[:_DECISION_CHARS]
             self._pub.publish("send_message", {
                 "from": "portfolio-manager",
                 "content": f"FINAL: {signal} — {decision_excerpt}",
@@ -325,23 +367,23 @@ class RunMirror:
                 "activity": f"idle — analysis #{self._analysis_id} complete",
             })
         except Exception:
-            log.debug("bus_mirror.on_done failed", exc_info=True)
+            log.warning("bus_mirror.on_done failed", exc_info=True)
 
     def on_error(self, message: str) -> None:
         """Publish an error notification from the orchestrator."""
         try:
             self._pub.publish("send_message", {
                 "from": "langgraph-orchestrator",
-                "content": f"Analysis failed: {message[:300]}",
+                "content": f"Analysis failed: {message[:_DECISION_CHARS]}",
                 "channel_id": self._channel_id,
                 "type": "chat",
             })
         except Exception:
-            log.debug("bus_mirror.on_error failed", exc_info=True)
+            log.warning("bus_mirror.on_error failed", exc_info=True)
 
     def close(self) -> None:
         """Flush the publisher queue before the run thread exits."""
         try:
             self._pub.flush(5.0)
         except Exception:
-            log.debug("bus_mirror.close failed", exc_info=True)
+            log.warning("bus_mirror.close failed", exc_info=True)
