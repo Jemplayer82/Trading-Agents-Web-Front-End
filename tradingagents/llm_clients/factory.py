@@ -1,4 +1,15 @@
-from typing import Optional
+"""LLM client factory — the one place that maps a provider name to a client.
+
+`create_llm_client(provider, model, ...)` returns a `BaseLLMClient`; all callers
+(the agent graph, the web layer) go through here rather than instantiating SDK
+clients directly. Provider modules are imported lazily so importing this factory
+stays cheap and doesn't require every SDK/API key to be present.
+
+To add a provider: implement a `BaseLLMClient` subclass and add a branch below
+(plus its key env var in api_key_env.py and, for the UI, model_catalog.py).
+OpenAI-compatible providers usually just need adding to `_OPENAI_COMPATIBLE`.
+"""
+
 
 from .base_client import BaseLLMClient
 
@@ -15,7 +26,7 @@ _OPENAI_COMPATIBLE = (
 def create_llm_client(
     provider: str,
     model: str,
-    base_url: Optional[str] = None,
+    base_url: str | None = None,
     **kwargs,
 ) -> BaseLLMClient:
     """Create an LLM client for the specified provider.
