@@ -19,12 +19,10 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from . import credentials as creds
 from . import db, newsletter
+from ._logging import configure_logging
 from .notifier import default_notifier
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-)
+configure_logging()
 log = logging.getLogger("scheduler")
 
 API_URL = (os.environ.get("TRADINGAGENTS_API_URL") or "http://tradingagents-api:8000").rstrip("/")

@@ -19,6 +19,7 @@ from typing import Any
 from langchain_openai import ChatOpenAI
 
 from tradingagents.llm_clients.api_key_env import PROVIDER_API_KEY_ENV
+from tradingagents.llm_clients.defaults import resolve_ollama_base_url
 
 
 def _resolve_api_key(provider: str, config: dict[str, Any]) -> str | None:
@@ -62,7 +63,7 @@ def _resolve_base_url(provider: str, config: dict[str, Any]) -> str | None:
         pass
 
     if provider == "ollama":
-        return os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434/v1"
+        return resolve_ollama_base_url()
     return None
 
 

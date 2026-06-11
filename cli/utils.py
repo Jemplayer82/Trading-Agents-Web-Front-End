@@ -8,6 +8,7 @@ from rich.console import Console
 
 from cli.models import AnalystType, AssetType
 from tradingagents.llm_clients.api_key_env import get_api_key_env
+from tradingagents.llm_clients.defaults import resolve_ollama_base_url
 from tradingagents.llm_clients.model_catalog import get_model_options
 
 console = Console()
@@ -264,7 +265,7 @@ def select_llm_provider() -> tuple[str, str | None]:
     # Ollama users can point at a remote ollama-serve via OLLAMA_BASE_URL
     # (convention from the broader Ollama ecosystem); falls back to the
     # localhost default when unset.
-    ollama_url = os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434/v1"
+    ollama_url = resolve_ollama_base_url()
     # (display_name, provider_key, base_url)
     PROVIDERS = [
         ("OpenAI", "openai", "https://api.openai.com/v1"),
