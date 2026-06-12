@@ -370,20 +370,26 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .pcard-link a { color: var(--accent-cyan); text-decoration: none; }
 .pcard-link a:hover { text-decoration: underline; }
 
-/* Holding card — per-line rows and gain/loss */
-.pcard-line {
+/* Holding card — price, metrics, subtext */
+.pcard-price-row {
   display: flex;
   justify-content: space-between;
-  font-size: 11px;
-  color: var(--dim);
-  margin-top: 3px;
+  align-items: baseline;
+  margin-top: 4px;
+  margin-bottom: 6px;
 }
-.pcard-line span:last-child { color: var(--text); }
-.pcard-gain {
-  font-size: 12px;
-  font-weight: 600;
-  margin-top: 7px;
+.pcard-price { font-size: 18px; font-weight: 600; color: var(--text); }
+.pcard-pct   { font-size: 13px; font-weight: 600; }
+.pcard-divider { border-top: 1px solid var(--panel-border); margin-bottom: 7px; }
+.pcard-metrics {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 5px;
 }
+.pcard-metrics-right { text-align: right; }
+.pcard-metric-label { font-size: 10px; color: var(--dim); margin-bottom: 1px; }
+.pcard-metric-val   { font-size: 13px; color: var(--text); }
+.pcard-subtext { font-size: 10px; color: var(--dim); margin-bottom: 6px; }
 .up   { color: var(--accent-green); }
 .down { color: var(--accent-red); }
 

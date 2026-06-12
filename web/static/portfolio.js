@@ -101,7 +101,17 @@ async function loadPortfolioScan(id) {
           <span class="pcard-tk">${escapeHtml(t.ticker)}</span>
           <span class="badge ${sig}">${sig}</span>
         </div>
-        <div class="pcard-meta">${(t.quantity || 0).toFixed(0)} sh · $${(t.market_value || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+        <div class="pcard-divider" style="margin-top:6px;"></div>
+        <div class="pcard-metrics">
+          <div>
+            <div class="pcard-metric-label">Shares</div>
+            <div class="pcard-metric-val">${(t.quantity || 0).toFixed(0)}</div>
+          </div>
+          <div class="pcard-metrics-right">
+            <div class="pcard-metric-label">Current worth</div>
+            <div class="pcard-metric-val">$${(t.market_value || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+          </div>
+        </div>
         ${t.error ? `<div class="pcard-err">scan failed: ${escapeHtml(t.error)}</div>` : ""}
         ${t.analysis_id ? `<div class="pcard-link"><a href="#" data-analysis="${t.analysis_id}">Open full analysis →</a></div>` : ""}
       `;
@@ -248,19 +258,33 @@ function renderHoldingCard(pos) {
   const card = document.createElement("div");
   card.className = "pcard";
   const sig = (pos.signal || "").toUpperCase();
-  const gainCls = pos.gain_dollars >= 0 ? "up" : "down";
-  const gainSign = pos.gain_dollars >= 0 ? "+" : "-";
+  const isUp = pos.gain_dollars >= 0;
+  const gainCls = isUp ? "up" : "down";
+  const gainSign = isUp ? "+" : "−";
+  const arrow = isUp ? "▲" : "▼";
+  const pct = Math.abs(Number(pos.gain_percent)).toFixed(2) + "%";
 
   card.innerHTML = `
     <div class="pcard-row">
       <span class="pcard-tk">${escapeHtml(pos.symbol)}</span>
       ${sig ? `<span class="badge ${sig}">${sig}</span>` : ""}
     </div>
-    <div class="pcard-line"><span>Shares</span><span>${fmtShares(pos.shares)}</span></div>
-    <div class="pcard-line"><span>Buy</span><span>${fmt$(pos.average_price)}</span></div>
-    <div class="pcard-line"><span>Now</span><span>${fmt$(pos.current_price)}</span></div>
-    <div class="pcard-line"><span>Value</span><span>${fmt$(pos.market_value)}</span></div>
-    <div class="pcard-gain ${gainCls}">${gainSign}${fmtAbs$(pos.gain_dollars)} (${fmtPct(pos.gain_percent)})</div>
+    <div class="pcard-price-row">
+      <span class="pcard-price">${fmt$(pos.current_price)}</span>
+      <span class="pcard-pct ${gainCls}">${arrow} ${gainSign}${pct}</span>
+    </div>
+    <div class="pcard-divider"></div>
+    <div class="pcard-metrics">
+      <div>
+        <div class="pcard-metric-label">Purchase price</div>
+        <div class="pcard-metric-val">${fmt$(pos.average_price)}</div>
+      </div>
+      <div class="pcard-metrics-right">
+        <div class="pcard-metric-label">Current worth</div>
+        <div class="pcard-metric-val">${fmt$(pos.market_value)}</div>
+      </div>
+    </div>
+    <div class="pcard-subtext">${fmtShares(pos.shares)} shares · ${gainSign}${fmtAbs$(pos.gain_dollars)}</div>
     ${pos.analysis_id ? `<div class="pcard-link"><a href="#" data-analysis="${pos.analysis_id}">Open full analysis →</a></div>` : ""}
   `;
 
