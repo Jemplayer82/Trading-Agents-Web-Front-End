@@ -18,6 +18,11 @@ function fmtShares(v) {
 function fmtPct(v) {
   return (v >= 0 ? "+" : "") + Number(v).toFixed(2) + "%";
 }
+function fmtExpDate(iso) {
+  // "2026-01-17" -> "01/17/26" (string split — avoids Date() UTC off-by-one)
+  const [y, m, d] = iso.split("-");
+  return `${m}/${d}/${y.slice(2)}`;
+}
 
 async function loadPortfolioHistory() {
   const ul = $("portfolio-history");
@@ -199,6 +204,7 @@ function renderAccountTabs(accounts) {
     const btn = document.createElement("button");
     btn.className = "account-tab" + (acct.id === _activeAccountId ? " active" : "");
     btn.textContent = acct.label;
+    btn.dataset.id = acct.id;
     btn.addEventListener("click", () => selectAccount(acct.id));
     tabsEl.appendChild(btn);
   });
@@ -211,7 +217,7 @@ function selectAccount(id) {
   if (!acct) return;
 
   document.querySelectorAll(".account-tab").forEach((btn) => {
-    btn.classList.toggle("active", btn.textContent === acct.label);
+    btn.classList.toggle("active", btn.dataset.id === acct.id);
   });
 
   renderTotals(acct);
@@ -257,17 +263,27 @@ function renderTotals(acct) {
 function renderHoldingCard(pos) {
   const card = document.createElement("div");
   card.className = "pcard";
+  const isOption = pos.asset_type === "OPTION";
   const sig = (pos.signal || "").toUpperCase();
   const isUp = pos.gain_dollars >= 0;
   const gainCls = isUp ? "up" : "down";
   const gainSign = isUp ? "+" : "−";
   const arrow = isUp ? "▲" : "▼";
   const pct = Math.abs(Number(pos.gain_percent)).toFixed(2) + "%";
+  const ticker = isOption ? (pos.underlying || pos.symbol) : pos.symbol;
+  const expSpan = isOption && pos.expiration_date
+    ? `<span class="pcard-exp">exp ${fmtExpDate(pos.expiration_date)}</span>` : "";
+  const chip = isOption
+    ? '<span class="badge OPTION">OPTION</span>'
+    : (sig ? `<span class="badge ${sig}">${sig}</span>` : "");
+  const subtext = isOption
+    ? `${fmtShares(pos.shares)} contracts${pos.strike != null && pos.put_call ? ` · $${pos.strike} ${pos.put_call}` : ""} · ${gainSign}${fmtAbs$(pos.gain_dollars)}`
+    : `${fmtShares(pos.shares)} shares · ${gainSign}${fmtAbs$(pos.gain_dollars)}`;
 
   card.innerHTML = `
     <div class="pcard-row">
-      <span class="pcard-tk">${escapeHtml(pos.symbol)}</span>
-      ${sig ? `<span class="badge ${sig}">${sig}</span>` : ""}
+      <span><span class="pcard-tk">${escapeHtml(ticker)}</span>${expSpan}</span>
+      ${chip}
     </div>
     <div class="pcard-price-row">
       <span class="pcard-price">${fmt$(pos.current_price)}</span>
@@ -284,8 +300,8 @@ function renderHoldingCard(pos) {
         <div class="pcard-metric-val">${fmt$(pos.market_value)}</div>
       </div>
     </div>
-    <div class="pcard-subtext">${fmtShares(pos.shares)} shares · ${gainSign}${fmtAbs$(pos.gain_dollars)}</div>
-    ${pos.analysis_id ? `<div class="pcard-link"><a href="#" data-analysis="${pos.analysis_id}">Open full analysis →</a></div>` : ""}
+    <div class="pcard-subtext">${subtext}</div>
+    ${!isOption && pos.analysis_id ? `<div class="pcard-link"><a href="#" data-analysis="${pos.analysis_id}">Open full analysis →</a></div>` : ""}
   `;
 
   const link = card.querySelector("[data-analysis]");
