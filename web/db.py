@@ -97,6 +97,9 @@ CREATE TABLE IF NOT EXISTS portfolio_scans (
     trade_date TEXT NOT NULL,
     status TEXT NOT NULL,
     num_tickers INTEGER DEFAULT 0,
+    scanned_count INTEGER DEFAULT 0,
+    scan_total INTEGER DEFAULT 0,
+    current_ticker TEXT,
     signal_counts TEXT,
     aggregator_report TEXT,
     full_payload TEXT,
@@ -183,6 +186,11 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("spy_scans", "cancel_requested", "INTEGER DEFAULT 0"),
     ("spy_scans", "previous_scan_id", "INTEGER"),
     ("spy_scans", "starting_value", "REAL"),
+    # Portfolio scan progress columns (added for live progress bar feature).
+    # Existing deployed DBs gain these on container boot via this migration list.
+    ("portfolio_scans", "scanned_count", "INTEGER DEFAULT 0"),
+    ("portfolio_scans", "scan_total", "INTEGER DEFAULT 0"),
+    ("portfolio_scans", "current_ticker", "TEXT"),
 ]
 
 
@@ -731,6 +739,24 @@ def update_spy_scan(scan_id: int, **kwargs: Any) -> None:
     vals = list(kwargs.values()) + [scan_id]
     with connect() as conn:
         conn.execute("UPDATE spy_scans SET " + sets + " WHERE id = ?", vals)
+
+
+# Columns update_portfolio_scan is allowed to set. Column names are interpolated
+# into SQL (not parameterized), so this allow-list is a security control — keep it
+# tight to exactly the three progress columns.
+_PORTFOLIO_SCAN_UPDATABLE = {"scanned_count", "scan_total", "current_ticker"}
+
+
+def update_portfolio_scan(scan_id: int, **kwargs: Any) -> None:
+    if not kwargs:
+        return
+    bad = set(kwargs) - _PORTFOLIO_SCAN_UPDATABLE
+    if bad:
+        raise ValueError(f"update_portfolio_scan: disallowed column(s) {sorted(bad)}")
+    sets = ", ".join(k + " = ?" for k in kwargs)
+    vals = list(kwargs.values()) + [scan_id]
+    with connect() as conn:
+        conn.execute("UPDATE portfolio_scans SET " + sets + " WHERE id = ?", vals)
 
 
 def complete_spy_scan(
