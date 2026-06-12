@@ -187,6 +187,9 @@ def _run_scan(scan_id: int, trade_date: str) -> None:
     if not pos_dicts:
         raise RuntimeError("Only option positions held — nothing to scan (options are excluded from AI analysis).")
 
+    # Record the total number of tickers to be scanned so the frontend can show a progress bar.
+    db.update_portfolio_scan(scan_id, scan_total=len(pos_dicts))
+
     # Step 2: load user preferences for LLM / analyst config
     prefs = db.get_preferences() or {}
     config: dict[str, Any] = {
@@ -205,6 +208,9 @@ def _run_scan(scan_id: int, trade_date: str) -> None:
     counts = {sig: 0 for sig in SIGNALS}
     for i, pos in enumerate(pos_dicts, start=1):
         ticker = pos["symbol"]
+        # scanned_count = completed-so-far (i-1), current_ticker = the one being analyzed now.
+        # This lets the UI read "k/N done, working on TICKER".
+        db.update_portfolio_scan(scan_id, scanned_count=i - 1, current_ticker=ticker)
         log.info("[scan %s] %d/%d: %s", scan_id, i, len(pos_dicts), ticker)
         analysis_id = db.create_analysis({
             "ticker": ticker,
