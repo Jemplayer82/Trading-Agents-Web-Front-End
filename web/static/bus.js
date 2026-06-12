@@ -37,7 +37,8 @@
   let stuckToBottom = true;
 
   // ===== DOM helpers =====
-  function $(id) { return document.getElementById(id); }
+  // `$` (getElementById) is the global from utils.js, which loads first; this IIFE
+  // closes over it. No local redefinition needed.
 
   function initDom() {
     feed   = $("bus-feed");

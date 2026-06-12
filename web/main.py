@@ -758,7 +758,7 @@ async def bus_ws(ws: WebSocket) -> None:
     internal = ws.headers.get("x-internal-token")
     expected = os.environ.get("INTERNAL_API_TOKEN")
     authed = bool(token and db.get_session(token)) or bool(
-        internal and expected and internal == expected
+        internal and expected and hmac.compare_digest(internal, expected)
     )
     if not authed:
         await ws.close(code=4401)

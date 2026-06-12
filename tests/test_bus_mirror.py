@@ -5,8 +5,10 @@ content without touching the network. Module-level _agents_registered flag is
 reset in the fixture that needs registration isolation.
 """
 from __future__ import annotations
+
 import pytest
 
+from web.bus_mirror import RunMirror
 
 # ---------------------------------------------------------------------------
 # Helpers

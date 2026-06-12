@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
 import httpx
 
@@ -59,14 +58,14 @@ def _client(bundle: TokenBundle) -> httpx.Client:
     )
 
 
-def _loaded(bundle: Optional[TokenBundle]) -> TokenBundle:
+def _loaded(bundle: TokenBundle | None) -> TokenBundle:
     bundle = bundle or token_store.load()
     if not bundle:
         raise SchwabError("not connected — no Schwab tokens on disk")
     return _ensure_fresh(bundle)
 
 
-def get_account_numbers(bundle: Optional[TokenBundle] = None) -> tuple[list[dict], TokenBundle]:
+def get_account_numbers(bundle: TokenBundle | None = None) -> tuple[list[dict], TokenBundle]:
     bundle = _loaded(bundle)
     with _client(bundle) as c:
         r = c.get("/accounts/accountNumbers")
@@ -74,7 +73,7 @@ def get_account_numbers(bundle: Optional[TokenBundle] = None) -> tuple[list[dict
         return r.json(), bundle
 
 
-def get_positions(account_hash: str, bundle: Optional[TokenBundle] = None) -> tuple[list[Position], TokenBundle]:
+def get_positions(account_hash: str, bundle: TokenBundle | None = None) -> tuple[list[Position], TokenBundle]:
     bundle = _loaded(bundle)
     with _client(bundle) as c:
         r = c.get(f"/accounts/{account_hash}", params={"fields": "positions"})

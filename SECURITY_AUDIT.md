@@ -93,6 +93,38 @@ add dependencies or a schema/privilege model and need their own testing:
   Operator-controlled config today; recommend host-allowlisting `SCHWAB_MCP_URL` and
   asserting the callback URL targets this app's own callback path.
 
+## Round 2 — Agent Bus, brokerages, scan progress (2026-06-12)
+
+A second pass covering the ~4.4k lines that landed after the original audit (Agent Bus,
+brokerage abstraction, option handling, scan progress bar).
+
+| # | Severity | Finding | Status |
+|---|----------|---------|--------|
+| 11 | Low | **Regression of #9.** The new `/api/bus` WebSocket re-introduced `internal == expected` for the `X-Internal-Token` gate (a copy of the `/api/analyze` gate that *does* use `hmac.compare_digest`). Timing side-channel on `INTERNAL_API_TOKEN`. | **Fixed** — `web/main.py` now uses `hmac.compare_digest`; regression test added (`tests/test_bus_bridge.py::test_wrong_internal_token_closes_with_4401`). |
+
+### Reviewed, no change
+
+- **Bus message content** (`web/bus_mirror.py`): all message text is sourced from the
+  LangGraph state (agent output), travels as JSON over the bus, and is rendered in the
+  browser via `textContent` (never `innerHTML`) — no injection path. Content is also
+  length-capped (500–700 chars) at publish.
+- **Bus client URL** (`web/bus.py`): `base_url` comes from `SWITCHBOARD_URL` (env, set at
+  container start), never from request data — no SSRF via the bus client.
+- **Brokerage data path** (`web/brokerages.py`): positions come from the trusted
+  `mcp-schwab` server; values are coerced to `float`/strings and only ever rendered through
+  `escapeHtml`. The option subtext (`strike`/`put_call`) is now escaped too (WS1).
+
+### Deferred (round 2)
+
+- **`SWITCHBOARD_MCP_TOKEN` lifecycle** (Low). Dedicated bus token lives in the container
+  env in plaintext with no rotation; a switchboard compromise exposes only the per-run
+  analysis mirror (no trading authority). Acceptable for an internal-only service;
+  revisit if the bus is ever exposed beyond the Docker network.
+- **Scan-progress endpoints** (Low). `/api/portfolio-scans/{id}` and `/api/spy-scans/{id}`
+  use sequential integer ids and are session-gated; a logged-in user could enumerate scan
+  ids, but all scans belong to the single-tenant deployment. Tie to an owner if multi-user
+  / RBAC lands (see the deferred RBAC item above).
+
 ## Operational recommendation
 
 Set `TOKEN_ENCRYPTION_KEY` in every deployment so secrets are encrypted at rest. Generate

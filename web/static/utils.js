@@ -73,3 +73,14 @@ async function apiFetch(url, options) {
   if (!resp.ok) throw new Error("HTTP " + resp.status);
   return resp.json();
 }
+
+/**
+ * Build the track+fill element for a "[ Progress ]" bar. The portfolio scan and the
+ * S&P 500 scan both render this exact markup; callers own the surrounding panel and
+ * the "N/total" label line (those differ per scan type). Width is the count/total
+ * ratio as a whole percent, 0% when total is 0.
+ */
+function progressBar(count, total) {
+  const pct = total > 0 ? Math.round((count / total) * 100) : 0;
+  return `<div class="scan-progress"><div class="scan-progress-bar" style="width:${pct}%"></div></div>`;
+}

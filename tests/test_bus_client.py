@@ -5,14 +5,14 @@ No network access, no Docker. All tests run with `uv run pytest tests/test_bus_c
 from __future__ import annotations
 
 import json
-import os
-import queue
 import threading
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
+
+from web.bus import BusPublisher, SwitchboardClient
 
 # ---------------------------------------------------------------------------
 # Helpers to build fake httpx.Response objects
@@ -102,7 +102,7 @@ class TestParseMcpResponseJSON:
 
 @pytest.mark.unit
 class TestSwitchboardClientCall:
-    def _make_client(self, transport: httpx.MockTransport) -> "SwitchboardClient":
+    def _make_client(self, transport: httpx.MockTransport) -> SwitchboardClient:
         from web.bus import SwitchboardClient
 
         # Bypass the normal httpx.Client construction so we can inject transport
@@ -171,7 +171,7 @@ class TestSwitchboardClientCall:
 
 @pytest.mark.unit
 class TestSwitchboardClientErrors:
-    def _make_client_with_rpc(self, rpc_result: dict) -> "SwitchboardClient":
+    def _make_client_with_rpc(self, rpc_result: dict) -> SwitchboardClient:
         from web.bus import SwitchboardClient
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -237,7 +237,7 @@ class TestSwitchboardClientErrors:
 
 @pytest.mark.unit
 class TestBusPublisherDropOnOverflow:
-    def _make_publisher(self, maxsize: int = 3) -> "BusPublisher":
+    def _make_publisher(self, maxsize: int = 3) -> BusPublisher:
         """Build a BusPublisher with an artificially tiny queue and a stalled client."""
         from web.bus import BusPublisher
 
@@ -298,13 +298,12 @@ class TestBusPublisherDropOnOverflow:
 
 @pytest.mark.unit
 class TestCircuitBreaker:
-    def _make_publisher(self, mock_client: MagicMock) -> "BusPublisher":
+    def _make_publisher(self, mock_client: MagicMock) -> BusPublisher:
         from web.bus import BusPublisher
         return BusPublisher(mock_client, _queue_maxsize=50)
 
     def test_three_failures_open_breaker(self):
         """After 3 consecutive failures the breaker opens; subsequent calls are skipped."""
-        from web.bus import BusPublisher
 
         call_count = [0]
 
@@ -534,8 +533,8 @@ class TestGetPublisher:
         monkeypatch.setenv("SWITCHBOARD_MCP_TOKEN", "tok")
         self._reset_singleton()
 
-        from web.bus import get_publisher
         import web.bus as bus_mod
+        from web.bus import get_publisher
 
         result1 = get_publisher()
         assert result1 is None
@@ -575,7 +574,7 @@ class TestNewBehaviours:
 
     def test_parse_mcp_response_raises_on_no_data_line(self):
         """_parse_mcp_response raises BusError when SSE body has no data: line."""
-        from web.bus import _parse_mcp_response, BusError
+        from web.bus import BusError, _parse_mcp_response
 
         # SSE body with only an event line, no data: line
         sse_body = "event: message\n\n"

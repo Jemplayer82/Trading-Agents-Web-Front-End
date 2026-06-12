@@ -4,14 +4,13 @@ from __future__ import annotations
 import io
 import logging
 import time
-from typing import Optional
 
 import pandas as pd
 import requests
 
 log = logging.getLogger(__name__)
 
-_CACHE: Optional[list[str]] = None
+_CACHE: list[str] | None = None
 _CACHE_TS: float = 0.0
 _TTL = 86400  # 24 hours
 

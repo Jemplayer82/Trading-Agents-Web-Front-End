@@ -347,6 +347,11 @@ def _parse_schwab_account(accounts: list[dict[str, Any]] | None) -> dict[str, An
 
     Balance fields vary by account: currentBalances often omits
     liquidationValue/cashBalance, so we fall back to equity / initialBalances.
+
+    DEPRECATED: this is the legacy Schwab-only parser kept for the /api/spy-account
+    drift views. New per-account/holdings code goes through the brokerage-agnostic
+    ``brokerages.fetch_all_accounts()`` (web/brokerages.py), which also handles
+    options and multiple providers. Migrate /api/spy-account to it when convenient.
     """
     if not accounts:
         return None
