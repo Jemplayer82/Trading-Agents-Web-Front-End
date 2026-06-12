@@ -7,27 +7,26 @@ at 22:00 ET nightly.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Iterator
+from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 
-from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.constants import SIGNALS
 from tradingagents.dataflows import schwab_mcp
-from tradingagents.graph.portfolio_graph import run_portfolio_scan
+from tradingagents.default_config import DEFAULT_CONFIG
 
-from . import auth_app
+from . import auth_app, db, spy_allocator, spy_scanner
 from . import credentials as creds
-from . import db
+from ._logging import configure_logging
 from .portfolio import aggregator
-from . import spy_scanner, spy_allocator
 from .spy_tickers import get_sp500_tickers
 
 log = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 
 app = FastAPI(title="TradingAgents Portfolio")
 
@@ -204,7 +203,7 @@ def _run_scan(scan_id: int, trade_date: str) -> None:
 
     from tradingagents.graph.portfolio_graph import run_single_ticker
 
-    counts = {"BUY": 0, "HOLD": 0, "SELL": 0}
+    counts = {sig: 0 for sig in SIGNALS}
     for i, pos in enumerate(pos_dicts, start=1):
         ticker = pos["symbol"]
         log.info("[scan %s] %d/%d: %s", scan_id, i, len(pos_dicts), ticker)

@@ -2,7 +2,7 @@
 // Loads first; reveals a full-screen overlay until the user is authenticated.
 
 (function () {
-  const $ = (id) => document.getElementById(id);
+  // $ comes from utils.js (loaded first).
   let mode = "login"; // "login" | "setup"
 
   function showOverlay() { $("auth-overlay").hidden = false; }

@@ -1,12 +1,11 @@
 // Portfolio Scan tab — history list, briefing render, per-ticker grid, live holdings
-
-const $$p = (id) => document.getElementById(id);
+// $, escapeHtml, fmtTs and renderMarkdown live in utils.js (loaded first).
 
 let activePortfolioId = null;
 let _accountsData = null;
 let _activeAccountId = "all";
 
-// ---- number formatters ----
+// ---- number formatters (Portfolio-tab specific: currency / shares / percent) ----
 function fmt$(v) {
   return "$" + Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
@@ -20,21 +19,8 @@ function fmtPct(v) {
   return (v >= 0 ? "+" : "") + Number(v).toFixed(2) + "%";
 }
 
-function fmtTs(iso) {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso;
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-function escapeHtml(s) {
-  if (s == null) return "";
-  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
 async function loadPortfolioHistory() {
-  const ul = $$p("portfolio-history");
+  const ul = $("portfolio-history");
   if (!ul) return;
   ul.innerHTML = '<li class="dim empty">loading…</li>';
   try {
@@ -80,9 +66,9 @@ async function loadPortfolioScan(id) {
   document.querySelectorAll("#portfolio-history li").forEach((li) =>
     li.classList.toggle("active", String(li.dataset.id) === String(id))
   );
-  const meta = $$p("portfolio-meta");
-  const brief = $$p("portfolio-briefing");
-  const grid = $$p("portfolio-tickers");
+  const meta = $("portfolio-meta");
+  const brief = $("portfolio-briefing");
+  const grid = $("portfolio-tickers");
   brief.innerHTML = '<p class="dim">loading…</p>';
   grid.innerHTML = "";
   try {
@@ -100,7 +86,7 @@ async function loadPortfolioScan(id) {
       ${scan.newsletter_sent_at ? `· newsletter sent ${fmtTs(scan.newsletter_sent_at)}` : ""}
     `;
     if (scan.aggregator_report) {
-      brief.innerHTML = window.marked ? window.marked.parse(scan.aggregator_report) : `<pre>${escapeHtml(scan.aggregator_report)}</pre>`;
+      brief.innerHTML = renderMarkdown(scan.aggregator_report);
     } else if (scan.error) {
       brief.innerHTML = `<p style="color: var(--accent-red);">${escapeHtml(scan.error)}</p>`;
     } else {
@@ -115,7 +101,17 @@ async function loadPortfolioScan(id) {
           <span class="pcard-tk">${escapeHtml(t.ticker)}</span>
           <span class="badge ${sig}">${sig}</span>
         </div>
-        <div class="pcard-meta">${(t.quantity || 0).toFixed(0)} sh · $${(t.market_value || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+        <div class="pcard-divider" style="margin-top:6px;"></div>
+        <div class="pcard-metrics">
+          <div>
+            <div class="pcard-metric-label">Shares</div>
+            <div class="pcard-metric-val">${(t.quantity || 0).toFixed(0)}</div>
+          </div>
+          <div class="pcard-metrics-right">
+            <div class="pcard-metric-label">Current worth</div>
+            <div class="pcard-metric-val">$${(t.market_value || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</div>
+          </div>
+        </div>
         ${t.error ? `<div class="pcard-err">scan failed: ${escapeHtml(t.error)}</div>` : ""}
         ${t.analysis_id ? `<div class="pcard-link"><a href="#" data-analysis="${t.analysis_id}">Open full analysis →</a></div>` : ""}
       `;
@@ -144,17 +140,17 @@ async function deletePortfolioScan(id) {
   }
   if (String(activePortfolioId) === String(id)) {
     activePortfolioId = null;
-    $$p("portfolio-briefing").innerHTML = '<p class="dim">Select a scan from the sidebar.</p>';
-    $$p("portfolio-tickers").innerHTML = "";
-    $$p("portfolio-meta").textContent = "";
+    $("portfolio-briefing").innerHTML = '<p class="dim">Select a scan from the sidebar.</p>';
+    $("portfolio-tickers").innerHTML = "";
+    $("portfolio-meta").textContent = "";
   }
   loadPortfolioHistory();
 }
 
 // Run a Schwab portfolio scan now (moved from the old Schwab tab).
 async function runScanNow() {
-  const btn = $$p("btn-scan-now");
-  const out = $$p("scan-now-result");
+  const btn = $("btn-scan-now");
+  const out = $("scan-now-result");
   if (btn) btn.disabled = true;
   if (out) out.textContent = "starting…";
   try {
@@ -176,14 +172,14 @@ async function runScanNow() {
 // ---- Live account holdings ----
 
 async function loadAccountHoldings() {
-  const tabsEl = $$p("account-tabs");
+  const tabsEl = $("account-tabs");
   if (!tabsEl) return;
   try {
     const r = await fetch("/api/accounts");
     const data = await r.json();
     if (!data.enabled || !data.connected || !data.accounts) {
       tabsEl.innerHTML = "";
-      const panel = $$p("portfolio-totals-panel");
+      const panel = $("portfolio-totals-panel");
       if (panel) panel.hidden = true;
       return;
     }
@@ -196,7 +192,7 @@ async function loadAccountHoldings() {
 }
 
 function renderAccountTabs(accounts) {
-  const tabsEl = $$p("account-tabs");
+  const tabsEl = $("account-tabs");
   if (!tabsEl) return;
   tabsEl.innerHTML = "";
   accounts.forEach((acct) => {
@@ -220,7 +216,7 @@ function selectAccount(id) {
 
   renderTotals(acct);
 
-  const grid = $$p("portfolio-tickers");
+  const grid = $("portfolio-tickers");
   if (!grid) return;
   grid.innerHTML = "";
   if (!acct.positions.length) {
@@ -231,8 +227,8 @@ function selectAccount(id) {
 }
 
 function renderTotals(acct) {
-  const panel = $$p("portfolio-totals-panel");
-  const el = $$p("portfolio-totals");
+  const panel = $("portfolio-totals-panel");
+  const el = $("portfolio-totals");
   if (!panel || !el) return;
 
   const gainCls = acct.gain_dollars >= 0 ? "up" : "down";
@@ -262,19 +258,33 @@ function renderHoldingCard(pos) {
   const card = document.createElement("div");
   card.className = "pcard";
   const sig = (pos.signal || "").toUpperCase();
-  const gainCls = pos.gain_dollars >= 0 ? "up" : "down";
-  const gainSign = pos.gain_dollars >= 0 ? "+" : "-";
+  const isUp = pos.gain_dollars >= 0;
+  const gainCls = isUp ? "up" : "down";
+  const gainSign = isUp ? "+" : "−";
+  const arrow = isUp ? "▲" : "▼";
+  const pct = Math.abs(Number(pos.gain_percent)).toFixed(2) + "%";
 
   card.innerHTML = `
     <div class="pcard-row">
       <span class="pcard-tk">${escapeHtml(pos.symbol)}</span>
       ${sig ? `<span class="badge ${sig}">${sig}</span>` : ""}
     </div>
-    <div class="pcard-line"><span>Shares</span><span>${fmtShares(pos.shares)}</span></div>
-    <div class="pcard-line"><span>Buy</span><span>${fmt$(pos.average_price)}</span></div>
-    <div class="pcard-line"><span>Now</span><span>${fmt$(pos.current_price)}</span></div>
-    <div class="pcard-line"><span>Value</span><span>${fmt$(pos.market_value)}</span></div>
-    <div class="pcard-gain ${gainCls}">${gainSign}${fmtAbs$(pos.gain_dollars)} (${fmtPct(pos.gain_percent)})</div>
+    <div class="pcard-price-row">
+      <span class="pcard-price">${fmt$(pos.current_price)}</span>
+      <span class="pcard-pct ${gainCls}">${arrow} ${gainSign}${pct}</span>
+    </div>
+    <div class="pcard-divider"></div>
+    <div class="pcard-metrics">
+      <div>
+        <div class="pcard-metric-label">Purchase price</div>
+        <div class="pcard-metric-val">${fmt$(pos.average_price)}</div>
+      </div>
+      <div class="pcard-metrics-right">
+        <div class="pcard-metric-label">Current worth</div>
+        <div class="pcard-metric-val">${fmt$(pos.market_value)}</div>
+      </div>
+    </div>
+    <div class="pcard-subtext">${fmtShares(pos.shares)} shares · ${gainSign}${fmtAbs$(pos.gain_dollars)}</div>
     ${pos.analysis_id ? `<div class="pcard-link"><a href="#" data-analysis="${pos.analysis_id}">Open full analysis →</a></div>` : ""}
   `;
 
@@ -291,7 +301,7 @@ function renderHoldingCard(pos) {
 
 // Schwab (MCP) connection status line at the top of the Portfolio tab.
 async function loadSchwabStatusLine() {
-  const el = $$p("schwab-mcp-status");
+  const el = $("schwab-mcp-status");
   if (!el) return;
   try {
     const s = await (await fetch("/api/auth/schwab/status")).json();
@@ -325,7 +335,7 @@ function setupTabs() {
 
 document.addEventListener("DOMContentLoaded", () => {
   setupTabs();
-  $$p("btn-scan-now")?.addEventListener("click", runScanNow);
+  $("btn-scan-now")?.addEventListener("click", runScanNow);
 });
 
 document.addEventListener("tab-shown", (ev) => {

@@ -18,10 +18,13 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
+
+from . import secret_box
 
 _HOME = Path(os.path.expanduser("~")) / ".tradingagents"
 DB_PATH = Path(os.environ.get("TRADINGAGENTS_WEB_DB", str(_HOME / "web.db")))
@@ -192,9 +195,43 @@ def _run_column_migrations(conn: sqlite3.Connection) -> None:
 
 def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # Surface a malformed TOKEN_ENCRYPTION_KEY immediately, before any request
+    # tries to read or write a secret.
+    secret_box.validate_key()
     with connect() as conn:
         conn.executescript(SCHEMA)
         _run_column_migrations(conn)
+        _encrypt_existing_secrets(conn)
+    # The DB holds API keys, OAuth secrets and password hashes — keep it readable
+    # only by the owning service account, not world/group (umask can leave it 644).
+    try:
+        DB_PATH.chmod(0o600)
+    except OSError:
+        pass
+
+
+def _encrypt_existing_secrets(conn: sqlite3.Connection) -> None:
+    """Re-encrypt any plaintext secret rows once a key is configured.
+
+    No-op when encryption is disabled (no key) — values simply stay plaintext,
+    matching historical behavior. Idempotent: already-encrypted rows are skipped
+    by ``encrypt_secret``.
+    """
+    if not secret_box.encryption_enabled():
+        return
+    for provider, api_key in conn.execute(
+        "SELECT provider, api_key FROM provider_credentials"
+    ).fetchall():
+        enc = secret_box.encrypt_secret(api_key)
+        if enc != api_key:
+            conn.execute(
+                "UPDATE provider_credentials SET api_key = ? WHERE provider = ?",
+                (enc, provider),
+            )
+    for key, value in conn.execute("SELECT key, value FROM app_settings").fetchall():
+        enc = secret_box.encrypt_secret(value)
+        if enc != value:
+            conn.execute("UPDATE app_settings SET value = ? WHERE key = ?", (enc, key))
 
 
 @contextmanager
@@ -230,14 +267,18 @@ def save_preferences(data: dict[str, Any]) -> None:
 # ---------- provider credentials (LLM API keys) ----------
 
 def set_credential(provider: str, api_key: str, base_url: str | None = None) -> None:
-    """Insert-or-update an API key (and optional base URL) for a provider."""
+    """Insert-or-update an API key (and optional base URL) for a provider.
+
+    The api_key is encrypted at rest (when TOKEN_ENCRYPTION_KEY is configured);
+    base_url is not secret and is stored as-is.
+    """
     with connect() as conn:
         conn.execute(
             "INSERT INTO provider_credentials (provider, api_key, base_url, updated_at) "
             "VALUES (?, ?, ?, ?) "
             "ON CONFLICT(provider) DO UPDATE SET "
             "api_key = excluded.api_key, base_url = excluded.base_url, updated_at = excluded.updated_at",
-            (provider, api_key, base_url, datetime.utcnow().isoformat()),
+            (provider, secret_box.encrypt_secret(api_key), base_url, datetime.utcnow().isoformat()),
         )
 
 
@@ -248,7 +289,11 @@ def get_credential(provider: str) -> dict[str, Any] | None:
             "SELECT provider, api_key, base_url, updated_at FROM provider_credentials WHERE provider = ?",
             (provider,),
         ).fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    out = dict(row)
+    out["api_key"] = secret_box.decrypt_secret(out["api_key"])
+    return out
 
 
 def list_credentials() -> list[dict[str, Any]]:
@@ -257,7 +302,12 @@ def list_credentials() -> list[dict[str, Any]]:
         rows = conn.execute(
             "SELECT provider, api_key, base_url, updated_at FROM provider_credentials"
         ).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["api_key"] = secret_box.decrypt_secret(d["api_key"])
+        out.append(d)
+    return out
 
 
 def delete_credential(provider: str) -> bool:
@@ -270,12 +320,18 @@ def delete_credential(provider: str) -> bool:
 # ---------- app settings (Schwab, Ollama, etc. — env-style config) ----------
 
 def set_app_setting(key: str, value: str) -> None:
-    """Insert-or-update a UI-managed env-style setting."""
+    """Insert-or-update a UI-managed env-style setting.
+
+    Values are encrypted at rest (when TOKEN_ENCRYPTION_KEY is configured). All
+    settings are encrypted uniformly — several hold secrets (SMTP_PASS, Schwab
+    app secret, Alpaca secret) and treating them all the same avoids a
+    secret/non-secret classification that could miss one.
+    """
     with connect() as conn:
         conn.execute(
             "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-            (key, value, datetime.utcnow().isoformat()),
+            (key, secret_box.encrypt_secret(value), datetime.utcnow().isoformat()),
         )
 
 
@@ -284,7 +340,7 @@ def get_app_setting(key: str) -> str | None:
         row = conn.execute(
             "SELECT value FROM app_settings WHERE key = ?", (key,)
         ).fetchone()
-    return row["value"] if row else None
+    return secret_box.decrypt_secret(row["value"]) if row else None
 
 
 def list_app_settings() -> list[dict[str, Any]]:
@@ -293,7 +349,12 @@ def list_app_settings() -> list[dict[str, Any]]:
         rows = conn.execute(
             "SELECT key, value, updated_at FROM app_settings"
         ).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["value"] = secret_box.decrypt_secret(d["value"])
+        out.append(d)
+    return out
 
 
 def delete_app_setting(key: str) -> bool:
@@ -650,9 +711,22 @@ def is_spy_scan_cancelled(scan_id: int) -> bool:
     return bool(row and row["cancel_requested"])
 
 
+# Columns update_spy_scan is allowed to set. Callers only ever pass these
+# (progress counters + status), but since the column names are interpolated into
+# SQL rather than parameterized, an allow-list keeps that interpolation safe even
+# if a caller is ever changed.
+_SPY_SCAN_UPDATABLE = {
+    "status", "quick_count", "quick_total", "deep_count", "deep_total",
+    "current_value", "last_price_check", "rebalance_notes", "error",
+}
+
+
 def update_spy_scan(scan_id: int, **kwargs: Any) -> None:
     if not kwargs:
         return
+    bad = set(kwargs) - _SPY_SCAN_UPDATABLE
+    if bad:
+        raise ValueError(f"update_spy_scan: disallowed column(s) {sorted(bad)}")
     sets = ", ".join(k + " = ?" for k in kwargs)
     vals = list(kwargs.values()) + [scan_id]
     with connect() as conn:

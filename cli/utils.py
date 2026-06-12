@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict
 
 import questionary
 from dotenv import find_dotenv, set_key
@@ -8,6 +7,7 @@ from rich.console import Console
 
 from cli.models import AnalystType, AssetType
 from tradingagents.llm_clients.api_key_env import get_api_key_env
+from tradingagents.llm_clients.defaults import resolve_ollama_base_url
 from tradingagents.llm_clients.model_catalog import get_model_options
 
 console = Console()
@@ -57,8 +57,8 @@ def detect_asset_type(ticker: str) -> AssetType:
 
 
 def filter_analysts_for_asset_type(
-    analysts: List[AnalystType], asset_type: AssetType
-) -> List[AnalystType]:
+    analysts: list[AnalystType], asset_type: AssetType
+) -> list[AnalystType]:
     if asset_type != AssetType.CRYPTO:
         return analysts
     return [
@@ -101,7 +101,7 @@ def get_analysis_date() -> str:
     return date.strip()
 
 
-def select_analysts(asset_type: AssetType = AssetType.STOCK) -> List[AnalystType]:
+def select_analysts(asset_type: AssetType = AssetType.STOCK) -> list[AnalystType]:
     """Select analysts using an interactive checkbox."""
     available_analysts = filter_analysts_for_asset_type(
         [value for _, value in ANALYST_ORDER],
@@ -165,7 +165,7 @@ def select_research_depth() -> int:
     return choice
 
 
-def _fetch_openrouter_models() -> List[Tuple[str, str]]:
+def _fetch_openrouter_models() -> list[tuple[str, str]]:
     """Fetch available models from the OpenRouter API."""
     import requests
     try:
@@ -264,7 +264,7 @@ def select_llm_provider() -> tuple[str, str | None]:
     # Ollama users can point at a remote ollama-serve via OLLAMA_BASE_URL
     # (convention from the broader Ollama ecosystem); falls back to the
     # localhost default when unset.
-    ollama_url = os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434/v1"
+    ollama_url = resolve_ollama_base_url()
     # (display_name, provider_key, base_url)
     PROVIDERS = [
         ("OpenAI", "openai", "https://api.openai.com/v1"),
@@ -474,7 +474,7 @@ def confirm_ollama_endpoint(url: str) -> None:
         )
 
 
-def ensure_api_key(provider: str) -> Optional[str]:
+def ensure_api_key(provider: str) -> str | None:
     """Make sure the API key for `provider` is available in the environment.
 
     If the env var is already set, returns its value untouched. Otherwise

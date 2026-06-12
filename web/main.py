@@ -6,10 +6,13 @@ Nginx routes /api/portfolio* there and everything else here.
 from __future__ import annotations
 
 import asyncio
+import hmac
+import json
 import logging
 import os
 import queue
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -20,9 +23,8 @@ from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSoc
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth_app
+from . import auth_app, bus, db
 from . import credentials as creds
-from . import db
 from .auth import schwab as schwab_auth
 from .auth import token_store
 from .llm_helpers import llm_for
@@ -166,7 +168,7 @@ def auth_add_user(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         db.create_user(username, auth_app.hash_password(password))
     except sqlite3.IntegrityError:
-        raise HTTPException(status_code=409, detail="username already exists")
+        raise HTTPException(status_code=409, detail="username already exists") from None
     return {"status": "created", "username": username}
 
 
@@ -282,9 +284,17 @@ def ticker_info(ticker: str) -> dict[str, Any]:
     available, so the link is always usable.
     """
     t = (ticker or "").strip().upper()
-    yahoo = f"https://finance.yahoo.com/quote/{t}"
     if not t:
         raise HTTPException(status_code=400, detail="missing ticker")
+    # Validate before the value reaches yfinance / the Schwab MCP / a URL or the
+    # cache path. safe_ticker_component enforces a strict charset and rejects
+    # path-traversal-style input.
+    try:
+        from tradingagents.dataflows.utils import safe_ticker_component
+        safe_ticker_component(t)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid ticker") from None
+    yahoo = f"https://finance.yahoo.com/quote/{t}"
 
     cached = db.get_ticker_info(t)
     if cached:
@@ -395,7 +405,7 @@ async def ask_about_analysis(analysis_id: int, payload: dict[str, Any]) -> dict[
         answer = response.content if hasattr(response, "content") else str(response)
     except Exception as exc:
         log.exception("Q&A LLM call failed for analysis %s", analysis_id)
-        raise HTTPException(status_code=500, detail=f"LLM error: {exc}")
+        raise HTTPException(status_code=500, detail=f"LLM error: {exc}") from exc
 
     return {"answer": answer}
 
@@ -417,7 +427,7 @@ async def get_analysis_chart_data(
         result = await asyncio.to_thread(_build_chart_data, ticker, trade_date, lookback_days)
     except Exception as exc:
         log.exception("chart data failed for %s on %s", ticker, trade_date)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     return result
 
 
@@ -501,24 +511,45 @@ def _build_chart_data(ticker: str, trade_date: str, lookback_days: int) -> dict[
 
 # ---------- Schwab OAuth ----------
 
+# Short-lived cookie carrying the OAuth anti-CSRF state nonce between the
+# /api/auth/schwab redirect and the Schwab callback. SameSite=lax (not strict)
+# so it survives the top-level cross-site redirect back from Schwab.
+_SCHWAB_STATE_COOKIE = "schwab_oauth_state"
+
+
 @app.get("/api/auth/schwab")
 def schwab_login() -> RedirectResponse:
-    return RedirectResponse(url=schwab_auth.build_auth_url(), status_code=302)
+    state = secrets.token_urlsafe(32)
+    resp = RedirectResponse(url=schwab_auth.build_auth_url(state), status_code=302)
+    resp.set_cookie(
+        _SCHWAB_STATE_COOKIE, state,
+        max_age=600, httponly=True, samesite="lax", secure=True, path="/api/auth/schwab",
+    )
+    return resp
 
 
 @app.get("/api/auth/schwab/callback")
-def schwab_callback(code: str | None = None, error: str | None = None) -> HTMLResponse:
+def schwab_callback(
+    request: Request, code: str | None = None, error: str | None = None, state: str | None = None
+) -> HTMLResponse:
+    # Verify the anti-CSRF state matches the nonce we set when starting the flow.
+    expected_state = request.cookies.get(_SCHWAB_STATE_COOKIE)
+    if not expected_state or not state or not hmac.compare_digest(state, expected_state):
+        log.warning("Schwab callback rejected: missing or mismatched OAuth state")
+        return HTMLResponse("<h1>Invalid or expired authorization request</h1>", status_code=400)
     if error:
-        return HTMLResponse(f"<h1>Schwab auth error</h1><pre>{error}</pre>", status_code=400)
+        # Don't echo the raw upstream error back to the browser; log it instead.
+        log.warning("Schwab auth returned error: %s", error)
+        return HTMLResponse("<h1>Schwab authorization failed</h1>", status_code=400)
     if not code:
         return HTMLResponse("<h1>Missing ?code= parameter</h1>", status_code=400)
     try:
         bundle = schwab_auth.exchange_code(code)
         token_store.save(bundle)
-    except Exception as exc:
+    except Exception:
         log.exception("Schwab code exchange failed")
-        return HTMLResponse(f"<h1>Exchange failed</h1><pre>{exc}</pre>", status_code=500)
-    return HTMLResponse(
+        return HTMLResponse("<h1>Authorization failed. Please try again.</h1>", status_code=500)
+    resp = HTMLResponse(
         """
         <html><body style='background:#0b0f14;color:#d6e1ea;font-family:monospace;padding:48px;text-align:center;'>
           <h2 style='color:#7be38c;'>✅ Schwab connected.</h2>
@@ -527,6 +558,9 @@ def schwab_callback(code: str | None = None, error: str | None = None) -> HTMLRe
         </body></html>
         """.strip()
     )
+    # One-time nonce; drop it now that the flow is complete.
+    resp.delete_cookie(_SCHWAB_STATE_COOKIE, path="/api/auth/schwab")
+    return resp
 
 
 @app.get("/api/auth/schwab/status")
@@ -565,7 +599,7 @@ async def analyze(ws: WebSocket) -> None:
     internal = ws.headers.get("x-internal-token")
     expected = os.environ.get("INTERNAL_API_TOKEN")
     authed = bool(token and db.get_session(token)) or bool(
-        internal and expected and internal == expected
+        internal and expected and hmac.compare_digest(internal, expected)
     )
     if not authed:
         await ws.close(code=4401)
@@ -644,3 +678,321 @@ async def analyze(ws: WebSocket) -> None:
             await ws.close()
         except Exception:
             pass
+
+
+# ---------- bus WebSocket bridge (/api/bus) ----------
+
+# Poll cadence for the bus bridge. Override in tests via BUS_POLL_INTERVAL env
+# var (e.g. "0.05") to avoid slow test suites.
+def _bus_poll_interval() -> float:
+    try:
+        return float(os.environ.get("BUS_POLL_INTERVAL", "1.0"))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _pick_latest_analysis_channel(channels: list[dict]) -> str | None:
+    """Return the channel_id of the analysis-* channel with the highest numeric suffix.
+
+    channels is the list returned by list_channels(): each entry has an 'id' key
+    (the channel_id string) plus 'name' and 'member_count'.
+
+    Returns None if no analysis-* channel exists.
+    """
+    best_id: str | None = None
+    best_num: int = -1
+    for ch in channels:
+        cid = ch.get("id") or ""
+        if not cid.startswith("analysis-"):
+            continue
+        suffix = cid[len("analysis-"):]
+        try:
+            num = int(suffix)
+        except ValueError:
+            continue
+        if num > best_num:
+            best_num = num
+            best_id = cid
+    return best_id
+
+
+def _to_frame(row: dict, channel: str) -> dict:
+    """Map a raw bus message row to the /api/bus wire frame.
+
+    Field naming note: the frame envelope uses "type" for the frame kind
+    ("bus_message").  The bus message's own type field (chat/result/instruction)
+    is carried as "msg_type" to avoid clobbering the envelope key.
+    """
+    return {
+        "type": "bus_message",
+        "id": row.get("id"),
+        "agent": row.get("from"),          # bus field is 'from' (Python reserved)
+        "channel": channel,
+        "msg_type": row.get("type"),       # chat | result | instruction | status ...
+        "content": row.get("content"),
+        "ts": row.get("created_at"),
+        "thread_id": row.get("thread_id"),  # may be None — that's fine
+    }
+
+
+@app.websocket("/api/bus")
+async def bus_ws(ws: WebSocket) -> None:
+    """Stream switchboard bus messages to the dashboard.
+
+    Auth gate is identical to /api/analyze: valid session cookie OR
+    X-Internal-Token header matching INTERNAL_API_TOKEN env var (code 4401 on
+    failure).
+
+    Channel resolution order:
+      1. ?channel= query param
+      2. list_channels() → newest analysis-* by numeric suffix
+      3. Poll until one appears (still serving pings)
+
+    Live poll sends bus_message frames every BUS_POLL_INTERVAL seconds.
+    Client may send {"channel": "analysis-N"} text frames to switch channel.
+    Bus failures send bus_status ok:false once per outage; recovery sends
+    bus_status ok:true.  Bus failures never close the socket.
+    """
+    # ---- auth gate (identical to /api/analyze) ----
+    token = ws.cookies.get(auth_app.COOKIE_NAME)
+    internal = ws.headers.get("x-internal-token")
+    expected = os.environ.get("INTERNAL_API_TOKEN")
+    authed = bool(token and db.get_session(token)) or bool(
+        internal and expected and internal == expected
+    )
+    if not authed:
+        await ws.close(code=4401)
+        return
+
+    await ws.accept()
+
+    client = bus.get_reader()
+    if client is None:
+        await ws.send_json({"type": "bus_status", "ok": False, "reason": "bus not configured"})
+        # Keep open — frontend shows a grey dot; just idle with periodic pings.
+        try:
+            while True:
+                await asyncio.sleep(25)
+                try:
+                    await ws.send_json({"type": "ping"})
+                except (WebSocketDisconnect, RuntimeError):
+                    return
+        except (WebSocketDisconnect, asyncio.CancelledError):
+            return
+
+    # ---- receive task: feed inbound client frames into a variable ----
+    # We use a simple asyncio.Queue so the poll loop can non-blockingly check
+    # for channel-switch requests without coupling to WebSocket.receive().
+    incoming: asyncio.Queue[str | None] = asyncio.Queue()
+
+    async def _reader_task() -> None:
+        try:
+            while True:
+                data = await ws.receive_text()
+                await incoming.put(data)
+        except (WebSocketDisconnect, RuntimeError):
+            await incoming.put(None)  # sentinel: client gone
+
+    reader_task = asyncio.create_task(_reader_task())
+
+    # ---- channel resolution from ?channel= query param ----
+    channel: str | None = ws.query_params.get("channel") or None
+
+    # ---- per-outage status tracking ----
+    bus_ok: bool = True  # assume healthy until first failure
+    waiting_announced: bool = False  # sent the "healthy but no channel yet" status?
+
+    async def _send_bus_status(ok: bool, reason: str = "") -> None:
+        nonlocal bus_ok
+        frame: dict[str, Any] = {"type": "bus_status", "ok": ok}
+        if not ok and reason:
+            frame["reason"] = reason
+        try:
+            await ws.send_json(frame)
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        bus_ok = ok
+
+    cursor: int = 0
+    last_ping = asyncio.get_running_loop().time()
+    poll_interval = _bus_poll_interval()
+
+    try:
+        while True:
+            # ---- channel discovery / wait loop ----
+            if channel is None:
+                # Try to pick a channel from the bus.
+                try:
+                    result = await asyncio.to_thread(client.list_channels)
+                    ch_list = result.get("channels") or []
+                    channel = _pick_latest_analysis_channel(ch_list)
+                    if bus_ok is False:
+                        await _send_bus_status(True)
+                except Exception as exc:
+                    if bus_ok:
+                        await _send_bus_status(False, str(exc))
+                    # No channel yet; wait with a ping then retry.
+                    now = asyncio.get_running_loop().time()
+                    if now - last_ping >= 25:
+                        last_ping = now
+                        try:
+                            await ws.send_json({"type": "ping"})
+                        except (WebSocketDisconnect, RuntimeError):
+                            return
+                    # Poll incoming for channel-switch before sleeping.
+                    try:
+                        msg = incoming.get_nowait()
+                        if msg is None:
+                            return
+                        _maybe_channel = _parse_channel_switch(msg)
+                        if _maybe_channel:
+                            channel = _maybe_channel
+                            cursor = 0
+                            continue
+                    except asyncio.QueueEmpty:
+                        pass
+                    await asyncio.sleep(5.0)
+                    continue
+
+                if channel is None:
+                    # Bus is reachable but no analysis-* channel yet — announce
+                    # once and idle until one appears.
+                    if not waiting_announced:
+                        try:
+                            await ws.send_json({"type": "bus_status", "ok": True})
+                        except (WebSocketDisconnect, RuntimeError):
+                            return
+                        waiting_announced = True
+                    now = asyncio.get_running_loop().time()
+                    if now - last_ping >= 25:
+                        last_ping = now
+                        try:
+                            await ws.send_json({"type": "ping"})
+                        except (WebSocketDisconnect, RuntimeError):
+                            return
+                    try:
+                        msg = incoming.get_nowait()
+                        if msg is None:
+                            return
+                        _maybe_channel = _parse_channel_switch(msg)
+                        if _maybe_channel:
+                            channel = _maybe_channel
+                            cursor = 0
+                            continue
+                    except asyncio.QueueEmpty:
+                        pass
+                    await asyncio.sleep(5.0)
+                    continue
+
+            # ---- announce channel + backfill ----
+            try:
+                await ws.send_json({"type": "channel", "channel": channel, "name": channel})
+            except (WebSocketDisconnect, RuntimeError):
+                return
+
+            # Backfill: history read with channel_id+since_id is cursor-free
+            # (no read_cursors side-effect per bus.js getMessages).
+            try:
+                backfill = await asyncio.to_thread(
+                    client.get_messages,
+                    "dashboard-bridge",
+                    channel_id=channel,
+                    since_id=0,
+                    limit=200,
+                    peek=True,
+                )
+                if bus_ok is False:
+                    await _send_bus_status(True)
+                msgs = backfill.get("messages") or []
+                frames = [_to_frame(r, channel) for r in msgs]
+                try:
+                    await ws.send_json({"type": "backfill", "messages": frames})
+                except (WebSocketDisconnect, RuntimeError):
+                    return
+                if msgs:
+                    cursor = max(r.get("id", 0) for r in msgs)
+                else:
+                    cursor = 0
+            except Exception as exc:
+                if bus_ok:
+                    await _send_bus_status(False, str(exc))
+                # Fall through to the live poll loop with cursor as-is: once the
+                # bus recovers, history arrives as individual bus_message frames
+                # (no backfill envelope) — acceptable degraded path.
+
+            # ---- live poll loop ----
+            while True:
+                # Check for client text frames (channel-switch or disconnect).
+                try:
+                    raw = incoming.get_nowait()
+                    if raw is None:
+                        return  # client disconnected
+                    new_channel = _parse_channel_switch(raw)
+                    if new_channel and new_channel != channel:
+                        channel = new_channel
+                        cursor = 0
+                        break  # re-announce + re-backfill
+                except asyncio.QueueEmpty:
+                    pass
+
+                # Poll for new messages.
+                try:
+                    result = await asyncio.to_thread(
+                        client.get_messages,
+                        "dashboard-bridge",
+                        channel_id=channel,
+                        since_id=cursor,
+                        limit=50,
+                        peek=True,
+                    )
+                    if bus_ok is False:
+                        await _send_bus_status(True)
+                    new_msgs = result.get("messages") or []
+                    for row in new_msgs:
+                        frame = _to_frame(row, channel)
+                        try:
+                            await ws.send_json(frame)
+                        except (WebSocketDisconnect, RuntimeError):
+                            return
+                        if row.get("id", 0) > cursor:
+                            cursor = row["id"]
+                except Exception as exc:
+                    if bus_ok:
+                        await _send_bus_status(False, str(exc))
+                    # Back off during outage before retrying.
+                    await asyncio.sleep(5.0)
+                    continue
+
+                # Periodic ping.
+                now = asyncio.get_running_loop().time()
+                if now - last_ping >= 25:
+                    last_ping = now
+                    try:
+                        await ws.send_json({"type": "ping"})
+                    except (WebSocketDisconnect, RuntimeError):
+                        return
+
+                await asyncio.sleep(poll_interval)
+
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        pass
+    finally:
+        reader_task.cancel()
+        try:
+            await reader_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+def _parse_channel_switch(raw: str) -> str | None:
+    """Parse a client text frame for a channel-switch request.
+
+    Expected: {"channel": "analysis-N"}.  Invalid JSON → None.  Missing or
+    non-string channel key → None.
+    """
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return None
+    ch = data.get("channel") if isinstance(data, dict) else None
+    return ch if isinstance(ch, str) and ch else None

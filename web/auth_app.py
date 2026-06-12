@@ -107,12 +107,16 @@ async def auth_middleware(request: Request, call_next):
 
 
 def set_session_cookie(response, token: str) -> None:
+    # SameSite=strict: the dashboard only ever uses this cookie on same-origin
+    # fetch/XHR calls, never on a cross-site top-level navigation, so strict
+    # adds CSRF defense with no UX cost here. (The Schwab OAuth return is a
+    # separate, public callback that doesn't read this cookie.)
     response.set_cookie(
         COOKIE_NAME,
         token,
         max_age=SESSION_TTL_DAYS * 24 * 3600,
         httponly=True,
-        samesite="lax",
+        samesite="strict",
         secure=True,
         path="/",
     )

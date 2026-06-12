@@ -8,14 +8,10 @@ model names (suffixed `-cloud`) instead of the local-Ollama tags.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
+from tradingagents.llm_clients.defaults import resolve_ollama_base_url
 from tradingagents.llm_clients.model_catalog import MODEL_OPTIONS
-
-
-def _ollama_default_url() -> str:
-    return os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434/v1"
 
 
 def _is_ollama_cloud(url: str | None) -> bool:
@@ -64,7 +60,7 @@ PROVIDERS = [
 
 
 def _ollama_models() -> dict[str, list[tuple[str, str]]]:
-    url = _ollama_default_url()
+    url = resolve_ollama_base_url()
     if _is_ollama_cloud(url):
         return _OLLAMA_CLOUD_MODELS
     return MODEL_OPTIONS.get("ollama", {"quick": [], "deep": []})
@@ -75,7 +71,7 @@ def get_providers() -> list[dict[str, Any]]:
     for p in PROVIDERS:
         entry = dict(p)
         if entry["key"] == "ollama":
-            entry["base_url"] = _ollama_default_url()
+            entry["base_url"] = resolve_ollama_base_url()
             models = _ollama_models()
         else:
             models = MODEL_OPTIONS.get(entry["key"], {})
