@@ -116,7 +116,7 @@ async function loadPortfolioHistory() {
       ul.appendChild(li);
     });
   } catch (e) {
-    ul.innerHTML = `<li class="empty" style="color: var(--accent-red);">${e}</li>`;
+    ul.innerHTML = `<li class="empty" style="color: var(--accent-red);">${escapeHtml(e)}</li>`;
   }
 }
 
@@ -210,7 +210,7 @@ async function loadPortfolioScan(id) {
       grid.appendChild(card);
     });
   } catch (e) {
-    brief.innerHTML = `<p style="color: var(--accent-red);">${e}</p>`;
+    brief.innerHTML = `<p style="color: var(--accent-red);">${escapeHtml(e)}</p>`;
   }
 }
 
@@ -247,7 +247,7 @@ async function runScanNow() {
       loadPortfolioHistory();
     }
   } catch (e) {
-    out.innerHTML = `<span style="color: var(--accent-red);">${e}</span>`;
+    out.innerHTML = `<span style="color: var(--accent-red);">${escapeHtml(e)}</span>`;
   } finally {
     if (btn) btn.disabled = false;
   }

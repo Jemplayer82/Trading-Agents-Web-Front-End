@@ -125,6 +125,20 @@ brokerage abstraction, option handling, scan progress bar).
   ids, but all scans belong to the single-tenant deployment. Tie to an owner if multi-user
   / RBAC lands (see the deferred RBAC item above).
 
+## Round 3 — stored XSS in the Settings tab (2026-06-12)
+
+Found during a maintainer-documentation pass over the frontend.
+
+| # | Severity | Finding | Status |
+|---|----------|---------|--------|
+| 12 | **High** | **Stored XSS via username.** `credentials.js:loadUsers` interpolated `u.username` into `innerHTML` unescaped. Usernames are user-supplied and `POST /api/auth/users` is reachable by **any** logged-in user (no admin role — see the deferred RBAC item), so a username like `<img src=x onerror=...>` executed for anyone viewing the Settings tab's Users table. | **Fixed** — `escapeHtml()` at render. |
+| 13 | Medium | **Stored XSS via non-secret setting values.** `mask_setting()` returns non-secret values **verbatim**, and `loadSettings` rendered `s.masked` into `innerHTML` unescaped — a user-set value (e.g. `DASHBOARD_URL`) executed as HTML for any settings viewer. | **Fixed** — `escapeHtml()` at render. |
+| 14 | Low | Same-pattern cleanups: secret-masked values (≤4 attacker chars, no practical payload), analyst checkbox labels from the server registry (`app.js`), and raw `${e}` exception objects in `innerHTML` error paths (`portfolio.js` ×3, `spy.js` ×1). | **Fixed** — `escapeHtml()` everywhere. |
+
+Reviewed, no change: custom setting **keys** are server-validated against `^[A-Z][A-Z0-9_]*$`
+(`web/main.py`) before storage, so their interpolation is safe; the remaining `innerHTML`
+templates in `credentials.js` interpolate only registry constants.
+
 ## Operational recommendation
 
 Set `TOKEN_ENCRYPTION_KEY` in every deployment so secrets are encrypted at rest. Generate

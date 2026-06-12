@@ -74,7 +74,7 @@
       } else if (c.has_key) {
         const tag = c.source === "db" ? '<span class="key-src db">DB</span>'
                                        : '<span class="key-src env">.env</span>';
-        tdCurrent.innerHTML = `${tag} <code>${c.masked || "set"}</code>`;
+        tdCurrent.innerHTML = `${tag} <code>${escapeHtml(c.masked || "set")}</code>`;
       } else {
         tdCurrent.innerHTML = '<span class="dim">— none set</span>';
       }
@@ -207,7 +207,8 @@
 
       const tdCur = document.createElement("td");
       if (s.has_value) {
-        tdCur.innerHTML = `${srcTag(s.source)} <code>${s.masked || "set"}</code>`;
+        // masked is the VERBATIM user-set value for non-secret settings — must escape.
+        tdCur.innerHTML = `${srcTag(s.source)} <code>${escapeHtml(s.masked || "set")}</code>`;
       } else {
         tdCur.innerHTML = '<span class="dim">— none set</span>';
       }
@@ -278,7 +279,8 @@
       ctable.hidden = false;
       custom.forEach((c) => {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td><code>${c.key}</code></td><td>${srcTag("db")} <code>${c.masked || "set"}</code></td>`;
+        // c.key is server-validated (^[A-Z][A-Z0-9_]*$); masked still escaped for discipline.
+        tr.innerHTML = `<td><code>${c.key}</code></td><td>${srcTag("db")} <code>${escapeHtml(c.masked || "set")}</code></td>`;
         const tdAct = document.createElement("td");
         tdAct.className = "keys-actions";
         const clr = document.createElement("button");
@@ -408,7 +410,8 @@
       body.innerHTML = "";
       (data.users || []).forEach((u) => {
         const tr = document.createElement("tr");
-        tr.innerHTML = `<td>${u.username}</td><td class="dim">${(u.created_at || "").slice(0, 19).replace("T", " ")}</td>`;
+        // username is user-supplied — escape-at-render (stored-XSS sink otherwise).
+        tr.innerHTML = `<td>${escapeHtml(u.username)}</td><td class="dim">${escapeHtml((u.created_at || "").slice(0, 19).replace("T", " "))}</td>`;
         body.appendChild(tr);
       });
     } catch (e) { /* gated until logged in */ }
