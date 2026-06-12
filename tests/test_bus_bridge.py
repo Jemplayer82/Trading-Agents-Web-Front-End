@@ -11,10 +11,6 @@ X-Internal-Token header with INTERNAL_API_TOKEN set in the environment.
 from __future__ import annotations
 
 import json
-import os
-import threading
-import time
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -239,11 +235,26 @@ class TestBusEndpointAuth:
     def test_no_auth_closes_with_4401(self, monkeypatch):
         monkeypatch.setenv("INTERNAL_API_TOKEN", "secret")
         from fastapi.testclient import TestClient
+
         from web.main import app
         with TestClient(app) as client:
             with pytest.raises(Exception):
                 # TestClient raises WebSocketDisconnect / ConnectionClosedError on 4401
                 with client.websocket_connect("/api/bus") as ws:
+                    ws.receive_json()  # should not reach here
+
+    def test_wrong_internal_token_closes_with_4401(self, monkeypatch):
+        # A non-matching X-Internal-Token must be rejected (the auth gate compares
+        # with hmac.compare_digest — a wrong token is still a closed socket).
+        monkeypatch.setenv("INTERNAL_API_TOKEN", "secret")
+        from fastapi.testclient import TestClient
+
+        from web.main import app
+        with TestClient(app) as client:
+            with pytest.raises(Exception):
+                with client.websocket_connect(
+                    "/api/bus", headers={"x-internal-token": "wrong-token"}
+                ) as ws:
                     ws.receive_json()  # should not reach here
 
 
@@ -255,6 +266,7 @@ class TestBusEndpointNotConfigured:
         monkeypatch.setattr(bus_mod, "get_reader", lambda: None)
 
         from fastapi.testclient import TestClient
+
         from web.main import app
 
         with TestClient(app) as client:
@@ -284,8 +296,6 @@ class TestBusEndpointHappyPath:
         call_count = [0]
         live_msg = _make_message(id=3, from_agent="research-manager", content="final")
 
-        original_get = fake.get_messages
-
         def patched_get(agent_id, *, channel_id=None, since_id=None, limit=50, peek=False):
             call_count[0] += 1
             if call_count[0] == 1:
@@ -303,6 +313,7 @@ class TestBusEndpointHappyPath:
         monkeypatch.setattr(bus_mod, "get_reader", lambda: fake)
 
         from fastapi.testclient import TestClient
+
         from web.main import app
 
         with TestClient(app) as client:
@@ -341,6 +352,7 @@ class TestBusEndpointHappyPath:
         monkeypatch.setattr(bus_mod, "get_reader", lambda: fake)
 
         from fastapi.testclient import TestClient
+
         from web.main import app
 
         with TestClient(app) as client:
@@ -374,6 +386,7 @@ class TestBusEndpointChannelSwitch:
         monkeypatch.setattr(bus_mod, "get_reader", lambda: fake)
 
         from fastapi.testclient import TestClient
+
         from web.main import app
 
         with TestClient(app) as client:
@@ -383,7 +396,6 @@ class TestBusEndpointChannelSwitch:
                 # Initial channel (analysis-2 is newest)
                 frame = ws.receive_json()
                 assert frame["type"] == "channel"
-                initial_ch = frame["channel"]
 
                 frame = ws.receive_json()
                 assert frame["type"] == "backfill"
@@ -414,14 +426,10 @@ class TestBusEndpointOutage:
         call_count = [0]
         fail_until = [2]  # fail on calls 1 and 2
 
-        msg = _make_message(id=1, from_agent="trader", content="buy")
-
         fake = FakeClient(
             channels=[{"id": "analysis-1", "name": "AAPL", "member_count": 1}],
             messages=[],
         )
-
-        original_list = fake.list_channels
 
         def patched_list():
             call_count[0] += 1
@@ -437,6 +445,7 @@ class TestBusEndpointOutage:
         monkeypatch.setenv("BUS_POLL_INTERVAL", "0.02")
 
         from fastapi.testclient import TestClient
+
         from web.main import app
 
         with TestClient(app) as client:
@@ -476,6 +485,7 @@ class TestBusEndpointOutage:
         monkeypatch.setattr(bus_mod, "get_reader", lambda: fake)
 
         from fastapi.testclient import TestClient
+
         from web.main import app
 
         with TestClient(app) as client:
