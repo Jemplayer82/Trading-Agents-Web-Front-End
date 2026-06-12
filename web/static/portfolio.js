@@ -4,6 +4,11 @@
 let activePortfolioId = null;
 let _accountsData = null;
 let _activeAccountId = "all";
+let portfolioPollTimer = null;
+
+function stopPortfolioPoll() {
+  if (portfolioPollTimer) { clearInterval(portfolioPollTimer); portfolioPollTimer = null; }
+}
 
 // ---- number formatters (Portfolio-tab specific: currency / shares / percent) ----
 function fmt$(v) {
@@ -67,6 +72,7 @@ async function loadPortfolioHistory() {
 }
 
 async function loadPortfolioScan(id) {
+  stopPortfolioPoll();
   activePortfolioId = id;
   document.querySelectorAll("#portfolio-history li").forEach((li) =>
     li.classList.toggle("active", String(li.dataset.id) === String(id))
@@ -90,12 +96,58 @@ async function loadPortfolioScan(id) {
       · ${counts.BUY || 0} BUY · ${counts.HOLD || 0} HOLD · ${counts.SELL || 0} SELL
       ${scan.newsletter_sent_at ? `· newsletter sent ${fmtTs(scan.newsletter_sent_at)}` : ""}
     `;
-    if (scan.aggregator_report) {
+
+    // Progress panel — shown only while scan is running; disappears once it stops.
+    if (scan.status === "running") {
+      const sc = scan.scanned_count || 0;
+      const st = scan.scan_total || 0;
+      const pct = st > 0 ? Math.round((sc / st) * 100) : 0;
+      const tickerLine = scan.current_ticker
+        ? `<div style="margin-bottom:4px;">Analyzing: <strong>${escapeHtml(scan.current_ticker)}</strong></div>`
+        : "";
+      brief.innerHTML = (
+        '<div class="panel">' +
+          '<div class="panel-title">[ Progress ]</div>' +
+          `<div style="margin-bottom:4px;">${sc}/${st} tickers analyzed</div>` +
+          tickerLine +
+          `<div class="scan-progress"><div class="scan-progress-bar" style="width:${pct}%"></div></div>` +
+        "</div>"
+      );
+
+      // Poll every 5s while the scan is running; stop when status leaves "running".
+      portfolioPollTimer = setInterval(async () => {
+        // Guard: if the user switched to a different scan, cancel this stale timer.
+        if (String(activePortfolioId) !== String(id)) { stopPortfolioPoll(); return; }
+        const pr = await fetch(`/api/portfolio-scans/${id}`);
+        if (!pr.ok) { stopPortfolioPoll(); return; }
+        const updated = await pr.json();
+        if (updated.status !== "running") {
+          stopPortfolioPoll();
+          loadPortfolioScan(id);
+          return;
+        }
+        // Re-render just the progress panel in-place (avoid full re-render cost).
+        const sc2 = updated.scanned_count || 0;
+        const st2 = updated.scan_total || 0;
+        const pct2 = st2 > 0 ? Math.round((sc2 / st2) * 100) : 0;
+        const tkLine2 = updated.current_ticker
+          ? `<div style="margin-bottom:4px;">Analyzing: <strong>${escapeHtml(updated.current_ticker)}</strong></div>`
+          : "";
+        brief.innerHTML = (
+          '<div class="panel">' +
+            '<div class="panel-title">[ Progress ]</div>' +
+            `<div style="margin-bottom:4px;">${sc2}/${st2} tickers analyzed</div>` +
+            tkLine2 +
+            `<div class="scan-progress"><div class="scan-progress-bar" style="width:${pct2}%"></div></div>` +
+          "</div>"
+        );
+      }, 5000);
+    } else if (scan.aggregator_report) {
       brief.innerHTML = renderMarkdown(scan.aggregator_report);
     } else if (scan.error) {
       brief.innerHTML = `<p style="color: var(--accent-red);">${escapeHtml(scan.error)}</p>`;
     } else {
-      brief.innerHTML = '<p class="dim">No briefing yet — scan still running.</p>';
+      brief.innerHTML = '<p class="dim">No briefing yet.</p>';
     }
     (scan.tickers || []).forEach((t) => {
       const card = document.createElement("div");
@@ -144,6 +196,7 @@ async function deletePortfolioScan(id) {
     return;
   }
   if (String(activePortfolioId) === String(id)) {
+    stopPortfolioPoll();
     activePortfolioId = null;
     $("portfolio-briefing").innerHTML = '<p class="dim">Select a scan from the sidebar.</p>';
     $("portfolio-tickers").innerHTML = "";
