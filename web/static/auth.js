@@ -1,5 +1,20 @@
 // TradingAgents Web — login / first-run setup gate.
-// Loads first; reveals a full-screen overlay until the user is authenticated.
+//
+// Reveals the full-screen #auth-overlay (index.html) until GET /api/auth/me says
+// the session cookie is valid. When the backend reports setup_required (zero
+// users in the DB yet), the form switches to first-run "create admin account"
+// mode and posts to /api/auth/setup instead of /api/auth/login.
+//
+// Endpoints: GET /api/auth/me, POST /api/auth/login | /api/auth/setup |
+// /api/auth/logout. On success the page is reloaded so every module
+// re-initialises in an authenticated state (their DOMContentLoaded fetches fire
+// regardless of the overlay, so a reload is the simplest correct reset).
+//
+// The overlay is UX only — real enforcement is server-side (web/auth_app.py
+// returns 401s on everything else); hiding the overlay grants nothing.
+//
+// IIFE-scoped; exposes window.taLogout for the Settings tab's logout path.
+// $ comes from utils.js (loaded first).
 
 (function () {
   // $ comes from utils.js (loaded first).

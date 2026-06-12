@@ -1,4 +1,13 @@
-"""Render the overnight portfolio scan as an HTML email and SMTP-send it."""
+"""Render the overnight portfolio scan as an HTML email and SMTP-send it.
+
+Called by the scheduler's 5am job (web/scheduler.py:job_morning_newsletter),
+which records the returned Message-ID on the scan row for audit. All
+configuration is env vars (SMTP_*, NEWSLETTER_*) — editable
+live from the dashboard Settings UI via web/credentials.py SETTINGS_REGISTRY,
+and read at call time here so changes apply without a restart. The body
+template is web/templates/newsletter.html; report markdown is converted to
+HTML through the `mdhtml` Jinja filter registered below.
+"""
 from __future__ import annotations
 
 import logging
@@ -92,6 +101,8 @@ def send(scan: dict[str, Any]) -> str | None:
     msg.set_content("This email is HTML — please use an HTML-capable client.")
     msg.add_alternative(html, subtype="html")
     try:
+        # Port 465 means implicit TLS from the first byte; anything else
+        # (587/25) is assumed to be a plaintext connection upgraded via STARTTLS.
         if port == 465:
             ctx = ssl.create_default_context()
             with smtplib.SMTP_SSL(host, port, context=ctx, timeout=30) as s:
@@ -105,5 +116,7 @@ def send(scan: dict[str, Any]) -> str | None:
         log.info("[newsletter] sent: %s", subject)
         return msg["Message-ID"]
     except Exception as exc:
+        # log.exception records the traceback but NOT local variables, so
+        # SMTP_PASS can't leak into the logs. Keep it that way.
         log.exception("[newsletter] SMTP send failed: %s", exc)
         return None

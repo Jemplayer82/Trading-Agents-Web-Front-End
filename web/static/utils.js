@@ -13,6 +13,14 @@
 //      top-level `const $` in the same shared scope throws
 //      "Identifier '$' has already been declared". (That global-scope collision is
 //      historically why the modules used divergent aliases like `$$p` / `$$spy`.)
+//
+// Shared globals defined here: $, escapeHtml, renderMarkdown, fmtTs, apiFetch,
+// progressBar.
+//
+// Escape-at-render discipline (project-wide): every interpolation of server- or
+// LLM-sourced data into an HTML string must pass through escapeHtml(); LLM-authored
+// markdown is rendered ONLY via renderMarkdown() (marked + DOMPurify). Assigning
+// unescaped data to innerHTML is the known-bad pattern these helpers exist to stop.
 
 /** Shorthand for document.getElementById. */
 const $ = (id) => document.getElementById(id);

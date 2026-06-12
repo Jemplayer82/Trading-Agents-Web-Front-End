@@ -144,7 +144,10 @@ def mask_setting(key: str, value: str | None) -> str:
 def apply_settings_to_env() -> None:
     """Copy every stored app_setting onto os.environ.
 
-    Called at startup and after every PUT/DELETE in each container.
+    Runs at startup in all three service containers (api, portfolio,
+    scheduler) and again after every settings PUT/DELETE. Assignment is
+    unconditional, so a DB-stored value overrides whatever .env / compose
+    set for the same key — the Settings UI always wins.
     """
     applied = 0
     for row in db.list_app_settings():

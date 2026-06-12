@@ -1,5 +1,33 @@
-// Portfolio Scan tab — history list, briefing render, per-ticker grid, live holdings
-// $, escapeHtml, fmtTs and renderMarkdown live in utils.js (loaded first).
+// TradingAgents Web — "Portfolio Scan" tab + the dashboard's main tab strip.
+//
+// Two DIFFERENT data sources render into this tab — don't conflate them:
+//   * Holding cards (renderHoldingCard) are LIVE brokerage positions from
+//     GET /api/accounts (Schwab today, normalized by web/brokerages.py).
+//   * Scan-result cards (loadPortfolioScan) are HISTORICAL — frozen at scan time.
+// Both render into the same #portfolio-tickers grid, so loading a scan replaces
+// the live holdings view and selecting an account tab replaces the scan cards.
+//
+// Endpoints — routed to the PORTFOLIO app (web/portfolio_main.py) by
+// web/nginx.conf's /api/portfolio and /api/accounts prefix locations (note
+// /api/portfolio-scan(s) is caught by the /api/portfolio string prefix):
+//   GET    /api/portfolio-scans          history list
+//   GET    /api/portfolio-scans/{id}     scan detail (polled at 5s while running)
+//   DELETE /api/portfolio-scans/{id}     delete a scan
+//   POST   /api/portfolio-scan           start a scan (idempotent for today)
+//   GET    /api/accounts                 live holdings, all brokerage accounts
+// GET /api/auth/schwab/status goes to the API app via the generic /api/ block.
+//
+// Account tabs: /api/accounts returns a synthetic {id: "all"} aggregate first,
+// then real accounts with ids namespaced "<provider>:<number>" (e.g.
+// "schwab:12345678"). Selection matches by dataset.id — never by label text.
+//
+// Gotcha: setupTabs() below wires the TOP-LEVEL tab strip for the entire
+// dashboard and dispatches the "tab-shown" document event that app.js / spy.js /
+// credentials.js all listen to. This file is load-bearing for every tab.
+//
+// Globals consumed from utils.js (loaded first): $, escapeHtml, fmtTs,
+// renderMarkdown, progressBar. All top-level names here share the classic-script
+// global scope — don't redeclare utils.js names.
 
 let activePortfolioId = null;
 let _accountsData = null;
@@ -47,6 +75,8 @@ function portfolioProgressHtml(scan) {
     "</div>"
   );
 }
+
+// ---- Scan history + detail (HISTORICAL scan results) ----
 
 async function loadPortfolioHistory() {
   const ul = $("portfolio-history");
@@ -142,6 +172,9 @@ async function loadPortfolioScan(id) {
     } else {
       brief.innerHTML = '<p class="dim">No briefing yet.</p>';
     }
+    // Scan-result cards: HISTORICAL per-ticker outcomes from this scan (shares /
+    // value as of scan time) — not live data. Rendered into the same grid the
+    // live holding cards use (see header).
     (scan.tickers || []).forEach((t) => {
       const card = document.createElement("div");
       card.className = "pcard";
@@ -221,6 +254,8 @@ async function runScanNow() {
 }
 
 // ---- Live account holdings ----
+// Everything below renders LIVE brokerage data from GET /api/accounts; hides the
+// account tabs + totals panel when brokerages are disabled or disconnected.
 
 async function loadAccountHoldings() {
   const tabsEl = $("account-tabs");
@@ -306,6 +341,12 @@ function renderTotals(acct) {
   panel.hidden = false;
 }
 
+// One LIVE holding card. Option positions (asset_type "OPTION", decoded from the
+// OCC symbol by web/brokerages.py) render differently from equities: the
+// underlying ticker with the expiration date alongside, an OPTION chip instead
+// of a signal badge, and a contracts/strike/put-call subtext line. `shares`
+// means contracts for options. Scan signal + analysis link only apply to
+// equities (signals are merged onto positions server-side by symbol).
 function renderHoldingCard(pos) {
   const card = document.createElement("div");
   card.className = "pcard";
@@ -379,7 +420,11 @@ async function loadSchwabStatusLine() {
   }
 }
 
-// Tab switching
+// ---- Tab strip (whole dashboard) ----
+// Wires the top-level Run Analysis / Portfolio / S&P 500 / Settings tabs and
+// dispatches "tab-shown" (detail = tab name) on every switch. Every module's
+// per-tab refresh hangs off that event — this is dashboard-wide plumbing that
+// happens to live in this file.
 function setupTabs() {
   document.querySelectorAll(".main-tab").forEach((btn) => {
     btn.addEventListener("click", () => {

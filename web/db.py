@@ -1,5 +1,11 @@
 """SQLite persistence for the web service.
 
+One database file (DB_PATH, default ~/.tradingagents/web.db) shared by the
+api, portfolio, and scheduler containers via the common Docker volume. That
+sharing is load-bearing: it's why a login session minted by the api app also
+authenticates requests hitting the portfolio app. Helpers open a short-lived
+WAL-mode autocommit connection per call (see connect()); no pool, no ORM.
+
 Tables:
   preferences          - single row of user form defaults
   provider_credentials - per-LLM-provider API key + optional base URL
@@ -7,11 +13,24 @@ Tables:
                          (Schwab app key/secret/callback, Ollama base URL, etc.)
   users                - dashboard login accounts (username + pbkdf2 hash)
   sessions             - active login sessions (cookie token -> username)
-  analyses             - one row per single-ticker analysis (existing)
+  analyses             - one row per single-ticker analysis
   portfolio_scans      - one row per nightly portfolio sweep (Schwab)
   portfolio_tickers    - join row connecting a scan to the analyses it generated
   spy_scans            - one row per weekly S&P 500 scanner run
   spy_quick_results    - one row per ticker per SPY scan (quick + deep results)
+  llm_activity         - cross-container registry of in-flight LLM consumers
+  ticker_info          - cached company name/website per ticker
+
+Schema changes: init_db() only runs CREATE TABLE IF NOT EXISTS, which never
+alters an existing table — a new column must be added in BOTH SCHEMA (fresh
+installs) and _COLUMN_MIGRATIONS (idempotent ALTERs applied on every boot;
+the upgrade path for already-deployed databases).
+
+Secrets at rest: provider API keys and app-setting values go through
+web/secret_box.py — Fernet-encrypted (ciphertext prefix "enc:v1:") when
+TOKEN_ENCRYPTION_KEY is set, transparently plaintext when it isn't. The DB
+file is chmod 0600 at init; it also holds password hashes and live session
+tokens.
 """
 from __future__ import annotations
 
@@ -27,6 +46,9 @@ from typing import Any
 from . import secret_box
 
 _HOME = Path(os.path.expanduser("~")) / ".tradingagents"
+# Same default path in every container — ~/.tradingagents is the shared
+# `tradingagents_data` volume in production. Override (e.g. in tests) via
+# the TRADINGAGENTS_WEB_DB env var.
 DB_PATH = Path(os.environ.get("TRADINGAGENTS_WEB_DB", str(_HOME / "web.db")))
 
 
@@ -182,12 +204,13 @@ CREATE TABLE IF NOT EXISTS ticker_info (
 # Lightweight column migrations for tables that predate a new column.
 # (init_db only runs CREATE TABLE IF NOT EXISTS, which never alters an
 # existing table — so additive columns need an explicit guarded ALTER.)
+# Append-only and idempotent: every entry is checked on every boot and
+# skipped if the column already exists. New columns go in SCHEMA *and* here.
 _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("spy_scans", "cancel_requested", "INTEGER DEFAULT 0"),
     ("spy_scans", "previous_scan_id", "INTEGER"),
     ("spy_scans", "starting_value", "REAL"),
-    # Portfolio scan progress columns (added for live progress bar feature).
-    # Existing deployed DBs gain these on container boot via this migration list.
+    # Portfolio scan live-progress counters (mirrored in SCHEMA above).
     ("portfolio_scans", "scanned_count", "INTEGER DEFAULT 0"),
     ("portfolio_scans", "scan_total", "INTEGER DEFAULT 0"),
     ("portfolio_scans", "current_ticker", "TEXT"),
@@ -202,6 +225,11 @@ def _run_column_migrations(conn: sqlite3.Connection) -> None:
 
 
 def init_db() -> None:
+    """Create-or-upgrade the database. Runs on every container boot; idempotent.
+
+    Order matters: base schema first, then additive column migrations, then a
+    one-time re-encrypt of any plaintext secret rows (no-op without a key).
+    """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     # Surface a malformed TOKEN_ENCRYPTION_KEY immediately, before any request
     # tries to read or write a secret.
@@ -244,6 +272,14 @@ def _encrypt_existing_secrets(conn: sqlite3.Connection) -> None:
 
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
+    """Yield a fresh connection, closed on exit. No pooling — open per call.
+
+    isolation_level=None puts sqlite3 in autocommit, so each execute commits
+    immediately; WAL lets the api/portfolio/scheduler processes read while
+    another writes. foreign_keys is per-connection in SQLite and must be
+    re-enabled here every time (portfolio_tickers and spy_quick_results rely
+    on ON DELETE CASCADE).
+    """
     conn = sqlite3.connect(DB_PATH, isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -453,7 +489,7 @@ def purge_expired_sessions() -> int:
     return cur.rowcount
 
 
-# ---------- single-ticker analyses (unchanged behavior) ----------
+# ---------- single-ticker analyses ----------
 
 def create_analysis(params: dict[str, Any]) -> int:
     with connect() as conn:
@@ -480,6 +516,12 @@ def create_analysis(params: dict[str, Any]) -> int:
 
 
 def complete_analysis(analysis_id: int, final_state: dict[str, Any], processed_signal: str) -> None:
+    """Mark an analysis completed and persist the final graph state.
+
+    Non-string report fields are JSON-encoded so every report column stays
+    TEXT; full_state goes through _serialize first so LangChain/pydantic
+    objects in the state don't break json.dumps.
+    """
     def _get(key: str) -> str:
         val = final_state.get(key, "")
         return val if isinstance(val, str) else json.dumps(val)
@@ -562,7 +604,7 @@ def get_analysis(analysis_id: int) -> dict[str, Any] | None:
     return data
 
 
-# ---------- portfolio scans (new) ----------
+# ---------- portfolio scans (nightly holdings sweep) ----------
 
 def create_portfolio_scan(trade_date: str) -> int:
     with connect() as conn:
@@ -831,6 +873,12 @@ def upsert_spy_quick_result(
     analysis_id: int | None = None,
     error: str | None = None,
 ) -> None:
+    """Insert or merge one ticker's result row for a SPY scan.
+
+    COALESCE merge: a later partial upsert (e.g. the deep pass adding only
+    analysis_id) fills just the fields it passes and never nulls out earlier
+    ones. Consequence: a field cannot be reset to NULL through this helper.
+    """
     with connect() as conn:
         conn.execute(
             """
@@ -939,8 +987,9 @@ def clear_activity(activity_id: int) -> None:
 def count_active_single(stale_seconds: int = 120) -> int:
     """Count fresh single-ticker analyses currently consuming LLM slots.
 
-    Rows whose heartbeat is older than stale_seconds are ignored (and pruned)
-    so a crashed api container doesn't permanently starve the scanner.
+    Rows whose heartbeat is older than stale_seconds are ignored, so a crashed
+    api container can't permanently starve the scanner. (Actual deletion of
+    stale rows is purge_stale_activity's job; this only filters.)
     """
     cutoff = (
         datetime.utcnow() - timedelta(seconds=stale_seconds)
@@ -988,6 +1037,12 @@ def set_ticker_info(ticker: str, name: str | None, website: str | None) -> None:
 
 
 def _serialize(obj: Any) -> Any:
+    """Best-effort conversion of graph state to JSON-safe primitives.
+
+    Handles pydantic v2 (.model_dump) and v1 (.dict) objects that LangChain
+    leaves in the state; anything still unrecognized is stringified rather
+    than raising — losing fidelity beats losing the whole analysis row.
+    """
     if isinstance(obj, dict):
         return {k: _serialize(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):

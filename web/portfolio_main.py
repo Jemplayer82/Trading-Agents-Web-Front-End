@@ -1,9 +1,33 @@
-"""FastAPI service dedicated to portfolio scans.
+"""FastAPI service dedicated to portfolio + S&P 500 scans.
 
-Runs inside the tradingagents-portfolio container. Reads Schwab tokens from the
-shared volume, runs each holding through TradingAgentsGraph, calls the
-aggregator, and writes results to web.db. The scheduler container fires this
-at 22:00 ET nightly.
+This is a SEPARATE app from web/main.py, run in its own container
+(`uvicorn web.portfolio_main:app`), so multi-hour scans never block the ad-hoc
+api app. nginx (web/nginx.conf) routes /api/spy*, /api/accounts and
+/api/portfolio* here; everything else under /api/ goes to the api app. That
+routing is a hard contract: an endpoint added here without a matching nginx
+location block is a silent 404 in production — this has bitten us before.
+
+Two scan pipelines, both fired by the scheduler container over the Docker
+network (portfolio nightly at 22:00 ET, S&P Saturday 00:00) and also
+triggerable from the dashboard:
+
+- Portfolio scan (_run_scan): real holdings via brokerages.fetch_all_accounts()
+  (normalized cross-brokerage dicts, account ids namespaced "schwab:12345678"),
+  each equity through TradingAgentsGraph, then the aggregator briefing. Option
+  positions are display-only on the dashboard and are skipped (logged) before
+  the analysis loop.
+- S&P scan (_run_spy_scan): quick-screen all ~500 tickers, deep-dive the top
+  ~50 by conviction, then spy_allocator builds/rebalances a $100k paper
+  portfolio. Cancellation is cooperative via spy_scans.cancel_requested.
+
+Progress contract: _run_scan writes scan_total once, then scanned_count /
+current_ticker per ticker (spy scans: quick_count/quick_total +
+deep_count/deep_total); the frontend polls the scan detail endpoint every 5s
+and renders a progress bar from those columns.
+
+Everything persists to the shared SQLite DB (web/db.py). Credentials the user
+saves in the api container's UI are re-read from that DB before each scan, so
+a new key takes effect without restarting this container.
 """
 from __future__ import annotations
 
@@ -169,6 +193,12 @@ def _mcp_positions() -> list[dict[str, Any]]:
 
 
 def _run_scan(scan_id: int, trade_date: str) -> None:
+    """Portfolio scan worker: holdings -> per-ticker graph runs -> aggregator.
+
+    A per-ticker failure is recorded (fail_analysis + an error row in the
+    payload) and the loop continues; only a failure outside the loop fails
+    the whole scan.
+    """
     log.info("[scan %s] starting for %s", scan_id, trade_date)
 
     # Step 1: fetch positions via the Schwab MCP server
@@ -578,7 +608,10 @@ def spy_account_compare() -> dict[str, Any]:
     }
 
 
+# ---------- S&P 500 scan worker ----------
+
 def _run_spy_scan_thread(scan_id: int, trade_date: str) -> None:
+    """Thread entry: route ScanCancelled to status 'cancelled', anything else to 'failed'."""
     _refresh_creds_from_db()
     try:
         _run_spy_scan(scan_id, trade_date)
@@ -606,6 +639,13 @@ def _phase(label: str) -> Iterator[None]:
 
 
 def _run_spy_scan(scan_id: int, trade_date: str) -> None:
+    """S&P scan worker: quick screen -> deep dives -> allocator.
+
+    If the previous completed scan left active positions, its last refreshed
+    value becomes this week's starting capital and the allocator runs in
+    rebalance mode; otherwise it's a fresh $100k. The cancel flag is checked
+    between phases here and per-ticker inside spy_scanner.
+    """
     log.info("[spy %s] starting for %s", scan_id, trade_date)
     prefs = db.get_preferences() or {}
     config: dict[str, Any] = {
@@ -655,6 +695,8 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
     buy_or_hold = [r for r in quick_results if (r.get("signal") or "").upper() in ("BUY", "HOLD")]
     top50 = sorted(buy_or_hold, key=lambda r: -(r.get("conviction") or 0))[:50]
     if not top50:
+        # Pathological quick scan (everything SELL or errored): deep-dive the
+        # least-bad 50 anyway rather than abort the whole weekly run.
         top50 = sorted(quick_results, key=lambda r: -(r.get("conviction") or 0))[:50]
     with _phase("Deep-dive analysis failed"):
         enriched = spy_scanner.run_deep_dives(scan_id, top50, trade_date, config, selected_analysts)

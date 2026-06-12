@@ -49,12 +49,13 @@ All share one Docker image and one data volume (`tradingagents_data`, mounted at
 | `switchboard` | `ghcr.io/jemplayer82/mcp-switchboard` | **Optional, internal-only** message bus for the live Agent Bus feed (see below). No host port; reachable only on the Docker network at `switchboard:3107`. Own SQLite volume (`switchboard_data`). |
 | `tradingagents` | (CLI) | The Typer TUI, attached to interactively. |
 
-**nginx route priority** (`web/nginx.conf`): more-specific `/api/` prefixes are matched
-**before** the generic block, and they route to different apps. `/api/spy`,
+**nginx route priority** (`web/nginx.conf`): these are nginx *prefix* locations, so the
+longest matching prefix wins (file order does not decide it). `/api/spy`,
 `/api/accounts`, and `/api/portfolio` go to the **portfolio** app; everything else under
 `/api/` (including the `/api/analyze` and `/api/bus` WebSockets) goes to the **api** app.
-Order matters — if the generic `/api/` block came first it would swallow `/api/accounts`
-and the account tabs would 404.
+The gotcha: a new `portfolio_main.py` route that doesn't start with one of those three
+prefixes falls through to the generic `/api/` block, hits the api app, and 404s in
+production — add a matching `location` line when adding such routes.
 
 Inter-service HTTP calls (scheduler → api/portfolio) authenticate with an
 `X-Internal-Token` header (`INTERNAL_API_TOKEN`, compared with `hmac.compare_digest`);

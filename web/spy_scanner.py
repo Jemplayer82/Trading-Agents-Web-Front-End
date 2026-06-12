@@ -1,4 +1,25 @@
-"""S&P 500 scanner: quick screen (all ~500) + deep dive (top 50) + price refresh."""
+"""S&P 500 scanner: quick screen (all ~500) + deep dive (top 50) + price refresh.
+
+Runs inside the portfolio container, driven by web/portfolio_main._run_spy_scan.
+
+Concurrency is shared CROSS-CONTAINER with the api app's single-ticker
+analyses: the api container registers each in-flight analysis as a row in the
+SQLite llm_activity table (heartbeat-stamped); _GateMonitor polls that count
+every ~3s and resizes a DynamicGate to max(1, TOTAL - active_singles), so
+interactive runs always get slots first and the scan floors at one worker
+instead of starving. TOTAL comes from OLLAMA_MAX_CONCURRENCY (default 5),
+re-read per scan so a value saved in dashboard Settings applies without a
+redeploy. Stale activity rows (crashed api runs) age out via the heartbeat TTL
+in db.count_active_single, so they can't permanently throttle the scanner.
+
+Cancellation is cooperative: the cancel endpoint sets
+spy_scans.cancel_requested=1; workers check it between tickers and raise
+ScanCancelled, which the caller records as status 'cancelled' (not 'failed').
+
+Progress: run_quick_scan writes quick_count/quick_total and run_deep_dives
+writes deep_count/deep_total on the spy_scans row; the frontend polls those
+every 5s for its progress bar.
+"""
 from __future__ import annotations
 
 import logging
@@ -78,6 +99,9 @@ class _GateMonitor:
 
     scan_limit = max(1, TOTAL - active_single_ticker_analyses)
     so single-ticker analyses always get priority and the scan floors at 1.
+    The active count comes from the shared llm_activity table (written by the
+    api container, heartbeat TTL pruning), which is what makes the throttling
+    work across containers.
     """
 
     def __init__(self, gate: DynamicGate, poll_seconds: float = 3.0) -> None:
@@ -141,6 +165,11 @@ def _llm_quick(config: dict[str, Any]) -> ChatOpenAI:
 
 
 def _parse_quick_response(text: str) -> tuple[str, int, str]:
+    """Pull SIGNAL / CONVICTION / REASONING out of the LLM reply.
+
+    Lenient by design: anything off-format degrades to HOLD / 5 / "" instead
+    of failing the ticker.
+    """
     signal = "HOLD"
     conviction = 5
     reasoning = ""
@@ -163,6 +192,11 @@ def _quick_scan_one(
     llm: ChatOpenAI,
     gate: DynamicGate | None = None,
 ) -> dict[str, Any]:
+    """Score one ticker: momentum features -> one cheap LLM call -> parsed signal.
+
+    Never raises — any failure comes back as a HOLD/conviction-1 row with an
+    "error" key, so one bad ticker can't sink the scan.
+    """
     try:
         closes = price_data.get("close", [])
         if len(closes) < 5:
@@ -222,7 +256,13 @@ def run_quick_scan(
     tickers: list[str],
     config: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Fetch bulk price data then score each ticker with a lightweight LLM call."""
+    """Fetch bulk price data then score each ticker with a lightweight LLM call.
+
+    One yf.download covers all ~500 tickers (per-ticker downloads get rate
+    limited); tickers missing from the result are scored on empty data and
+    come back HOLD/1. quick_count is flushed to the DB every 50 completions,
+    and the cancel flag is checked per completed future.
+    """
     log.info("[spy %s] quick scan: fetching price data for %d tickers", scan_id, len(tickers))
     db.update_spy_scan(scan_id, status="running_quick", quick_total=len(tickers))
 
@@ -234,6 +274,8 @@ def run_quick_scan(
 
     price_data_map: dict[str, dict[str, list]] = {}
     if raw is not None and not raw.empty:
+        # yfinance returns MultiIndex columns ("Close", ticker) for multi-ticker
+        # downloads but flat columns for a single ticker — handle both.
         if hasattr(raw.columns, "levels"):
             for t in tickers:
                 try:
@@ -301,7 +343,13 @@ def run_deep_dives(
     config: dict[str, Any],
     selected_analysts: list[str],
 ) -> list[dict[str, Any]]:
-    """Run full TradingAgentsGraph on each candidate."""
+    """Run the full multi-agent graph on each candidate, under the shared gate.
+
+    Each dive gets its own analyses row (so it shows up in dashboard history);
+    success backfills analysis_id + final signal onto the spy quick result.
+    A failed dive is returned with an "error" key rather than raised — the
+    allocator just sees fewer usable candidates.
+    """
     log.info("[spy %s] deep dive on %d tickers", scan_id, len(candidates))
     db.update_spy_scan(scan_id, status="running_deep", deep_total=len(candidates))
 
@@ -369,7 +417,14 @@ def run_deep_dives(
 
 
 def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
-    """Fetch current prices for the scan portfolio and compute P&L vs entry prices."""
+    """Mark the scan's paper portfolio to market and persist per-position P&L.
+
+    Prefers one bulk Schwab quote call (real-time); falls back to yfinance
+    closes. Also diffs each position's entry signal against its latest
+    quick-scan signal and records flips in rebalance_notes — that's the
+    signal-flip surface the dashboard and the weekly rebalance read. Called
+    hourly on weekdays by the scheduler and once right after a scan completes.
+    """
     scan = db.get_spy_scan(scan_id)
     if not scan:
         return {"error": "scan not found"}

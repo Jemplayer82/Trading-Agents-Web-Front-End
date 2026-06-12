@@ -1,5 +1,38 @@
-// TradingAgents Web — dashboard logic
+// TradingAgents Web — "Run Analysis" tab (the default dashboard view).
+//
+// Drives a single-ticker analysis end-to-end over the /api/analyze WebSocket
+// (backend: web/main.py accepts the socket, web/runner.py streams the run) and
+// renders the results: agent progress grid, live reasoning timeline, the 9
+// report tabs (REPORT_KEYS), final decision badge, plus the per-analysis
+// technical chart (lightweight-charts) and Q&A panel.
+//
+// Endpoints used (all proxied to the api app by web/nginx.conf's generic /api/):
+//   GET    /api/providers                  provider / model / depth / analyst menus
+//   GET    /api/preferences                last-used form values
+//   GET    /api/analyses                   history sidebar list
+//   GET    /api/analyses/{id}              load a saved run
+//   DELETE /api/analyses/{id}              delete a saved run
+//   GET    /api/analyses/{id}/chart-data   point-in-time OHLC + indicators
+//   POST   /api/analyses/{id}/ask          Q&A about a saved run
+//   GET    /api/ticker-info/{ticker}       company name / website header
+//   GET    /api/auth/schwab/status         master Schwab switch (can be slow — see
+//                                          applySchwabVisibility)
+//   WS     /api/analyze                    the run itself
+//
+// WebSocket frames (see handleFrame): started, status, report_update, messages,
+// token, debate, done, error. "started" comes from web/main.py; the rest are
+// emitted by web/runner.py.
+//
+// Classic <script defer> file sharing ONE global scope with the other modules —
+// see the utils.js header. Consumes $, escapeHtml, fmtTs, renderMarkdown from
+// utils.js; never redeclare those names at top level here. Defines
+// applySchwabVisibility (called as window.applySchwabVisibility by credentials.js
+// when the SCHWAB_ENABLED toggle flips). Dispatches the "analysis-started" window
+// event (consumed by bus.js to join the run's bus channel) and listens for
+// "load-analysis" (dispatched by portfolio.js / spy.js cross-links).
 
+// The 9 report tabs, in display order: [state key, tab label]. The two debate
+// keys have no direct report field — they're synthesized in debateToMarkdown().
 const REPORT_KEYS = [
   ["market_report", "Market"],
   ["sentiment_report", "Sentiment"],
@@ -12,6 +45,7 @@ const REPORT_KEYS = [
   ["final_trade_decision", "Final Decision"],
 ];
 
+// analyst checkbox key -> the report key whose arrival marks that analyst done.
 const ANALYST_REPORT_MAP = {
   market: "market_report",
   social: "sentiment_report",
@@ -105,6 +139,8 @@ async function showCompanyHeader(ticker) {
     el.innerHTML = html;
   } catch (e) { /* non-fatal */ }
 }
+
+// ===== Run form: providers, models, preferences =====
 
 async function loadProviders() {
   const resp = await fetch("/api/providers");
@@ -226,6 +262,8 @@ async function loadPreferences() {
   });
 }
 
+// ===== History sidebar =====
+
 async function loadHistory() {
   const resp = await fetch("/api/analyses");
   const { analyses } = await resp.json();
@@ -314,6 +352,8 @@ async function deleteHistoryItem(id, ticker) {
   await loadHistory();
 }
 
+// ===== Run lifecycle (WebSocket) =====
+
 function collectParams() {
   const analysts = [];
   document.querySelectorAll("#f-analysts input[type=checkbox]:checked").forEach((cb) =>
@@ -374,6 +414,8 @@ function startRun() {
 
 function stopRun() { if (runningSocket) runningSocket.close(); }
 
+// One frame from the /api/analyze socket. Frame shapes are defined by
+// web/runner.py (and "started" by web/main.py) — keep this switch in sync.
 function handleFrame(frame) {
   switch (frame.type) {
     case "started":
@@ -386,6 +428,8 @@ function handleFrame(frame) {
       if (frame.analysts) frame.analysts.forEach((a) => setAgentState(a, "pending"));
       break;
     case "report_update":
+      // Agent completion is inferred from WHICH report key arrived — there is no
+      // separate "agent done" frame.
       Object.entries(frame.reports).forEach(([k, v]) => {
         currentReports[k] = v;
         const analystKey = Object.entries(ANALYST_REPORT_MAP).find(([, rk]) => rk === k)?.[0];
@@ -435,6 +479,8 @@ function handleFrame(frame) {
   }
 }
 
+// ===== Agent progress grid =====
+
 function setAgentState(name, state) {
   const grid = $("progress");
   let row = grid.querySelector(`[data-name="${name}"]`);
@@ -463,6 +509,8 @@ function prettyAgentName(key) {
     portfolio_manager: "Portfolio Manager",
   }[key] || key;
 }
+
+// ===== Report tabs =====
 
 function buildReportTabs() {
   const tabs = $("report-tabs");
@@ -499,6 +547,9 @@ function renderActiveReport() {
   body.innerHTML = renderMarkdown(md);
 }
 
+// Synthesize a readable transcript from a saved LangGraph debate-state object:
+// prefer the combined `history` field, else concatenate the per-role histories,
+// then append the judge's decision. Returns "" when there is nothing to show.
 function debateToMarkdown(state) {
   if (!state || typeof state !== "object") return "";
   const parts = [];
@@ -516,6 +567,9 @@ function debateToMarkdown(state) {
   return parts.filter(Boolean).join("\n\n").trim();
 }
 
+// ===== Messages / tool-calls feed =====
+
+// Newest-first (insertBefore firstChild), capped at 200 entries to bound the DOM.
 function appendMessage(m) {
   const ul = $("messages");
   const li = document.createElement("li");
@@ -602,6 +656,8 @@ function appendReasoningMessage(m) {
   log.appendChild(line);
   scrollReasoning();
 }
+
+// ===== Decision panel + status bar =====
 
 function showDecision(signal, decision, meta) {
   const panel = $("decision-panel");
