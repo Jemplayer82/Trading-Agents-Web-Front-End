@@ -57,13 +57,16 @@ include = ["tradingagents*", "cli*", "web*"]
 cli = ["static/*"]
 web = ["static/*", "templates/*"]
 
-# Ruff is the project's linter/formatter. The repo had no linter before, so a
-# repo-wide cleanup is intentionally incremental: this config defines the target
-# standard, and modules are brought into compliance as they are touched. Run
-# `ruff check .` to see the remaining backlog; `ruff check <path>` for one module.
+# Ruff is the project's linter/formatter. The maintained surface — `web/` and
+# `tests/` — is kept clean and gated by CI. The upstream `cli/` and `tradingagents/`
+# trees predate the linter and carry a large backlog; they're excluded here so the
+# CI gate is a real signal ("web/ + tests/ are clean") rather than permanently red.
+# Bring an upstream module into compliance and drop it from extend-exclude to expand
+# coverage. Use `ruff check tradingagents` etc. to see the deferred backlog.
 [tool.ruff]
 target-version = "py310"
 line-length = 120
+extend-exclude = ["cli", "tradingagents"]
 
 [tool.ruff.lint]
 # F = pyflakes (unused imports/vars, undefined names)
@@ -75,10 +78,14 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 # A few modules deliberately re-export via `from x import *`; don't flag the
-# resulting star-import warnings there.
+# resulting star-import warnings there. (cli/ + tradingagents/ are extend-excluded
+# above; these entries stay as documentation for when coverage expands.)
 "cli/main.py" = ["F403", "F405"]
 "tradingagents/graph/setup.py" = ["F403", "F405"]
 "tradingagents/graph/trading_graph.py" = ["F403", "F405"]
+# WebSocket / error-path tests intentionally assert that *some* exception is raised
+# when a connection is rejected — the close surfaces as varying disconnect types.
+"tests/**" = ["B017"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["tradingagents", "web", "cli"]

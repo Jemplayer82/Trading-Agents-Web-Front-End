@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
 
 import httpx
 
@@ -16,12 +15,12 @@ log = logging.getLogger(__name__)
 
 
 class Notifier:
-    def send(self, text: str, link: Optional[str] = None) -> None:
+    def send(self, text: str, link: str | None = None) -> None:
         raise NotImplementedError
 
 
 class NoOpNotifier(Notifier):
-    def send(self, text: str, link: Optional[str] = None) -> None:
+    def send(self, text: str, link: str | None = None) -> None:
         log.info("[notifier:noop] %s | link=%s", text, link)
 
 
@@ -32,7 +31,7 @@ class HttpPostNotifier(Notifier):
         self.url = url
         self.timeout = timeout
 
-    def send(self, text: str, link: Optional[str] = None) -> None:
+    def send(self, text: str, link: str | None = None) -> None:
         payload: dict[str, str] = {"text": text}
         if link:
             payload["link"] = link

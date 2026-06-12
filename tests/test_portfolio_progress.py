@@ -10,14 +10,10 @@ No network access. Run with: uv run pytest tests/test_portfolio_progress.py -v
 from __future__ import annotations
 
 import sqlite3
-import threading
-from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
 from web import db
-
 
 # ---------------------------------------------------------------------------
 # Helpers

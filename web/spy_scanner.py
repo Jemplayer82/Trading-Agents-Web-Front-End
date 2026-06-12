@@ -11,7 +11,7 @@ from typing import Any
 
 import yfinance as yf
 from langchain_openai import ChatOpenAI
-from tradingagents.default_config import DEFAULT_CONFIG
+
 from tradingagents.dataflows import schwab_mcp
 from tradingagents.graph.portfolio_graph import run_single_ticker
 
@@ -60,7 +60,7 @@ class DynamicGate:
     def limit(self) -> int:
         return self._limit
 
-    def __enter__(self) -> "DynamicGate":
+    def __enter__(self) -> DynamicGate:
         with self._cv:
             while self._in_use >= self._limit:
                 self._cv.wait(timeout=1.0)
@@ -161,7 +161,7 @@ def _quick_scan_one(
     price_data: dict[str, Any],
     sector: str,
     llm: ChatOpenAI,
-    gate: "DynamicGate | None" = None,
+    gate: DynamicGate | None = None,
 ) -> dict[str, Any]:
     try:
         closes = price_data.get("close", [])
@@ -214,7 +214,7 @@ def _quick_scan_one(
     except Exception as exc:
         log.warning("Quick scan failed for %s: %s", ticker, exc)
         return {"ticker": ticker, "signal": "HOLD", "conviction": 1,
-                "reasoning": "scan error: {}".format(exc), "entry_price": 0.0, "error": str(exc)}
+                "reasoning": f"scan error: {exc}", "entry_price": 0.0, "error": str(exc)}
 
 
 def run_quick_scan(
