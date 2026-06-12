@@ -1,7 +1,28 @@
-"""FastAPI app for tradingagents-api: dashboard backend + Schwab OAuth.
+"""FastAPI app for the `tradingagents-api` container (`uvicorn web.main:app`).
 
-Portfolio scan routes live in `web/portfolio_main.py` in a separate container.
-Nginx routes /api/portfolio* there and everything else here.
+Dashboard backend: single-ticker analysis (streamed over the /api/analyze
+WebSocket), dashboard login/users, app settings + LLM credential management,
+saved-analysis Q&A and charting, Schwab OAuth, and the /api/bus Agent Bus
+bridge.
+
+Routing contract (web/nginx.conf): nginx sends /api/spy*, /api/accounts and
+/api/portfolio* to a SEPARATE app — web/portfolio_main.py, running in its own
+container so multi-hour scans can't block ad-hoc analysis — and everything
+else under /api/ here. An endpoint added to the wrong app works in a
+single-process dev run but is a silent 404 in production.
+
+Auth model (gate lives in web/auth_app.py and is fail-closed):
+  - Browser requests carry a `ta_session` cookie -> server-side session row in
+    SQLite. The HTTP middleware enforces this on every /api/ route outside a
+    small public allowlist.
+  - Inter-container calls (scheduler -> this app) send an X-Internal-Token
+    header, compared with hmac.compare_digest — never `==`, which would leak
+    the token through a timing side-channel.
+  - The HTTP middleware does not see WebSocket scope, so /api/analyze and
+    /api/bus re-implement the same gate inline; both accept either credential.
+
+The SQLite DB (web/db.py) sits on a Docker volume shared with the portfolio
+and scheduler containers, so sessions minted here are honored everywhere.
 """
 from __future__ import annotations
 
@@ -40,6 +61,7 @@ _SETTING_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
 def _total_budget() -> int:
+    """Shared LLM concurrency budget (OLLAMA_MAX_CONCURRENCY env var, default 5, floor 1)."""
     try:
         return max(1, int(os.environ.get("OLLAMA_MAX_CONCURRENCY", "5")))
     except (TypeError, ValueError):
@@ -60,6 +82,10 @@ app.middleware("http")(auth_app.auth_middleware)
 
 @app.on_event("startup")
 def _startup() -> None:
+    """Per-container boot: create/migrate the shared DB, then project DB-stored
+    credentials and settings into this process's env so downstream code that
+    resolves keys via env vars sees them. Purges are best-effort housekeeping
+    and must never block startup."""
     db.init_db()
     creds.apply_to_env()
     creds.apply_settings_to_env()
@@ -256,6 +282,8 @@ def delete_credential_endpoint(provider: str) -> dict[str, str]:
     return {"status": "cleared", "provider": provider}
 
 
+# ---------- saved analyses (history) ----------
+
 @app.get("/api/analyses")
 def list_analyses() -> dict[str, Any]:
     return {"analyses": db.list_analyses()}
@@ -275,6 +303,8 @@ def delete_analysis_endpoint(analysis_id: int) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="not found")
     return {"status": "deleted", "id": analysis_id}
 
+
+# ---------- ticker company-info lookup (cached) ----------
 
 @app.get("/api/ticker-info/{ticker}")
 def ticker_info(ticker: str) -> dict[str, Any]:
@@ -432,6 +462,13 @@ async def get_analysis_chart_data(
 
 
 def _build_chart_data(ticker: str, trade_date: str, lookback_days: int) -> dict[str, Any]:
+    """Candles + indicator series for the lookback window ending at trade_date.
+
+    Point-in-time: OHLCV is loaded as of trade_date (not today), so the chart
+    matches what the agents saw when the analysis ran. NaN indicator values
+    (warm-up periods, e.g. the first 200 bars of sma_200) are dropped
+    per-series rather than zero-filled.
+    """
     import pandas as pd
     from stockstats import wrap
 
@@ -519,6 +556,8 @@ _SCHWAB_STATE_COOKIE = "schwab_oauth_state"
 
 @app.get("/api/auth/schwab")
 def schwab_login() -> RedirectResponse:
+    """Start the Schwab OAuth flow: mint an anti-CSRF state nonce, stash it in
+    the short-lived cookie above, and redirect to Schwab's authorize page."""
     state = secrets.token_urlsafe(32)
     resp = RedirectResponse(url=schwab_auth.build_auth_url(state), status_code=302)
     resp.set_cookie(
@@ -532,6 +571,13 @@ def schwab_login() -> RedirectResponse:
 def schwab_callback(
     request: Request, code: str | None = None, error: str | None = None, state: str | None = None
 ) -> HTMLResponse:
+    """Schwab OAuth redirect target (public — listed in auth_app.PUBLIC_API_PATHS;
+    the state nonce is its own gate).
+
+    Every failure branch deliberately returns a generic message to the browser
+    and logs the specifics server-side, so upstream error details are never
+    reflected to whoever drove the redirect.
+    """
     # Verify the anti-CSRF state matches the nonce we set when starting the flow.
     expected_state = request.cookies.get(_SCHWAB_STATE_COOKIE)
     if not expected_state or not state or not hmac.compare_digest(state, expected_state):
@@ -593,8 +639,19 @@ def schwab_disconnect() -> dict[str, str]:
 
 @app.websocket("/api/analyze")
 async def analyze(ws: WebSocket) -> None:
+    """Run one single-ticker analysis, streaming progress frames to the client.
+
+    Protocol: the client sends a single JSON params object ({"ticker",
+    "trade_date", "provider", ...}); the server replies {"type": "started",
+    "analysis_id": N}, then forwards every frame the runner emits
+    (web/runner.py) until its end-of-stream sentinel. The runner persists
+    results to the analyses table as it goes, so a dropped socket loses the
+    live view but not the analysis — it's still in history when done.
+    """
     # The http auth middleware doesn't see websocket scope, so gate here:
-    # require a valid session cookie (or the internal-token header).
+    # require a valid session cookie (or the internal-token header). The token
+    # check must stay hmac.compare_digest — a plain `==` leaks the internal
+    # token through a timing side-channel.
     token = ws.cookies.get(auth_app.COOKIE_NAME)
     internal = ws.headers.get("x-internal-token")
     expected = os.environ.get("INTERNAL_API_TOKEN")
@@ -642,6 +699,9 @@ async def analyze(ws: WebSocket) -> None:
         with _SINGLE_SLOTS:
             run_analysis_sync(params, analysis_id, frames)
 
+    # Bridge from the worker thread into this async loop; runner pushes None
+    # as the end-of-stream sentinel. (Defined after _worker on purpose —
+    # closures resolve names at call time, and _worker only runs below.)
     frames: queue.Queue = queue.Queue()
     producer = asyncio.create_task(asyncio.to_thread(_worker))
 

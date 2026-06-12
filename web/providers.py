@@ -67,6 +67,12 @@ def _ollama_models() -> dict[str, list[tuple[str, str]]]:
 
 
 def get_providers() -> list[dict[str, Any]]:
+    """Provider entries plus their quick/deep model menus, shaped for the UI.
+
+    Resolved at call time (per request), so changing OLLAMA_BASE_URL via the
+    Settings UI flips the Ollama menu between local tags and the cloud
+    catalog without a restart.
+    """
     out = []
     for p in PROVIDERS:
         entry = dict(p)
@@ -83,6 +89,7 @@ def get_providers() -> list[dict[str, Any]]:
     return out
 
 
+# Keys must match web/runner.py ALL_ANALYSTS (the AnalystType enum values).
 ANALYSTS = [
     {"key": "market", "label": "Market Analyst"},
     {"key": "social", "label": "Sentiment Analyst"},

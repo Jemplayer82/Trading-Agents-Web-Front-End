@@ -1,6 +1,11 @@
 """Pluggable webhook notifier — Fred (OpenClaw runner on the WebServer)
 is responsible for actually delivering the WhatsApp message.
 
+Used by the scheduler (web/scheduler.py) for its alerts: failed nightly
+scans, skipped newsletters, Schwab token health. Always construct via
+default_notifier() — FRED_NOTIFY_URL set means HTTP POST, unset means a
+NoOp that just logs, so callers never need to branch.
+
 Notifications must never crash the caller, so all errors are logged and
 swallowed.
 """

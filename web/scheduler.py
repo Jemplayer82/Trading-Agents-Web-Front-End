@@ -1,7 +1,22 @@
-"""APScheduler daemon — nightly portfolio scan, 5am newsletter, hourly health.
+"""APScheduler daemon — cron triggers for scans, newsletter, and health checks.
 
-Runs inside the tradingagents-scheduler container. All HTTP calls go to the
-portfolio + api containers via the docker network.
+Runs inside the tradingagents-scheduler container (`python -m web.scheduler`).
+It does no analysis itself: scan jobs are fire-and-forget HTTP POSTs to the
+portfolio/api containers over the Docker network, authenticated with the
+X-Internal-Token header (INTERNAL_API_TOKEN, verified server-side in
+web/auth_app.py with hmac.compare_digest). The newsletter is the exception —
+it sends from this process directly, which is why _apply_db_config() must
+pull SMTP/notifier settings from the shared DB first.
+
+Schedule (all times SCHEDULER_TIMEZONE, default America/New_York):
+    22:00 daily          portfolio scan      POST /api/portfolio-scan
+    05:00 daily          morning newsletter  (in-process)
+    hourly               Schwab token health GET /api/auth/schwab/status
+    Sat 00:00            S&P 500 scan        POST /api/spy-scan
+    Mon-Fri 09:00-16:00  SPY price refresh   POST /api/spy-scans/latest/refresh-prices
+
+Each job also has a --run-*-now CLI flag for one-shot manual runs (handy for
+testing inside the container without waiting for cron).
 """
 from __future__ import annotations
 
@@ -53,6 +68,12 @@ def _apply_db_config() -> None:
 
 
 def job_nightly_scan() -> None:
+    """Kick off the portfolio container's nightly scan.
+
+    The endpoint queues a background task and returns immediately, so the
+    60s timeout covers request startup only — never the multi-hour scan.
+    The endpoint is idempotent per trade date, so a retry can't double-scan.
+    """
     log.info("[nightly_scan] firing portfolio scan at %s", PORTFOLIO_URL)
     try:
         r = httpx.post(f"{PORTFOLIO_URL}/api/portfolio-scan", timeout=60, headers=_internal_headers())
@@ -66,6 +87,7 @@ def job_nightly_scan() -> None:
 
 
 def _latest_scan_for_today() -> dict[str, Any] | None:
+    """Latest portfolio scan, with a warning (not a skip) when it isn't from today."""
     today_iso = datetime.utcnow().date().isoformat()
     try:
         scan = db.latest_portfolio_scan()
@@ -81,6 +103,11 @@ def _latest_scan_for_today() -> dict[str, Any] | None:
 
 
 def job_morning_newsletter() -> None:
+    """Email the overnight scan as the morning newsletter.
+
+    Deliberately permissive: a stale or still-running scan logs a warning but
+    sends anyway — a slightly old briefing beats no briefing.
+    """
     log.info("[newsletter] morning newsletter job firing")
     _apply_db_config()  # ensure latest SMTP_* / notifier settings from the UI
     scan = _latest_scan_for_today()
@@ -102,6 +129,7 @@ def job_morning_newsletter() -> None:
 
 
 def job_token_health() -> None:
+    """Hourly Schwab MCP session check; notifies the user when re-auth is needed."""
     try:
         r = httpx.get(f"{API_URL}/api/auth/schwab/status", timeout=15, headers=_internal_headers())
         if r.status_code != 200:
@@ -136,6 +164,7 @@ def job_spy_scan() -> None:
 
 
 def job_spy_price_refresh() -> None:
+    """Mark the latest SPY paper portfolio to market (also records signal flips)."""
     log.info("[spy_price_refresh] refreshing latest SPY scan prices")
     try:
         r = httpx.post(f"{PORTFOLIO_URL}/api/spy-scans/latest/refresh-prices", timeout=120, headers=_internal_headers())

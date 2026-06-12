@@ -1,4 +1,24 @@
-"""LLM allocator: 50 deep-dive results → $100k paper portfolio (or weekly rebalance)."""
+"""LLM allocator: 50 deep-dive results → $100k paper portfolio (or weekly rebalance).
+
+Phase 3 of the S&P pipeline (web/portfolio_main._run_spy_scan). One deep-LLM
+call turns the enriched candidates into a JSON array of allocations; if the
+call or its JSON parse fails, a deterministic equal-weight fallback runs so a
+scan never finishes without a portfolio.
+
+Allocation dict (persisted as spy_scans.portfolio_json; consumed by
+spy_scanner.refresh_portfolio_prices and /api/spy-account/compare):
+    ticker, action, allocation_pct, dollar_amount, entry_price, rationale
+    shares, cost_basis              added here post-LLM (whole-share conversion)
+    current_price, current_value    added later by refresh_portfolio_prices
+
+`action` is "NEW" | "HOLD" | "ADDED" | "TRIMMED" | "EXITED". EXITED rows are
+kept (shares=0) as a paper trail; downstream code filters action != "EXITED"
+to find live positions.
+
+Two modes: fresh (week 1, $100k) vs rebalance (week 2+, capital = the previous
+scan's refreshed value; kept positions retain their original entry_price so
+P&L stays anchored to actual cost).
+"""
 from __future__ import annotations
 
 import json
@@ -112,6 +132,7 @@ def _llm(config: dict[str, Any]) -> ChatOpenAI:
 # ─── Fallbacks ────────────────────────────────────────────────────────────────
 
 def _fallback_fresh(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Equal-weight the BUYs (or top 20 by conviction if none) across $100k."""
     buys = [c for c in candidates if (c.get("signal") or "").upper() == "BUY"]
     if not buys:
         buys = sorted(candidates, key=lambda c: -(c.get("conviction") or 0))[:20]
@@ -121,6 +142,7 @@ def _fallback_fresh(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {
             "ticker": c["ticker"],
             "action": "NEW",
+            # per/1000 == per / $100k * 100, i.e. pct of the fixed fresh capital.
             "allocation_pct": round(per / 1000, 2),
             "dollar_amount": per,
             "entry_price": c.get("entry_price", 0),
@@ -187,10 +209,13 @@ def run(
     previous_portfolio: list[dict[str, Any]] | None = None,
     starting_value: float | None = None,
 ) -> dict[str, Any]:
-    """Return {allocations, total, report_md, starting_value}.
+    """Return {allocations, total, cash, report_md, starting_value}.
 
-    If previous_portfolio is provided (week 2+), performs a rebalance.
-    Otherwise allocates a fresh $100k portfolio (week 1).
+    If previous_portfolio is provided (week 2+), performs a rebalance;
+    otherwise allocates a fresh $100k portfolio (week 1). LLM dollar targets
+    are converted to whole shares (floor) — the rounding remainder, and any
+    target too small for one share, stays in cash. Falls back to deterministic
+    equal-weighting if the LLM call or its JSON parse fails.
     """
     if not candidates:
         return {"allocations": [], "total": 0, "report_md": "No candidates provided.",

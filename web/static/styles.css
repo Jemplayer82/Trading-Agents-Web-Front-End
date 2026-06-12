@@ -1,5 +1,12 @@
-/* TradingAgents Web — terminal aesthetic */
+/* TradingAgents Web — terminal aesthetic.
+   One stylesheet for the whole dashboard (no build step, no preprocessor).
+   Conventions:
+   - Theme colors live in the :root tokens below; prefer them over new hex values.
+   - Signal classes (.badge.BUY/.SELL/.HOLD, .h-sig.*) are UPPERCASE on purpose:
+     JS interpolates raw signal strings straight into class attributes.
+   - Banner comments below group the rules by UI region. */
 
+/* ----- Theme tokens ----- */
 :root {
   --bg: #0b0f14;
   --panel: #0f141b;
@@ -16,6 +23,7 @@
   --sell: #ff7c7c;
 }
 
+/* ----- Base + topbar ----- */
 * { box-sizing: border-box; }
 
 html, body {
@@ -83,6 +91,7 @@ a { color: var(--accent-cyan); }
 .stats #stat-status.done { color: var(--accent-green); }
 .stats #stat-status.error { color: var(--accent-red); }
 
+/* ----- Layout grid (sidebar + main column per tab pane) ----- */
 .layout {
   display: grid;
   grid-template-columns: 260px 1fr;
@@ -101,6 +110,7 @@ a { color: var(--accent-cyan); }
 
 .main { display: flex; flex-direction: column; gap: 12px; }
 
+/* ----- Panels (the bordered boxes with a floating [ Title ] label) ----- */
 .panel {
   border: 1px solid var(--panel-border);
   background: var(--panel);
@@ -121,6 +131,7 @@ a { color: var(--accent-cyan); }
   text-transform: lowercase;
 }
 
+/* ----- Run Analysis form ----- */
 .form-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -189,6 +200,7 @@ fieldset.analysts legend { padding: 0 4px; }
   justify-content: flex-end;
 }
 
+/* ----- Buttons (.primary = filled cyan, .ghost = outline) ----- */
 button {
   background: transparent;
   border: 1px solid var(--panel-border);
@@ -211,7 +223,7 @@ button.primary:hover:not([disabled]) { background: #8be1ef; }
 button.ghost:hover:not([disabled])    { border-color: var(--accent-yellow); color: var(--accent-yellow); }
 button[disabled] { opacity: 0.4; cursor: not-allowed; }
 
-/* History */
+/* ----- History sidebars (shared by all three scan/run history lists) ----- */
 .history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .history li {
   padding: 0;
@@ -254,6 +266,9 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .history li:not(.empty):hover .h-del { color: var(--accent-red); border-left-color: var(--panel-border); }
 .history .h-del:hover { background: rgba(255, 124, 124, 0.1); color: var(--accent-red); }
 
+/* ----- Signal badges -----
+   Class names are raw signal strings from JS (BUY/SELL/HOLD/UNKNOWN/OPTION) —
+   keep them uppercase. spy.js also reuses BUY/HOLD/SELL for scan status colors. */
 .badge,
 .h-sig {
   text-transform: uppercase;
@@ -266,6 +281,7 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .badge.UNKNOWN, .h-sig.UNKNOWN { background: var(--panel-border); color: var(--dim); }
 .badge.OPTION { background: transparent; border: 1px solid var(--panel-border); color: var(--dim); }
 
+/* ----- Decision panel + agent progress grid (Run Analysis tab) ----- */
 .decision { display: flex; align-items: center; gap: 12px; }
 .decision .badge { font-size: 16px; padding: 6px 14px; border-radius: 3px; font-weight: 700; }
 
@@ -290,6 +306,7 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .progress-grid .row .state.in_progress { color: var(--accent-yellow); }
 .progress-grid .row .state.completed { color: var(--accent-green); }
 
+/* ----- Report tabs + rendered report body ----- */
 .tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
 .tab {
   padding: 4px 10px;
@@ -323,6 +340,7 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .report-body th, .report-body td { border: 1px solid var(--panel-border); padding: 4px 8px; text-align: left; }
 .report-body strong { color: var(--accent-magenta); }
 
+/* ----- Messages / tool-calls feed ----- */
 .messages {
   list-style: none;
   margin: 0;
@@ -436,6 +454,8 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .totals-item strong { font-size: 15px; }
 
 /* ----- S&P 500 Scanner tab ----- */
+/* .scan-progress(-bar) is the shared progress-bar markup emitted by utils.js
+   progressBar() — used by BOTH the S&P and Portfolio scan progress panels. */
 .scan-progress {
   flex: 1;
   background: var(--panel-border);

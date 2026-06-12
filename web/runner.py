@@ -2,8 +2,27 @@
 WebSocket async sender.
 
 The producer runs in a worker thread (asyncio.to_thread) and pushes frames
-to a queue. The WebSocket coroutine drains the queue and sends frames to
-the browser.
+to a queue. The WebSocket coroutine (web/main.py /api/analyze) drains the
+queue and sends frames to the browser.
+
+The graph is streamed with stream_mode=["values", "messages"]: "values"
+chunks carry the full LangGraph state (reports, debate state), "messages"
+chunks carry per-token LLM output. Frames put on the queue are dicts keyed
+by "type":
+
+    status         human-readable progress line
+    token          per-token delta {node, text, channel: content|reasoning}
+    report_update  changed report sections {reports: {key: markdown}}
+    messages       tail of new agent/tool messages (truncated summaries)
+    debate         live round counter for the bull/bear and risk debates
+    done / error   final signal + decision, or message + traceback
+    None           sentinel — end of stream; always queued last (see finally)
+
+Two synthetic report keys — "investment_debate" and "risk_debate" — are
+markdown transcripts rendered HERE from the LangGraph debate state; the
+graph never writes them itself. To add a frame type or report key, change
+this module and the frontend consumer together: web/static/app.js
+(REPORT_KEYS and the WebSocket dispatcher).
 """
 
 from __future__ import annotations
@@ -27,6 +46,8 @@ except Exception:
     RunMirror = None  # type: ignore[assignment,misc]
 
 
+# Streamed-report state keys, in pipeline order. Must stay in sync with
+# REPORT_KEYS in web/static/app.js (labels and render order live there).
 REPORT_KEYS = (
     "market_report",
     "sentiment_report",
@@ -37,7 +58,8 @@ REPORT_KEYS = (
     "final_trade_decision",
 )
 
-# Display name → analyst key (the AnalystType enum values used internally)
+# Analyst keys (the AnalystType enum values), in pipeline order. UI labels
+# for these live in web/providers.py ANALYSTS.
 ALL_ANALYSTS = ["market", "social", "news", "fundamentals"]
 
 
@@ -75,6 +97,11 @@ def build_config(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_analysts(requested: Iterable[str], asset_type: AssetType) -> list[str]:
+    """Keep only known analyst keys; an empty selection means all of them.
+
+    Crypto tickers drop the fundamentals analyst — there are no financial
+    statements to analyze.
+    """
     keys = [a for a in requested if a in ALL_ANALYSTS]
     if not keys:
         keys = list(ALL_ANALYSTS)
@@ -184,7 +211,14 @@ def _message_summary(msg: Any) -> dict[str, Any] | None:
 
 
 def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Queue) -> None:
-    """Run the graph and emit frames. Synchronous — call via asyncio.to_thread."""
+    """Run the graph and emit frames. Synchronous — call via asyncio.to_thread.
+
+    Outcomes always land in two places: frames on the queue for the live
+    browser, and the analyses row in SQLite (db.complete_analysis /
+    db.fail_analysis) for history. The None sentinel is queued in `finally`
+    no matter what happens, so the WebSocket drain loop always terminates.
+    Bus mirroring (RunMirror) is best-effort and must never break the run.
+    """
 
     def emit(frame: dict[str, Any]) -> None:
         frames.put(frame)

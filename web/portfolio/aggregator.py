@@ -57,6 +57,15 @@ PER_TICKER_TEMPLATE = """
 
 
 def run(per_ticker: list[dict[str, Any]], trade_date: str, config: dict[str, Any]) -> str:
+    """One deep-LLM call over the whole scan; returns the briefing markdown.
+
+    per_ticker is the payload built in portfolio_main._run_scan (ticker,
+    signal, quantity, market_value, trader_plan, final_decision — failed
+    tickers arrive with empty plans). Plans/decisions are truncated to 2000
+    chars each to keep a ~30-holding portfolio inside the context window.
+    On LLM failure this returns an "## Aggregator Error" section instead of
+    raising, so the per-ticker results still persist and the scan completes.
+    """
     if not per_ticker:
         return (
             "## Concentration Risk\nNo positions on file.\n\n"

@@ -1,8 +1,18 @@
-"""Schwab OAuth flow + token endpoint client.
+"""Schwab OAuth protocol client: auth-URL building, code exchange, refresh.
 
-Schwab refresh tokens are valid for 7 days. Access tokens last 30 min.
-We encode that lifecycle into TokenBundle and surface a `refresh_days_remaining`
-helper that the scheduler uses for the hourly health check.
+Pure HTTP glue — no routes, no persistence. The browser-facing flow endpoints
+live in web/main.py (/api/auth/schwab and its /callback, which verifies the
+state nonce and returns only a generic error page to the browser — the real
+failure is logged server-side); the encrypted bundle lands in
+web/auth/token_store.py.
+
+Token lifecycle (Schwab policy, not ours):
+  * access tokens last ~30 minutes (ACCESS_TTL) and are refreshed silently;
+  * refresh tokens last 7 days and are NOT rotated on refresh, so a full
+    browser re-login is forced weekly. That cadence is a Schwab platform
+    floor — don't burn time trying to "fix" it here.
+
+`refresh_days_remaining` computes the countdown to that forced re-login.
 """
 from __future__ import annotations
 
@@ -79,7 +89,8 @@ def refresh(bundle: TokenBundle) -> TokenBundle:
     """Use the refresh token to mint a fresh access token.
 
     Schwab usually returns just a new access token; if a fresh refresh_token
-    comes back too, swap it in and reset refresh_issued_at.
+    comes back too, swap it in and reset refresh_issued_at. Only resetting
+    on actual rotation keeps the weekly forced-relogin countdown honest.
     """
     headers = _basic_auth_header() | {"Content-Type": "application/x-www-form-urlencoded"}
     data = {"grant_type": "refresh_token", "refresh_token": bundle.refresh_token}
@@ -99,6 +110,13 @@ def refresh(bundle: TokenBundle) -> TokenBundle:
 
 
 def refresh_days_remaining(bundle: TokenBundle) -> int:
+    """Whole days until the refresh token (and thus the Schwab session) dies.
+
+    0 means expired or unknown (missing/unparseable issue timestamp); naive
+    timestamps are assumed UTC. Floor division — "0 days" can still mean up
+    to 23h of validity left. Currently informational only: the scheduler's
+    hourly health check probes the Schwab MCP status endpoint instead.
+    """
     try:
         issued = datetime.fromisoformat(bundle.refresh_issued_at)
     except (TypeError, ValueError):

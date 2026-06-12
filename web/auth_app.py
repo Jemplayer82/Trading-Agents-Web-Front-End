@@ -14,6 +14,11 @@ Design notes
   ``X-Internal-Token: $INTERNAL_API_TOKEN`` and bypass the cookie check.
 - First-run: when the ``users`` table is empty, ``/api/auth/me`` reports
   ``setup_required`` and ``/api/auth/setup`` creates the first admin.
+- The gate is FAIL-CLOSED: if ``INTERNAL_API_TOKEN`` is unset, the
+  internal-token branch is skipped entirely and a valid session is still
+  required. Missing config never grants anonymous access.
+- All token/hash comparisons use ``hmac.compare_digest``, never ``==``
+  (timing side-channel — see the inline notes in ``is_authorized``).
 """
 from __future__ import annotations
 
@@ -45,12 +50,24 @@ PUBLIC_API_PATHS = {
 # ---------- password hashing ----------
 
 def hash_password(password: str) -> str:
+    """PBKDF2-HMAC-SHA256 with a fresh 16-byte salt and 600k iterations.
+
+    The output embeds algorithm/iterations/salt, so ``_PBKDF2_ITERS`` can be
+    raised later without invalidating existing rows — ``verify_password``
+    reads the parameters back from each stored hash.
+    """
     salt = secrets.token_bytes(16)
     dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERS)
     return f"pbkdf2_sha256${_PBKDF2_ITERS}${salt.hex()}${dk.hex()}"
 
 
 def verify_password(password: str, stored: str) -> bool:
+    """Check a password against a stored hash. Malformed rows verify False.
+
+    Iterations and salt come from the stored string, not the module constant,
+    so hashes minted under older settings keep verifying. The final compare is
+    ``hmac.compare_digest`` — keep it timing-safe.
+    """
     try:
         algo, iters_s, salt_hex, hash_hex = stored.split("$")
         if algo != "pbkdf2_sha256":
@@ -81,8 +98,12 @@ def _internal_token() -> str | None:
 def is_authorized(request: Request) -> bool:
     """True if the request carries a valid session cookie OR the internal token."""
     internal = _internal_token()
+    # Fail-closed: if INTERNAL_API_TOKEN is unset this branch is skipped and the
+    # request still needs a valid session. Unset config must never open a hole.
     if internal:
         hdr = request.headers.get("x-internal-token")
+        # compare_digest, never ==: string equality short-circuits and leaks a
+        # timing side-channel. That exact regression shipped once — don't repeat it.
         if hdr and hmac.compare_digest(hdr, internal):
             return True
     token = request.cookies.get(COOKIE_NAME)

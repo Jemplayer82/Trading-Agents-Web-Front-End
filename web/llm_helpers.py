@@ -10,6 +10,11 @@ API keys are resolved in this order:
   2. provider_credentials row     (set via the dashboard's API Keys tab)
   3. process env var              (PROVIDER_API_KEY_ENV mapping)
   4. provider-specific fallback   (e.g. Ollama uses "ollama" as a dummy key)
+
+Gotcha: this always builds `langchain_openai.ChatOpenAI`, so it only works
+against OpenAI-compatible endpoints. The analysis graph itself uses the full
+per-provider factory in `tradingagents/llm_clients` instead; this helper is
+for the web layer's lightweight one-shot calls only.
 """
 from __future__ import annotations
 

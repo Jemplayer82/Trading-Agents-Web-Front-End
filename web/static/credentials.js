@@ -1,4 +1,19 @@
-// TradingAgents Web — API Keys tab
+// TradingAgents Web — "Settings" tab (data-pane "keys"): app settings + toggles,
+// custom env vars, LLM provider API keys, and user management.
+//
+// Endpoints (all via web/nginx.conf's generic /api/ block -> the api app):
+//   GET /api/credentials, PUT/DELETE /api/credentials/{provider}   LLM keys
+//   GET /api/settings,    PUT/DELETE /api/settings/{key}           app settings
+//   GET/POST /api/auth/users, POST /api/auth/password              users
+//
+// Secrets are write-only from the browser's point of view: the server returns
+// only masked previews ("masked"), never the stored value. Source tags show
+// where the effective value comes from (DB override vs .env fallback).
+//
+// Unlike app.js / portfolio.js / spy.js this file is wrapped in an IIFE, so
+// nothing leaks into the shared global scope except window.reloadCredentials
+// (a console convenience hook). Everything reloads on every "tab-shown" with
+// detail "keys" to keep masked previews fresh.
 
 (function () {
   // $ comes from utils.js (loaded first).
@@ -201,6 +216,8 @@
       const tdNew = document.createElement("td");
       let inp = null;
       if (s.type === "toggle") {
+        // Toggles aren't actually masked — `masked` carries the literal stored
+        // value ("0"/"1"/"false"/...). Unset means On by default.
         const cur = s.has_value ? String(s.masked).trim().toLowerCase() : "1";
         const on = !["0", "false", "no", ""].includes(cur);
         const lbl = document.createElement("label");

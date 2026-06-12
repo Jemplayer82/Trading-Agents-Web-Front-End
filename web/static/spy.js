@@ -1,9 +1,37 @@
-// S&P 500 Scanner tab — scan history, progress, quick results table, portfolio view
-// $, escapeHtml, fmtTs, renderMarkdown and apiFetch live in utils.js (loaded first).
+// TradingAgents Web — "S&P 500" tab (paper-portfolio scanner).
+//
+// Scan history sidebar, dual progress bars (quick scan + deep dive), quick-results
+// table, the $100k PAPER portfolio table, and the allocator report. Every dollar
+// figure on this tab is simulated — no live brokerage data here (live holdings
+// belong to the Portfolio tab, portfolio.js).
+//
+// Endpoints — all start with /api/spy, so web/nginx.conf's `location /api/spy`
+// string-prefix match routes them to the PORTFOLIO app (web/portfolio_main.py);
+// the prefix also catches /api/spy-scans and /api/spy-account, not just /api/spy:
+//   POST   /api/spy-scan                          start a scan (idempotent per day)
+//   GET    /api/spy-scans[?limit=N]               history list (DESC by id)
+//   GET    /api/spy-scans/{id}                    scan detail (polled while running)
+//   DELETE /api/spy-scans/{id}                    delete scan + results
+//   POST   /api/spy-scans/{id}/cancel             request cancel (deep dives finish)
+//   POST   /api/spy-scans/{id}/refresh-prices     re-price the paper portfolio
+//
+// Globals consumed from utils.js (loaded first): $, escapeHtml, fmtTs,
+// renderMarkdown, apiFetch, progressBar. Everything here is top-level in the
+// shared classic-script scope; refreshSpyPrices in particular MUST stay global
+// because renderSpyScan emits inline onclick="refreshSpyPrices(...)" handlers.
+//
+// Poll lifecycle: while the loaded scan's status starts with "running",
+// loadSpyScan polls the detail endpoint every 5s and re-renders. The timer is
+// cleared on completion / fetch failure, when another scan is loaded
+// (loadSpyScan calls stopSpyPoll first), on delete, and when the user leaves the
+// tab ("tab-shown" listener at the bottom).
 
 let activeSpyId = null;
 let spyPollTimer = null;
 
+// ===== Formatting helpers =====
+
+// Percent return of `val` against `basis` (defaults to the $100k starting pot).
 function fmtReturn(val, basis) {
   basis = basis || 100000;
   const ret = ((val - basis) / basis) * 100;
@@ -28,6 +56,8 @@ function sharesOf(a) {
   return ep > 0 ? Math.floor((a.dollar_amount || 0) / ep) : 0;
 }
 
+// ===== Scan history sidebar =====
+
 async function loadSpyHistory() {
   const ul = $("spy-history");
   if (!ul) return;
@@ -47,6 +77,8 @@ async function loadSpyHistory() {
       const running = s.status && s.status.startsWith("running");
       const stopping = running && s.cancel_requested;
       const statusLabel = stopping ? "STOPPING" : (s.status || "—").toUpperCase();
+      // Status badge reuses the signal colors: completed=green (BUY class),
+      // running/stopping=yellow (HOLD), failed/cancelled=red (SELL).
       const statusClass = stopping ? "HOLD"
         : (s.status === "completed" ? "BUY" : (running ? "HOLD" : "SELL"));
       const basis = s.starting_value || 100000;
@@ -92,6 +124,8 @@ async function loadSpyHistory() {
   }
 }
 
+// ===== Scan detail: load + 5s poll =====
+
 async function loadSpyScan(id) {
   activeSpyId = id;
   document.querySelectorAll("#spy-history li").forEach((li) =>
@@ -109,6 +143,9 @@ async function loadSpyScan(id) {
   updateStopButton(scan);
 
   if (scan.status && scan.status.startsWith("running")) {
+    // Note: unlike portfolio.js there is no active-id guard inside this callback.
+    // Switching scans clears the interval (stopSpyPoll above), but a response
+    // already in flight can still paint the previous scan once after a switch.
     spyPollTimer = setInterval(async () => {
       const pr = await fetch("/api/spy-scans/" + id);
       if (!pr.ok) { stopSpyPoll(); return; }
@@ -123,6 +160,8 @@ async function loadSpyScan(id) {
 function stopSpyPoll() {
   if (spyPollTimer) { clearInterval(spyPollTimer); spyPollTimer = null; }
 }
+
+// ===== Stop / delete =====
 
 // Show the Stop button only while the active scan is running.
 function updateStopButton(scan) {
@@ -174,6 +213,12 @@ async function deleteSpyScan(id) {
     alert("Delete failed: " + e);
   }
 }
+
+// ===== Scan detail render =====
+// renderSpyScan builds the whole #spy-main column as one HTML string (banner,
+// progress, performance, portfolio table, quick results, allocator report) and
+// assigns it in a single innerHTML write. Server/LLM text goes through
+// escapeHtml; the allocator report (LLM markdown) only through renderMarkdown.
 
 function renderSpyScanError(msg) {
   const main = $("spy-main");
@@ -445,6 +490,8 @@ function renderSpyScan(scan) {
   });
 }
 
+// ===== Start scan / refresh prices =====
+
 async function triggerSpyScan() {
   const btn = $("btn-spy-scan");
   const status = $("spy-scan-status");
@@ -473,6 +520,10 @@ async function refreshSpyPrices(scanId) {
   loadSpyScan(scanId);
 }
 
+// ===== Tab lifecycle + wiring =====
+
+// "tab-shown" is dispatched by portfolio.js setupTabs() on every tab switch.
+// Leaving this tab stops the 5s poll so a running scan isn't polled invisibly.
 document.addEventListener("tab-shown", (ev) => {
   if (ev.detail === "spy") {
     loadSpyHistory();
