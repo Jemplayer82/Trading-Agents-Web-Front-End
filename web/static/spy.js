@@ -120,7 +120,7 @@ async function loadSpyHistory() {
       ul.appendChild(footer);
     }
   } catch (e) {
-    ul.innerHTML = "<li class=\"empty\" style=\"color:var(--accent-red);\">" + e + "</li>";
+    ul.innerHTML = "<li class=\"empty\" style=\"color:var(--accent-red);\">" + escapeHtml(e) + "</li>";
   }
 }
 

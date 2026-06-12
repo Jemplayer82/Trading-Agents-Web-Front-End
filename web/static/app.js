@@ -178,7 +178,7 @@ async function loadProviders() {
   providersData.analysts.forEach((a) => {
     const id = `an-${a.key}`;
     const lbl = document.createElement("label");
-    lbl.innerHTML = `<input type="checkbox" id="${id}" value="${a.key}" /> ${a.label}`;
+    lbl.innerHTML = `<input type="checkbox" id="${escapeHtml(id)}" value="${escapeHtml(a.key)}" /> ${escapeHtml(a.label)}`;
     analystBox.appendChild(lbl);
   });
 }
