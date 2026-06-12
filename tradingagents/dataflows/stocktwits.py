@@ -16,9 +16,8 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Optional
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
@@ -35,12 +34,15 @@ def fetch_stocktwits_messages(ticker: str, limit: int = 30, timeout: float = 10.
     symbol has no messages, or the response shape is unexpected — the
     caller never has to special-case None or exceptions.
     """
-    url = _API.format(ticker=ticker.upper())
+    # quote() escapes spaces and other path-unsafe chars (e.g. the embedded
+    # spaces in OCC option symbols like "SPY   260612C00763000") so urlopen
+    # doesn't raise ValueError("URL can't contain control characters").
+    url = _API.format(ticker=quote(ticker.upper(), safe=""))
     req = Request(url, headers={"User-Agent": _UA, "Accept": "application/json"})
     try:
         with urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read())
-    except (HTTPError, URLError, json.JSONDecodeError, TimeoutError) as exc:
+    except (HTTPError, URLError, json.JSONDecodeError, TimeoutError, ValueError) as exc:
         logger.warning("StockTwits fetch failed for %s: %s", ticker, exc)
         return f"<stocktwits unavailable: {type(exc).__name__}>"
 
