@@ -29,6 +29,25 @@ function fmtExpDate(iso) {
   return `${m}/${d}/${y.slice(2)}`;
 }
 
+// The "[ Progress ]" panel shown while a portfolio scan runs. Built in one place so
+// the initial render and the 5s poll re-render can't drift apart. `progressBar` is
+// the shared bar primitive from utils.js.
+function portfolioProgressHtml(scan) {
+  const sc = scan.scanned_count || 0;
+  const st = scan.scan_total || 0;
+  const tickerLine = scan.current_ticker
+    ? `<div style="margin-bottom:4px;">Analyzing: <strong>${escapeHtml(scan.current_ticker)}</strong></div>`
+    : "";
+  return (
+    '<div class="panel">' +
+      '<div class="panel-title">[ Progress ]</div>' +
+      `<div style="margin-bottom:4px;">${sc}/${st} tickers analyzed</div>` +
+      tickerLine +
+      progressBar(sc, st) +
+    "</div>"
+  );
+}
+
 async function loadPortfolioHistory() {
   const ul = $("portfolio-history");
   if (!ul) return;
@@ -99,20 +118,7 @@ async function loadPortfolioScan(id) {
 
     // Progress panel — shown only while scan is running; disappears once it stops.
     if (scan.status === "running") {
-      const sc = scan.scanned_count || 0;
-      const st = scan.scan_total || 0;
-      const pct = st > 0 ? Math.round((sc / st) * 100) : 0;
-      const tickerLine = scan.current_ticker
-        ? `<div style="margin-bottom:4px;">Analyzing: <strong>${escapeHtml(scan.current_ticker)}</strong></div>`
-        : "";
-      brief.innerHTML = (
-        '<div class="panel">' +
-          '<div class="panel-title">[ Progress ]</div>' +
-          `<div style="margin-bottom:4px;">${sc}/${st} tickers analyzed</div>` +
-          tickerLine +
-          `<div class="scan-progress"><div class="scan-progress-bar" style="width:${pct}%"></div></div>` +
-        "</div>"
-      );
+      brief.innerHTML = portfolioProgressHtml(scan);
 
       // Poll every 5s while the scan is running; stop when status leaves "running".
       portfolioPollTimer = setInterval(async () => {
@@ -127,20 +133,7 @@ async function loadPortfolioScan(id) {
           return;
         }
         // Re-render just the progress panel in-place (avoid full re-render cost).
-        const sc2 = updated.scanned_count || 0;
-        const st2 = updated.scan_total || 0;
-        const pct2 = st2 > 0 ? Math.round((sc2 / st2) * 100) : 0;
-        const tkLine2 = updated.current_ticker
-          ? `<div style="margin-bottom:4px;">Analyzing: <strong>${escapeHtml(updated.current_ticker)}</strong></div>`
-          : "";
-        brief.innerHTML = (
-          '<div class="panel">' +
-            '<div class="panel-title">[ Progress ]</div>' +
-            `<div style="margin-bottom:4px;">${sc2}/${st2} tickers analyzed</div>` +
-            tkLine2 +
-            `<div class="scan-progress"><div class="scan-progress-bar" style="width:${pct2}%"></div></div>` +
-          "</div>"
-        );
+        brief.innerHTML = portfolioProgressHtml(updated);
       }, 5000);
     } else if (scan.aggregator_report) {
       brief.innerHTML = renderMarkdown(scan.aggregator_report);
@@ -330,7 +323,7 @@ function renderHoldingCard(pos) {
     ? '<span class="badge OPTION">OPTION</span>'
     : (sig ? `<span class="badge ${sig}">${sig}</span>` : "");
   const subtext = isOption
-    ? `${fmtShares(pos.shares)} contracts${pos.strike != null && pos.put_call ? ` · $${pos.strike} ${pos.put_call}` : ""} · ${gainSign}${fmtAbs$(pos.gain_dollars)}`
+    ? `${fmtShares(pos.shares)} contracts${pos.strike != null && pos.put_call ? ` · $${escapeHtml(pos.strike)} ${escapeHtml(pos.put_call)}` : ""} · ${gainSign}${fmtAbs$(pos.gain_dollars)}`
     : `${fmtShares(pos.shares)} shares · ${gainSign}${fmtAbs$(pos.gain_dollars)}`;
 
   card.innerHTML = `

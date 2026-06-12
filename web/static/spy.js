@@ -222,18 +222,18 @@ function renderSpyScan(scan) {
     const qc = scan.quick_count || 0;
     const dt = scan.deep_total || 50;
     const dc = scan.deep_count || 0;
-    const qpct = qt > 0 ? Math.round((qc / qt) * 100) : 0;
-    const dpct = dt > 0 ? Math.round((dc / dt) * 100) : 0;
+    // Two bars (quick + deep) in one panel; progressBar() (utils.js) is the shared
+    // bar primitive also used by the portfolio scan.
     progressHtml = (
       "<div class=\"panel\">" +
         "<div class=\"panel-title\">[ Progress ]</div>" +
         "<div style=\"margin-bottom:8px;\">" +
           "<div style=\"margin-bottom:4px;\">Quick scan: " + qc + "/" + qt + "</div>" +
-          "<div class=\"scan-progress\"><div class=\"scan-progress-bar\" style=\"width:" + qpct + "%\"></div></div>" +
+          progressBar(qc, qt) +
         "</div>" +
         "<div>" +
           "<div style=\"margin-bottom:4px;\">Deep dive: " + dc + "/" + dt + "</div>" +
-          "<div class=\"scan-progress\"><div class=\"scan-progress-bar\" style=\"width:" + dpct + "%\"></div></div>" +
+          progressBar(dc, dt) +
         "</div>" +
       "</div>"
     );
