@@ -14,9 +14,8 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
 
-from .bus import get_publisher
+from .bus import BusPublisher, get_publisher
 
 # ---------------------------------------------------------------------------
 # Module constants
@@ -91,7 +90,7 @@ _agents_registered: bool = False
 class RunMirror:
     """Tap the streaming analysis pipeline and publish agent interactions to the bus."""
 
-    def __init__(self, publisher: Any, channel_id: str, analysis_id: int) -> None:
+    def __init__(self, publisher: BusPublisher, channel_id: str, analysis_id: int) -> None:
         self._pub = publisher
         self._channel_id = channel_id
         self._analysis_id = analysis_id
