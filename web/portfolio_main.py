@@ -19,7 +19,7 @@ from tradingagents.constants import SIGNALS
 from tradingagents.dataflows import schwab_mcp
 from tradingagents.default_config import DEFAULT_CONFIG
 
-from . import auth_app, db, spy_allocator, spy_scanner
+from . import auth_app, brokerages, db, spy_allocator, spy_scanner
 from . import credentials as creds
 from ._logging import configure_logging
 from .portfolio import aggregator
@@ -151,27 +151,20 @@ def _run_scan_thread(scan_id: int, trade_date: str) -> None:
 
 
 def _mcp_positions() -> list[dict[str, Any]]:
-    """Real holdings via the Schwab MCP, aggregated by symbol across all accounts.
+    """Real holdings across all enabled brokerages, aggregated by symbol.
 
-    Returns [{symbol, quantity, market_value, asset_type}], or [] if the MCP is
-    unreachable / its Schwab session is unauthed.
+    Returns [{symbol, quantity, market_value, asset_type}], or [] if no
+    brokerage is reachable / authed.
     """
-    accounts = schwab_mcp.get_accounts(fields="positions")
-    if not accounts:
-        return []
     agg: dict[str, dict[str, Any]] = {}
-    for a in accounts:
-        sec = a.get("securitiesAccount") or a
-        for p in sec.get("positions") or []:
-            instr = p.get("instrument") or {}
-            sym = instr.get("symbol")
-            qty = float(p.get("longQuantity") or 0) - float(p.get("shortQuantity") or 0)
-            if not sym or qty == 0:
-                continue
-            e = agg.setdefault(sym, {"symbol": sym, "quantity": 0.0, "market_value": 0.0,
-                                     "asset_type": instr.get("assetType") or "EQUITY"})
-            e["quantity"] += qty
-            e["market_value"] += float(p.get("marketValue") or 0)
+    for acct in brokerages.fetch_all_accounts():
+        for pos in acct["positions"]:
+            e = agg.setdefault(pos["symbol"], {
+                "symbol": pos["symbol"], "quantity": 0.0, "market_value": 0.0,
+                "asset_type": pos["asset_type"],
+            })
+            e["quantity"] += pos["shares"]
+            e["market_value"] += pos["market_value"]
     return list(agg.values())
 
 
@@ -183,6 +176,16 @@ def _run_scan(scan_id: int, trade_date: str) -> None:
     if not pos_dicts:
         raise RuntimeError("Schwab MCP returned no positions — re-authorize at https://schwab.txferguson.net/auth")
     log.info("[scan %s] %d positions from Schwab MCP", scan_id, len(pos_dicts))
+
+    # Options are excluded from AI analysis — they still display on the
+    # holdings cards (with expiration), but the agents only scan equities.
+    skipped = [p for p in pos_dicts if p["asset_type"] == "OPTION"]
+    pos_dicts = [p for p in pos_dicts if p["asset_type"] != "OPTION"]
+    if skipped:
+        log.info("[scan %s] skipping %d option position(s): %s",
+                 scan_id, len(skipped), [p["symbol"] for p in skipped])
+    if not pos_dicts:
+        raise RuntimeError("Only option positions held — nothing to scan (options are excluded from AI analysis).")
 
     # Step 2: load user preferences for LLM / analyst config
     prefs = db.get_preferences() or {}
@@ -196,10 +199,6 @@ def _run_scan(scan_id: int, trade_date: str) -> None:
 
     # Step 3: for each position, create an analyses row + run the graph
     per_ticker_payload: list[dict[str, Any]] = []
-    pos_dicts = [
-        {"symbol": p["symbol"], "quantity": p["quantity"], "market_value": p["market_value"], "asset_type": p["asset_type"]}
-        for p in pos_dicts
-    ]
 
     from tradingagents.graph.portfolio_graph import run_single_ticker
 
@@ -398,106 +397,55 @@ def _parse_schwab_account(accounts: list[dict[str, Any]] | None) -> dict[str, An
 def _accounts_split() -> list[dict[str, Any]]:
     """Per-account live holdings for the live-holdings UI panel.
 
-    Returns [all_entry, ...per_account]. Each entry has:
-      id, label, positions, total_value, cash, cost_basis, gain_dollars, gain_percent.
-    Each position has: symbol, shares, average_price, current_price, market_value,
-      cost_basis, gain_dollars, gain_percent, asset_type, and optionally signal/analysis_id
-      merged from the latest completed portfolio scan.
+    Returns [all_entry, ...per_account] from all enabled brokerage providers
+    (see web.brokerages). Each entry has: id, brokerage, label, positions,
+    total_value, cash, cost_basis, gain_dollars, gain_percent. Each position
+    is the normalized brokerages shape (incl. option fields), optionally with
+    signal/analysis_id merged from the latest completed portfolio scan.
     """
-    accounts = schwab_mcp.get_accounts(fields="positions")
-    if not accounts:
+    per_account = brokerages.fetch_all_accounts()
+    if not per_account:
         return []
 
-    per_account: list[dict[str, Any]] = []
+    # Build "All Accounts" aggregate across every brokerage, keyed by symbol.
     all_syms: dict[str, dict[str, Any]] = {}
-
-    for a in accounts:
-        sec = a.get("securitiesAccount") or a
-        account_num = str(sec.get("accountNumber") or "")
-        acct_type = (sec.get("type") or "Account").title()
-        label = f"{acct_type} ••{account_num[-4:]}" if len(account_num) >= 4 else acct_type
-
-        positions: list[dict[str, Any]] = []
-        acct_cost = 0.0
-        acct_mv = 0.0
-
-        for p in sec.get("positions") or []:
-            instr = p.get("instrument") or {}
-            sym = instr.get("symbol")
-            shares = float(p.get("longQuantity") or 0) - float(p.get("shortQuantity") or 0)
-            if not sym or shares == 0:
-                continue
-            avg_price = float(p.get("averagePrice") or 0)
-            mv = float(p.get("marketValue") or 0)
-            cp = mv / shares if shares else 0.0
-            cost = avg_price * shares
-            gain = mv - cost
-            gain_pct = (gain / cost * 100) if cost else 0.0
-
-            pos: dict[str, Any] = {
-                "symbol": sym,
-                "shares": round(shares, 4),
-                "average_price": round(avg_price, 4),
-                "current_price": round(cp, 4),
-                "market_value": round(mv, 2),
-                "cost_basis": round(cost, 2),
-                "gain_dollars": round(gain, 2),
-                "gain_percent": round(gain_pct, 4),
-                "asset_type": instr.get("assetType") or "EQUITY",
-            }
-            positions.append(pos)
-            acct_cost += cost
-            acct_mv += mv
-
-            ae = all_syms.setdefault(sym, {
-                "symbol": sym, "shares": 0.0, "market_value": 0.0, "_cost": 0.0,
-                "asset_type": instr.get("assetType") or "EQUITY",
+    for acct in per_account:
+        for pos in acct["positions"]:
+            ae = all_syms.setdefault(pos["symbol"], {
+                "symbol": pos["symbol"],
+                "display_symbol": pos["display_symbol"],
+                "shares": 0.0, "market_value": 0.0, "_cost": 0.0,
+                "asset_type": pos["asset_type"],
+                "multiplier": pos["multiplier"],
+                "expiration_date": pos["expiration_date"],
+                "strike": pos["strike"],
+                "put_call": pos["put_call"],
+                "underlying": pos["underlying"],
             })
-            ae["shares"] += shares
-            ae["market_value"] += mv
-            ae["_cost"] += cost
+            ae["shares"] += pos["shares"]
+            ae["market_value"] += pos["market_value"]
+            ae["_cost"] += pos["cost_basis"]
 
-        positions.sort(key=lambda x: -x["market_value"])
-        cur = sec.get("currentBalances") or {}
-        init = sec.get("initialBalances") or {}
-        tv = (cur.get("liquidationValue") or cur.get("equity")
-              or init.get("liquidationValue") or init.get("accountValue") or acct_mv)
-        c = cur.get("cashBalance") or init.get("cashBalance") or init.get("totalCash") or 0
-        acct_gain = acct_mv - acct_cost
-        acct_gain_pct = (acct_gain / acct_cost * 100) if acct_cost else 0.0
-
-        per_account.append({
-            "id": account_num,
-            "label": label,
-            "positions": positions,
-            "total_value": round(float(tv), 2),
-            "cash": round(float(c), 2),
-            "cost_basis": round(acct_cost, 2),
-            "gain_dollars": round(acct_gain, 2),
-            "gain_percent": round(acct_gain_pct, 4),
-        })
-
-    # Build "All Accounts" aggregate
     all_positions: list[dict[str, Any]] = []
     all_cost = 0.0
     all_mv = 0.0
     for ae in all_syms.values():
         sh = ae["shares"]
+        mult = ae["multiplier"]
         mv = ae["market_value"]
-        cost = ae["_cost"]
+        cost = ae.pop("_cost")
         gain = mv - cost
         gain_pct = (gain / cost * 100) if cost else 0.0
-        all_positions.append({
-            "symbol": ae["symbol"],
+        ae.update({
             "shares": round(sh, 4),
-            "average_price": round(cost / sh, 4) if sh else 0.0,
-            "current_price": round(mv / sh, 4) if sh else 0.0,
+            "average_price": round(cost / (sh * mult), 4) if sh else 0.0,
+            "current_price": round(mv / (sh * mult), 4) if sh else 0.0,
             "market_value": round(mv, 2),
             "cost_basis": round(cost, 2),
             "gain_dollars": round(gain, 2),
             "gain_percent": round(gain_pct, 4),
-            "asset_type": ae["asset_type"],
         })
+        all_positions.append(ae)
         all_cost += cost
         all_mv += mv
     all_positions.sort(key=lambda x: -x["market_value"])
@@ -537,12 +485,12 @@ def _accounts_split() -> list[dict[str, Any]]:
 @app.get("/api/accounts")
 def accounts() -> dict[str, Any]:
     """Live per-account holdings with cost basis, gain/loss, and optional AI scan signals."""
-    if not schwab_mcp.schwab_enabled():
+    if not brokerages.any_enabled():
         return {"enabled": False, "connected": False}
     try:
         data = _accounts_split()
     except Exception:
-        log.exception("[accounts] Schwab MCP read failed")
+        log.exception("[accounts] brokerage read failed")
         data = None
     if not data:
         return {"enabled": True, "connected": False}

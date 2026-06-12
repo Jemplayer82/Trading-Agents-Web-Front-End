@@ -264,6 +264,7 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .badge.SELL, .h-sig.SELL   { background: var(--sell); color: #2e0a0a; }
 .badge.HOLD, .h-sig.HOLD   { background: var(--hold); color: #2e2204; }
 .badge.UNKNOWN, .h-sig.UNKNOWN { background: var(--panel-border); color: var(--dim); }
+.badge.OPTION { background: transparent; border: 1px solid var(--panel-border); color: var(--dim); }
 
 .decision { display: flex; align-items: center; gap: 12px; }
 .decision .badge { font-size: 16px; padding: 6px 14px; border-radius: 3px; font-weight: 700; }
@@ -364,6 +365,7 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 }
 .pcard-row { display: flex; justify-content: space-between; align-items: center; }
 .pcard-tk { font-weight: 700; color: var(--accent-cyan); letter-spacing: 0.5px; }
+.pcard-exp { font-size: 10px; color: var(--dim); margin-left: 6px; letter-spacing: 0; }
 .pcard-meta { color: var(--dim); font-size: 11px; margin-top: 2px; }
 .pcard-err  { color: var(--accent-red); font-size: 11px; margin-top: 6px; }
 .pcard-link { margin-top: 8px; font-size: 12px; }
