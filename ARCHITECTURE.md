@@ -45,12 +45,21 @@ All share one Docker image and one data volume (`tradingagents_data`, mounted at
 | `tradingagents-api` | `uvicorn web.main:app` | Dashboard backend: single-ticker analysis (WebSocket-streamed), auth/login, settings/credentials, Schwab OAuth. |
 | `tradingagents-portfolio` | `uvicorn web.portfolio_main:app` | **Separate** app so long portfolio/S&P scans don't block the ad-hoc api. Runs each holding through the core, then the aggregator. |
 | `tradingagents-scheduler` | `python -m web.scheduler` | APScheduler daemon: nightly portfolio scan (22:00 ET), 5am newsletter, hourly Schwab-token health check. Calls the api/portfolio apps over the Docker network. |
-| `tradingagents-web` | nginx image | Serves `web/static/` and reverse-proxies `/api/*` to the api/portfolio apps. Holds no secrets. |
+| `tradingagents-web` | nginx image | Serves `web/static/` and reverse-proxies the `/api/*` routes (see route priority below). Holds no secrets. |
+| `switchboard` | `ghcr.io/jemplayer82/mcp-switchboard` | **Optional, internal-only** message bus for the live Agent Bus feed (see below). No host port; reachable only on the Docker network at `switchboard:3107`. Own SQLite volume (`switchboard_data`). |
 | `tradingagents` | (CLI) | The Typer TUI, attached to interactively. |
 
+**nginx route priority** (`web/nginx.conf`): more-specific `/api/` prefixes are matched
+**before** the generic block, and they route to different apps. `/api/spy`,
+`/api/accounts`, and `/api/portfolio` go to the **portfolio** app; everything else under
+`/api/` (including the `/api/analyze` and `/api/bus` WebSockets) goes to the **api** app.
+Order matters — if the generic `/api/` block came first it would swallow `/api/accounts`
+and the account tabs would 404.
+
 Inter-service HTTP calls (scheduler → api/portfolio) authenticate with an
-`X-Internal-Token` header (`INTERNAL_API_TOKEN`); browser requests use a session cookie.
-The auth gate lives in `web/auth_app.py` and is fail-closed.
+`X-Internal-Token` header (`INTERNAL_API_TOKEN`, compared with `hmac.compare_digest`);
+browser requests use a session cookie. The auth gate lives in `web/auth_app.py` and is
+fail-closed.
 
 ## The agent graph (`tradingagents/graph/`, `tradingagents/agents/`)
 
@@ -72,6 +81,39 @@ State shapes are in `agents/utils/agent_states.py`; long runs can checkpoint/res
 The data tools the analysts call are re-exported from
 `agents/utils/agent_utils.py` (see its `__all__`) and bound onto the graph in
 `trading_graph.py`.
+
+## Agent Bus (live inter-agent feed)
+
+An **optional read-only mirror** of the pipeline's agent handoffs, streamed to the
+dashboard so a viewer can watch the agents "talk" in real time. LangGraph stays the
+orchestrator — the bus only observes.
+
+- `web/bus.py` — a small sync MCP client (`SwitchboardClient`) plus `BusPublisher`, a
+  daemon-thread publisher with a bounded queue + circuit breaker that **never raises into
+  the analysis**. `get_publisher()` returns `None` unless `SWITCHBOARD_URL` +
+  `SWITCHBOARD_MCP_TOKEN` are set, so missing config = byte-identical old behavior.
+- `web/bus_mirror.py` — `RunMirror` taps the `web/runner.py` stream (analyst results,
+  bull/bear + risk debate turns, handoffs, final decision) and publishes them to a
+  per-run `analysis-{id}` channel. `BUS_MIRROR=off` disables it.
+- `web/main.py` `/api/bus` WebSocket — per-connection poll over cursor-free history reads:
+  resolve channel → backfill → forward `bus_message` frames. Auth is identical to
+  `/api/analyze` (session cookie or `X-Internal-Token` via `hmac.compare_digest`); bus
+  outages send a status frame but never close the socket.
+- `web/static/bus.js` — the `[ Agent Bus ]` panel (per-agent colored badges, auto-scroll,
+  reconnect). Message text is inserted via `textContent`, never `innerHTML`.
+
+Everything lives in the `web/` layer; the graph code is untouched. The bus runs in the
+optional `switchboard` container.
+
+## Brokerage data (`web/brokerages.py`)
+
+A small provider abstraction so holdings aren't hardcoded to one broker. `BrokerageProvider`
+(ABC) → `SchwabProvider` today; `fetch_all_accounts()` returns normalized account/position
+dicts (account ids namespaced `schwab:<num>`), and `parse_occ_symbol()` decodes OCC option
+symbols (expiration/strike/put-call/underlying). `web/portfolio_main.py` (`_accounts_split`,
+`_mcp_positions`) consumes this; adding a broker = one new provider class. The legacy
+`_parse_schwab_account` helper (Schwab-only, `/api/spy-account` drift views) is deprecated
+in favor of it.
 
 ## LLM providers (`tradingagents/llm_clients/`)
 
@@ -104,14 +146,24 @@ factory and resolves credentials in the order: explicit config → DB credential
 
 Vanilla JS, no build step — classic `<script>` tags loaded in order from `index.html`.
 `utils.js` loads first and holds the shared globals (`$`, `escapeHtml`, `fmtTs`,
-`renderMarkdown`, `apiFetch`); the per-tab modules (`app.js`, `portfolio.js`, `spy.js`,
-`credentials.js`, `auth.js`) build on them. Because these are non-module scripts sharing
-one global scope, **load order matters and names must not be redeclared** (see the header
-comment in `utils.js`).
+`renderMarkdown`, `apiFetch`, `progressBar`); the per-tab modules (`app.js`,
+`portfolio.js` — analysis + Schwab account tabs + option cards, `spy.js`, `bus.js` — the
+Agent Bus panel, `credentials.js`, `auth.js`) build on them. Because these are non-module
+scripts sharing one global scope, **load order matters and names must not be redeclared**
+(see the header comment in `utils.js`).
+
+**Long-scan progress.** Both the portfolio scan and the S&P 500 scan write progress
+counters to their DB rows (`portfolio_scans.scanned_count/scan_total/current_ticker`;
+`spy_scans.quick_count/quick_total/deep_count/deep_total`). The frontend polls the scan's
+detail endpoint every 5s while `status` is running and renders a `[ Progress ]` bar via the
+shared `progressBar(count, total)` helper, then stops the timer when the scan finishes.
 
 ## Tests & tooling
 
 - `pytest` (config in `pyproject.toml`); `tests/conftest.py` mocks provider API keys so
   the suite runs offline. Markers: `unit`, `integration`, `smoke`.
-- `ruff` is the linter/formatter (config in `pyproject.toml`); adoption is incremental —
-  `ruff check .` shows the remaining backlog.
+- `ruff` is the linter/formatter (config in `pyproject.toml`). The maintained surface —
+  `web/` and `tests/` — is kept clean and CI-gated; the upstream `cli/` and
+  `tradingagents/` trees predate the linter and are `extend-exclude`d (run
+  `ruff check tradingagents` to see that deferred backlog). `.github/workflows/ci.yml`
+  runs `ruff check .` + `pytest` on every PR.

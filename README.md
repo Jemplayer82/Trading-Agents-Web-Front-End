@@ -97,14 +97,17 @@ This fork extends the original **[TradingAgents](https://github.com/TauricResear
 
 **🖥️ Web Dashboard**
 - Terminal-aesthetic UI with dark theme and color-coded signals
-- 4-tab interface: Run Analysis, Schwab Connection, Portfolio Scan, S&P 500 Scanner
+- 5-tab interface: Run Analysis, Schwab Connection, Portfolio Scan, S&P 500 Scanner, Credentials
 - Real-time WebSocket streaming of agent progress and reports
 - Interactive technical charts with RSI, MACD, Bollinger Bands overlays
 - Per-analysis Q&A thread (multi-turn conversation without re-running)
 - Live Agent Bus feed — watch analysts, researchers, and the risk team communicate in real time as the pipeline runs
+- Live progress bars for the long-running portfolio and S&P 500 scans
 
 **📊 Portfolio & Market Automation**
 - Schwab OAuth integration for brokerage account scanning
+- Per-account tabs (plus an "All Accounts" view) over a brokerage-provider abstraction
+- Holdings cards with current price / cost basis / current worth / % change; option positions show expiration, strike, and put/call (and are skipped by AI scans)
 - Selectable data source — Schwab MCP server or built-in collection method (toggle in settings)
 - Automated nightly portfolio analysis of all holdings
 - S&P 500 weekly scanner (all ~500 tickers, deep-dive top 50, $100k portfolio builder)
