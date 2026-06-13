@@ -9,7 +9,7 @@ it sends from this process directly, which is why _apply_db_config() must
 pull SMTP/notifier settings from the shared DB first.
 
 Schedule (all times SCHEDULER_TIMEZONE, default America/New_York):
-    22:00 daily          portfolio scan      POST /api/portfolio-scan
+    22:00 Mon-Fri        portfolio scan      POST /api/portfolio-scan
     05:00 daily          morning newsletter  (in-process)
     hourly               Schwab token health GET /api/auth/schwab/status
     Sat 00:00            S&P 500 scan        POST /api/spy-scan
@@ -199,7 +199,10 @@ def main() -> None:
     sched = BlockingScheduler(timezone=TIMEZONE)
     sched.add_job(
         job_nightly_scan,
-        CronTrigger(hour=22, minute=0, timezone=TIMEZONE),
+        # Mon-Fri only: holdings don't move over the closed-market weekend, so a
+        # Sat/Sun scan would burn a full multi-agent LLM pass on stale Friday-close
+        # data. Mirrors the spy_price_refresh weekday restriction below.
+        CronTrigger(day_of_week="mon-fri", hour=22, minute=0, timezone=TIMEZONE),
         id="nightly_scan",
         replace_existing=True,
     )
