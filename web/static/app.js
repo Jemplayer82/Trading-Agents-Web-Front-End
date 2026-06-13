@@ -73,6 +73,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("btn-run").addEventListener("click", startRun);
   $("btn-stop").addEventListener("click", stopRun);
   $("f-provider").addEventListener("change", onProviderChange);
+  // Open the native calendar on a click/focus anywhere in the date field, not
+  // just on its icon. showPicker() is recent — guard it for older browsers.
+  const fdate = $("f-date");
+  if (fdate) {
+    const openPicker = () => { try { fdate.showPicker?.(); } catch (e) { /* not supported / not allowed */ } };
+    fdate.addEventListener("focus", openPicker);
+    fdate.addEventListener("click", openPicker);
+  }
+  setupTickerSearch();
+  setupScanActivity();
   const rt = $("reasoning-toggle");
   if (rt) {
     rt.addEventListener("click", () => {
@@ -352,6 +362,179 @@ async function deleteHistoryItem(id, ticker) {
   await loadHistory();
 }
 
+// ===== Ticker type-ahead (company name -> symbol) =====
+// Additive to the plain text input: the box still accepts a raw symbol typed
+// directly (startRun reads #f-ticker.value unchanged). Backed by
+// GET /api/ticker-search (Yahoo Finance search, web/main.py).
+
+let tickerSearchTimer = null;
+let tickerSuggestItems = [];
+let tickerSuggestActive = -1;
+
+function setupTickerSearch() {
+  const input = $("f-ticker");
+  const box = $("ticker-suggest");
+  if (!input || !box) return;
+
+  input.addEventListener("input", () => {
+    const q = input.value.trim();
+    tickerSuggestActive = -1;
+    if (tickerSearchTimer) clearTimeout(tickerSearchTimer);
+    if (q.length < 2) { hideTickerSuggest(); return; }
+    // Debounce so we issue one request after typing settles, not per keystroke.
+    tickerSearchTimer = setTimeout(() => runTickerSearch(q), 250);
+  });
+
+  input.addEventListener("keydown", (e) => {
+    if (box.hidden || !tickerSuggestItems.length) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      tickerSuggestActive = Math.min(tickerSuggestActive + 1, tickerSuggestItems.length - 1);
+      renderTickerActive();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      tickerSuggestActive = Math.max(tickerSuggestActive - 1, 0);
+      renderTickerActive();
+    } else if (e.key === "Enter" && tickerSuggestActive >= 0) {
+      e.preventDefault();
+      pickTicker(tickerSuggestItems[tickerSuggestActive].symbol);
+    } else if (e.key === "Escape") {
+      hideTickerSuggest();
+    }
+  });
+
+  // Close on blur, but delay so a row click lands before the box disappears.
+  input.addEventListener("blur", () => setTimeout(hideTickerSuggest, 150));
+}
+
+async function runTickerSearch(q) {
+  let items = [];
+  try {
+    const resp = await fetch(`/api/ticker-search?q=${encodeURIComponent(q)}`);
+    if (resp.ok) items = await resp.json();
+  } catch (e) { /* fail soft — a raw symbol typed directly still runs */ }
+  // Stale guard: drop the response if the box moved on while we waited.
+  if ($("f-ticker").value.trim() !== q) return;
+  tickerSuggestItems = Array.isArray(items) ? items : [];
+  renderTickerSuggest();
+}
+
+function renderTickerSuggest() {
+  const box = $("ticker-suggest");
+  if (!box) return;
+  if (!tickerSuggestItems.length) { hideTickerSuggest(); return; }
+  box.innerHTML = tickerSuggestItems
+    .map((it, i) =>
+      `<li class="ticker-suggest-item${i === tickerSuggestActive ? " active" : ""}" data-symbol="${escapeHtml(it.symbol)}">` +
+        `<span class="ts-sym">${escapeHtml(it.symbol)}</span>` +
+        `<span class="ts-name">${escapeHtml(it.name || "")}</span>` +
+        `<span class="ts-exch">${escapeHtml(it.exchange || "")}</span>` +
+      "</li>")
+    .join("");
+  // mousedown (not click) so the pick fires before the input's blur handler.
+  box.querySelectorAll("li").forEach((li) => {
+    li.addEventListener("mousedown", (e) => { e.preventDefault(); pickTicker(li.dataset.symbol); });
+  });
+  box.hidden = false;
+}
+
+function renderTickerActive() {
+  const box = $("ticker-suggest");
+  if (!box) return;
+  box.querySelectorAll("li").forEach((li, i) => li.classList.toggle("active", i === tickerSuggestActive));
+}
+
+function pickTicker(symbol) {
+  if (symbol) $("f-ticker").value = symbol;
+  hideTickerSuggest();
+}
+
+function hideTickerSuggest() {
+  const box = $("ticker-suggest");
+  if (box) { box.hidden = true; box.innerHTML = ""; }
+  tickerSuggestItems = [];
+  tickerSuggestActive = -1;
+}
+
+// ===== Running-scan activity banner =====
+// Surfaces a live progress bar on the Run Analysis tab whenever a Portfolio or
+// S&P 500 scan is running in the portfolio container. The list endpoints live on
+// the portfolio app but nginx routes /api/portfolio* and /api/spy* there, so a
+// plain fetch from here reaches them. Polls every 5s while this tab is visible.
+
+function setupScanActivity() {
+  const box = $("scan-activity");
+  if (!box) return;
+  // Delegated "view →" link: jump to the owning tab (box is rewritten each poll).
+  box.addEventListener("click", (e) => {
+    const link = e.target.closest(".scan-activity-link");
+    if (!link) return;
+    e.preventDefault();
+    document.querySelector(`.main-tab[data-tab="${link.dataset.tab}"]`)?.click();
+  });
+  pollScanActivity();  // analyze is the default tab — poll right away
+  document.addEventListener("tab-shown", (ev) => {
+    if (ev.detail === "analyze") pollScanActivity();
+  });
+  setInterval(() => {
+    const pane = document.querySelector('[data-pane="analyze"]');
+    if (pane && !pane.hidden) pollScanActivity();
+  }, 5000);
+}
+
+async function pollScanActivity() {
+  const box = $("scan-activity");
+  if (!box) return;
+  const blocks = [];
+  try {
+    const scans = await (await fetch("/api/portfolio-scans")).json();
+    const run = Array.isArray(scans) ? scans.find((s) => s.status === "running") : null;
+    if (run) blocks.push(scanActivityPortfolio(run));
+  } catch (e) { /* portfolio app unreachable / not authed — skip */ }
+  try {
+    const scans = await (await fetch("/api/spy-scans")).json();
+    const run = Array.isArray(scans) ? scans.find((s) => s.status && s.status.startsWith("running")) : null;
+    if (run) blocks.push(scanActivitySpy(run));
+  } catch (e) { /* skip */ }
+
+  if (!blocks.length) { box.hidden = true; box.innerHTML = ""; return; }
+  box.innerHTML = '<div class="panel-title">[ Scan in progress ]</div>' + blocks.join("");
+  box.hidden = false;
+}
+
+function scanActivityPortfolio(scan) {
+  const sc = scan.scanned_count || 0;
+  const st = scan.scan_total || 0;
+  const ticker = scan.current_ticker ? ` · <strong>${escapeHtml(scan.current_ticker)}</strong>` : "";
+  return (
+    '<div class="scan-activity-row">' +
+      '<div class="scan-activity-head">' +
+        '<a href="#" class="scan-activity-link" data-tab="portfolio">Portfolio scan →</a> ' +
+        `<span class="dim">${sc}/${st} analyzed${ticker}</span>` +
+      "</div>" +
+      progressBar(sc, st) +
+    "</div>"
+  );
+}
+
+function scanActivitySpy(scan) {
+  const qt = scan.quick_total || 500;
+  const qc = scan.quick_count || 0;
+  const dt = scan.deep_total || 50;
+  const dc = scan.deep_count || 0;
+  return (
+    '<div class="scan-activity-row">' +
+      '<div class="scan-activity-head">' +
+        '<a href="#" class="scan-activity-link" data-tab="spy">S&amp;P 500 scan →</a>' +
+      "</div>" +
+      `<div class="scan-activity-sub">Quick ${qc}/${qt}</div>` +
+      progressBar(qc, qt) +
+      `<div class="scan-activity-sub">Deep ${dc}/${dt}</div>` +
+      progressBar(dc, dt) +
+    "</div>"
+  );
+}
+
 // ===== Run lifecycle (WebSocket) =====
 
 function collectParams() {
@@ -378,7 +561,6 @@ function startRun() {
 
   currentReports = {};
   lastRunMeta = { ticker: params.ticker, trade_date: params.trade_date };
-  $("messages").innerHTML = "";
   $("progress").innerHTML = "";
   resetReasoning();
   hideChartAndQa();
@@ -446,7 +628,8 @@ function handleFrame(frame) {
       renderActiveReport();
       break;
     case "messages":
-      frame.messages.forEach(appendMessage);
+      // The tool-calls feed was removed; tool calls now surface only inside the
+      // Live Reasoning timeline via appendReasoningMessage.
       frame.messages.forEach(appendReasoningMessage);
       break;
     case "token":
@@ -473,8 +656,8 @@ function handleFrame(frame) {
       }
       break;
     case "error":
+      // The status line is the error surface now that the messages feed is gone.
       setStatus("error", frame.message);
-      appendMessage({ type: "error", text: frame.message });
       break;
   }
 }
@@ -565,25 +748,6 @@ function debateToMarkdown(state) {
   const judge = (state.judge_decision || "").trim();
   if (judge) parts.push("---\n\n### Judge Decision\n\n" + judge);
   return parts.filter(Boolean).join("\n\n").trim();
-}
-
-// ===== Messages / tool-calls feed =====
-
-// Newest-first (insertBefore firstChild), capped at 200 entries to bound the DOM.
-function appendMessage(m) {
-  const ul = $("messages");
-  const li = document.createElement("li");
-  const who = (m.type || "msg").toLowerCase();
-  const text = m.text || "";
-  let toolArgs = "";
-  if (m.tool_calls && m.tool_calls.length) {
-    toolArgs = `<span class="tool-args">→ ${m.tool_calls
-      .map((t) => `${t.name}(${typeof t.args === "string" ? t.args : JSON.stringify(t.args || {})})`)
-      .join(", ")}</span>`;
-  }
-  li.innerHTML = `<span class="who ${who}">${who}</span><span class="what">${escapeHtml(text)}${toolArgs}</span>`;
-  ul.insertBefore(li, ul.firstChild);
-  while (ul.children.length > 200) ul.removeChild(ul.lastChild);
 }
 
 // ===== Live reasoning timeline (train of thought) =====

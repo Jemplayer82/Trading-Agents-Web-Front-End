@@ -370,6 +370,52 @@ def ticker_info(ticker: str) -> dict[str, Any]:
     return {"ticker": t, "name": name, "website": final_website}
 
 
+@app.get("/api/ticker-search")
+def ticker_search(q: str = "") -> list[dict[str, str]]:
+    """Resolve a company name (or partial symbol) to candidate tickers.
+
+    Powers the ticker-box type-ahead: the user types "Apple" (or "AAP") and
+    picks AAPL. Backed by Yahoo Finance's public search endpoint (no API key).
+    Returns up to ~8 {symbol, name, exchange} candidates, equities/ETFs only,
+    each symbol passing safe_ticker_component(). Fails soft to [] so a Yahoo
+    hiccup never breaks the box — the user can always type a raw symbol instead.
+    """
+    query = (q or "").strip()
+    if len(query) < 2:
+        return []
+    try:
+        import httpx  # lazy — already a dependency (web/bus.py, schwab_mcp)
+
+        from tradingagents.dataflows.utils import safe_ticker_component
+        resp = httpx.get(
+            "https://query2.finance.yahoo.com/v1/finance/search",
+            params={"q": query, "quotesCount": 8, "newsCount": 0},
+            headers={"User-Agent": "Mozilla/5.0"},  # Yahoo 429s requests with no UA
+            timeout=4.0,
+        )
+        resp.raise_for_status()
+        quotes = resp.json().get("quotes") or []
+    except Exception:
+        log.warning("ticker-search failed for %r", query)
+        return []
+
+    out: list[dict[str, str]] = []
+    for item in quotes:
+        if item.get("quoteType") not in ("EQUITY", "ETF"):
+            continue
+        sym = (item.get("symbol") or "").strip().upper()
+        if not sym:
+            continue
+        try:
+            safe_ticker_component(sym)  # same charset gate as a typed ticker
+        except ValueError:
+            continue
+        name = item.get("longname") or item.get("shortname") or sym
+        exch = item.get("exchDisp") or item.get("exchange") or ""
+        out.append({"symbol": sym, "name": str(name), "exchange": str(exch)})
+    return out
+
+
 # ---------- Q&A and chart for saved analyses ----------
 
 @app.post("/api/analyses/{analysis_id}/ask")

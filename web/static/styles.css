@@ -8,6 +8,11 @@
 
 /* ----- Theme tokens ----- */
 :root {
+  /* Tell the browser to render native controls (date-picker calendar + its
+     icon, selects, scrollbars) for a dark UI. Without this the <input type=date>
+     calendar icon is a dark glyph on the near-black field background and looks
+     invisible/broken. */
+  color-scheme: dark;
   --bg: #0b0f14;
   --panel: #0f141b;
   --panel-border: #1d2a36;
@@ -165,6 +170,50 @@ a { color: var(--accent-cyan); }
 .form-grid select:focus {
   border-color: var(--accent-cyan);
 }
+
+/* Make the date input's native calendar icon clearly visible + clickable on the
+   dark field (color-scheme:dark already light-tints it; this brightens further). */
+.form-grid input[type="date"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  opacity: 0.85;
+  filter: invert(0.9);
+}
+.form-grid input[type="date"]::-webkit-calendar-picker-indicator:hover { opacity: 1; }
+
+/* ----- Ticker type-ahead (company name -> symbol) ----- */
+.ticker-field { position: relative; width: 100%; }
+.ticker-field input { width: 100%; }
+.ticker-suggest {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--accent-cyan);
+  border-radius: 3px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+}
+.ticker-suggest-item {
+  display: grid;
+  grid-template-columns: 64px 1fr auto;
+  gap: 8px;
+  align-items: baseline;
+  padding: 5px 8px;
+  cursor: pointer;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.ticker-suggest-item:hover,
+.ticker-suggest-item.active { background: #14202b; }
+.ticker-suggest-item .ts-sym { color: var(--accent-cyan); font-weight: 600; font-size: 12px; }
+.ticker-suggest-item .ts-name { color: var(--text); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ticker-suggest-item .ts-exch { color: var(--dim); font-size: 10px; }
 
 fieldset.analysts {
   border: 1px dashed var(--panel-border);
@@ -340,29 +389,6 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .report-body th, .report-body td { border: 1px solid var(--panel-border); padding: 4px 8px; text-align: left; }
 .report-body strong { color: var(--accent-magenta); }
 
-/* ----- Messages / tool-calls feed ----- */
-.messages {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  max-height: 280px;
-  overflow-y: auto;
-  font-size: 12px;
-}
-.messages li {
-  display: grid;
-  grid-template-columns: 110px 1fr;
-  gap: 10px;
-  padding: 3px 0;
-  border-bottom: 1px dashed #0f1820;
-}
-.messages .who { color: var(--accent-magenta); text-transform: lowercase; }
-.messages .who.tool { color: var(--accent-yellow); }
-.messages .who.ai   { color: var(--accent-cyan); }
-.messages .who.human { color: var(--accent-green); }
-.messages .what { color: var(--text); white-space: pre-wrap; word-break: break-word; }
-.messages .tool-args { color: var(--dim); font-size: 11px; display: block; }
-
 .dim { color: var(--dim); }
 
 /* ----- Schwab tab ----- */
@@ -469,6 +495,15 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
   border-radius: 3px;
   transition: width 0.3s ease;
 }
+
+/* ----- Running-scan banner on the Run Analysis tab (#scan-activity) ----- */
+#scan-activity { border-color: var(--accent-cyan); }
+.scan-activity-row { margin-top: 8px; }
+.scan-activity-row + .scan-activity-row { margin-top: 12px; }
+.scan-activity-head { font-size: 13px; margin-bottom: 4px; }
+.scan-activity-sub { font-size: 11px; color: var(--dim); margin: 6px 0 3px; }
+.scan-activity-link { color: var(--accent-cyan); text-decoration: none; }
+.scan-activity-link:hover { text-decoration: underline; }
 
 .spy-progress-grid { display: flex; flex-direction: column; gap: 8px; }
 .spy-progress-row {

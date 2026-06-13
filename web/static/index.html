@@ -83,11 +83,22 @@
     </aside>
 
     <section class="main">
+      <!-- Surfaces a live progress bar here whenever a Portfolio or S&P 500
+           scan is running in the other tabs / portfolio container. Populated +
+           shown/hidden by pollScanActivity() in app.js. -->
+      <div class="panel" id="scan-activity" hidden></div>
+
       <div class="panel form-panel">
         <div class="panel-title">[ Run Analysis ]</div>
         <div class="form-grid">
           <label>Ticker
-            <input id="f-ticker" type="text" placeholder="SPY, AAPL, 7203.T" autocomplete="off" />
+            <!-- .ticker-field is the positioning context for the type-ahead
+                 dropdown; #ticker-suggest is filled by app.js as you type a
+                 symbol OR a company name. -->
+            <div class="ticker-field">
+              <input id="f-ticker" type="text" placeholder="SPY, AAPL, or a company name" autocomplete="off" />
+              <ul id="ticker-suggest" class="ticker-suggest" hidden></ul>
+            </div>
           </label>
           <label>Date
             <input id="f-date" type="date" />
@@ -153,6 +164,13 @@
 
       <div class="panel reports-panel">
         <div class="panel-title">[ Reports ]</div>
+        <div class="tabs" id="report-tabs"></div>
+        <div class="report-body" id="report-body">
+          <p class="dim">Reports stream in here as agents complete.</p>
+        </div>
+        <!-- Live Reasoning lives at the BOTTOM of the Reports panel: the token
+             stream is supplementary detail under the finished reports. Hidden
+             until the first token frame arrives (app.js). -->
         <div class="reasoning-wrap" id="reasoning-wrap" hidden>
           <div class="reasoning-head">
             <span class="reasoning-title">Live Reasoning</span>
@@ -160,15 +178,6 @@
           </div>
           <div class="reasoning-log" id="reasoning"></div>
         </div>
-        <div class="tabs" id="report-tabs"></div>
-        <div class="report-body" id="report-body">
-          <p class="dim">Reports stream in here as agents complete.</p>
-        </div>
-      </div>
-
-      <div class="panel messages-panel">
-        <div class="panel-title">[ Messages / Tool Calls ]</div>
-        <ul id="messages" class="messages"></ul>
       </div>
 
       <div class="panel bus-panel">
