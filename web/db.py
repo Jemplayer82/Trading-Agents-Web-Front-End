@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS portfolio_scans (
     scanned_count INTEGER DEFAULT 0,
     scan_total INTEGER DEFAULT 0,
     current_ticker TEXT,
+    updated_at TEXT,
     signal_counts TEXT,
     aggregator_report TEXT,
     full_payload TEXT,
@@ -149,7 +150,8 @@ CREATE TABLE IF NOT EXISTS spy_scans (
     cancel_requested INTEGER DEFAULT 0,
     previous_scan_id INTEGER,
     starting_value REAL,
-    error TEXT
+    error TEXT,
+    updated_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_spy_scans_created_at ON spy_scans (created_at DESC);
@@ -214,6 +216,9 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("portfolio_scans", "scanned_count", "INTEGER DEFAULT 0"),
     ("portfolio_scans", "scan_total", "INTEGER DEFAULT 0"),
     ("portfolio_scans", "current_ticker", "TEXT"),
+    # Liveness stamp for the stuck-run reaper (touched on every progress write).
+    ("portfolio_scans", "updated_at", "TEXT"),
+    ("spy_scans", "updated_at", "TEXT"),
 ]
 
 
@@ -777,8 +782,10 @@ def update_spy_scan(scan_id: int, **kwargs: Any) -> None:
     bad = set(kwargs) - _SPY_SCAN_UPDATABLE
     if bad:
         raise ValueError(f"update_spy_scan: disallowed column(s) {sorted(bad)}")
-    sets = ", ".join(k + " = ?" for k in kwargs)
-    vals = list(kwargs.values()) + [scan_id]
+    # Always stamp updated_at (a fixed literal column, not caller-controlled) so the
+    # stuck-run reaper can tell a live-but-slow scan from a crashed one.
+    sets = ", ".join(k + " = ?" for k in kwargs) + ", updated_at = ?"
+    vals = list(kwargs.values()) + [datetime.utcnow().isoformat(timespec="seconds") + "Z", scan_id]
     with connect() as conn:
         conn.execute("UPDATE spy_scans SET " + sets + " WHERE id = ?", vals)
 
@@ -795,8 +802,10 @@ def update_portfolio_scan(scan_id: int, **kwargs: Any) -> None:
     bad = set(kwargs) - _PORTFOLIO_SCAN_UPDATABLE
     if bad:
         raise ValueError(f"update_portfolio_scan: disallowed column(s) {sorted(bad)}")
-    sets = ", ".join(k + " = ?" for k in kwargs)
-    vals = list(kwargs.values()) + [scan_id]
+    # Always stamp updated_at (a fixed literal column, not caller-controlled) so the
+    # stuck-run reaper can tell a live-but-slow scan from a crashed one.
+    sets = ", ".join(k + " = ?" for k in kwargs) + ", updated_at = ?"
+    vals = list(kwargs.values()) + [datetime.utcnow().isoformat(timespec="seconds") + "Z", scan_id]
     with connect() as conn:
         conn.execute("UPDATE portfolio_scans SET " + sets + " WHERE id = ?", vals)
 
@@ -842,6 +851,42 @@ def fail_spy_scan(scan_id: int, error: str) -> None:
             "UPDATE spy_scans SET status = 'failed', error = ? WHERE id = ?",
             (error, scan_id),
         )
+
+
+# ---------- stuck-run reaper queries (see web/scheduler.py:job_reap_stuck_runs) ----------
+# A run whose worker crashed/OOM'd never transitions out of its running state, so
+# these find rows still "running" that have gone quiet past a cutoff. Scans use
+# COALESCE(updated_at, created_at) so rows predating the updated_at column — and
+# scans that died before their first progress write — fall back to created_at.
+
+def find_stuck_portfolio_scans(stall_before_iso: str) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT id, trade_date FROM portfolio_scans "
+            "WHERE status = 'running' AND COALESCE(updated_at, created_at) < ?",
+            (stall_before_iso,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def find_stuck_spy_scans(stall_before_iso: str) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT id, trade_date FROM spy_scans "
+            "WHERE status NOT IN ('completed', 'cancelled', 'failed') "
+            "AND COALESCE(updated_at, created_at) < ?",
+            (stall_before_iso,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def find_stuck_analyses(created_before_iso: str) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT id, ticker FROM analyses WHERE status = 'running' AND created_at < ?",
+            (created_before_iso,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def update_spy_scan_prices(

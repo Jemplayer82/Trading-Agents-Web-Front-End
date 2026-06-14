@@ -24,7 +24,7 @@ import argparse
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
@@ -32,8 +32,8 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from . import alerts, db, newsletter
 from . import credentials as creds
-from . import db, newsletter
 from ._logging import configure_logging
 from .notifier import default_notifier
 
@@ -44,6 +44,11 @@ API_URL = (os.environ.get("TRADINGAGENTS_API_URL") or "http://tradingagents-api:
 PORTFOLIO_URL = (os.environ.get("TRADINGAGENTS_PORTFOLIO_URL") or "http://tradingagents-portfolio:8000").rstrip("/")
 TIMEZONE = os.environ.get("SCHEDULER_TIMEZONE", "America/New_York")
 DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "https://trading.txferguson.net").rstrip("/")
+
+# Stuck-run reaper thresholds (minutes). A run quiet past its limit is treated as a
+# crashed worker. Generous defaults so a slow-but-healthy deep dive isn't reaped.
+STUCK_SCAN_STALL_MIN = int(os.environ.get("STUCK_SCAN_STALL_MIN", "60"))
+STUCK_ANALYSIS_MIN = int(os.environ.get("STUCK_ANALYSIS_MIN", "90"))
 
 
 def _internal_headers() -> dict[str, str]:
@@ -173,6 +178,43 @@ def job_spy_price_refresh() -> None:
         log.exception("[spy_price_refresh] failed: %s", exc)
 
 
+def _cutoff_iso(minutes: int) -> str:
+    """UTC cutoff `minutes` in the past, in the same ISO+Z format rows are stored."""
+    return (datetime.utcnow() - timedelta(minutes=minutes)).isoformat(timespec="seconds") + "Z"
+
+
+def job_reap_stuck_runs() -> None:
+    """Fail + alert runs whose worker died silently (status stuck in 'running').
+
+    A crash/OOM never runs the in-process `except` that would mark a run failed, so
+    these rows would otherwise sit 'running' forever — invisible to the user and
+    showing as phantom progress on the Analysis tab. We detect them by a stalled
+    liveness stamp (scans) or age (analyses), close them out, and notify once each.
+    """
+    scan_cutoff = _cutoff_iso(STUCK_SCAN_STALL_MIN)
+    analysis_cutoff = _cutoff_iso(STUCK_ANALYSIS_MIN)
+    scan_err = f"abandoned — no progress for {STUCK_SCAN_STALL_MIN} min, worker likely crashed"
+    analysis_err = f"abandoned — still running after {STUCK_ANALYSIS_MIN} min, worker likely crashed"
+    try:
+        for scan in db.find_stuck_portfolio_scans(scan_cutoff):
+            db.fail_portfolio_scan(scan["id"], scan_err)
+            log.warning("[reaper] failed stuck portfolio scan %s", scan["id"])
+            alerts.notify_run_failed(kind="Portfolio scan", run_id=scan["id"],
+                                     label=scan.get("trade_date") or "", error=scan_err)
+        for scan in db.find_stuck_spy_scans(scan_cutoff):
+            db.fail_spy_scan(scan["id"], scan_err)
+            log.warning("[reaper] failed stuck SPY scan %s", scan["id"])
+            alerts.notify_run_failed(kind="S&P 500 scan", run_id=scan["id"],
+                                     label=scan.get("trade_date") or "", error=scan_err)
+        for a in db.find_stuck_analyses(analysis_cutoff):
+            db.fail_analysis(a["id"], analysis_err)
+            log.warning("[reaper] failed stuck analysis %s", a["id"])
+            alerts.notify_run_failed(kind="Analysis", run_id=a["id"],
+                                     label=a.get("ticker") or "", error=analysis_err)
+    except Exception:
+        log.exception("[reaper] sweep failed")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--send-newsletter-now", action="store_true", help="Run newsletter once and exit")
@@ -230,12 +272,23 @@ def main() -> None:
         id="spy_price_refresh",
         replace_existing=True,
     )
+    sched.add_job(
+        job_reap_stuck_runs,
+        IntervalTrigger(minutes=20),
+        id="reap_stuck_runs",
+        replace_existing=True,
+    )
+    # Sweep once at startup too — a crash that happened while the scheduler was
+    # down should be caught and alerted immediately, not up to 20 min later.
+    job_reap_stuck_runs()
     log.info("Scheduler starting (tz=%s)", TIMEZONE)
     log.info(" - nightly_scan       cron 22:00 Mon-Fri %s", TIMEZONE)
     log.info(" - morning_newsletter cron 05:00 %s", TIMEZONE)
     log.info(" - token_health       every 1h")
     log.info(" - spy_scan           cron Sat 00:00 %s", TIMEZONE)
     log.info(" - spy_price_refresh  cron hourly Mon-Fri 09:00-16:00 %s", TIMEZONE)
+    log.info(" - reap_stuck_runs    every 20m (stall>%dm scans / %dm analyses)",
+             STUCK_SCAN_STALL_MIN, STUCK_ANALYSIS_MIN)
     try:
         sched.start()
     except (KeyboardInterrupt, SystemExit):
