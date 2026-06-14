@@ -91,13 +91,13 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
 
 ### Q&A & Technical Chart
 
-![Multi-turn Q&A and interactive technical chart](assets/screenshot-qa-chart.gif)
+<img src="assets/screenshot-qa-chart.gif" alt="Multi-turn Q&A and interactive technical chart" width="100%">
 
 *Ask follow-up questions grounded in the saved analysis (e.g. "what would a good entrance point be?") and explore the interactive price chart with indicators.*
 
 ### Agent Team
 
-![Full agent team completed with strategy report](assets/screenshot-run-analysis.gif)
+<img src="assets/screenshot-run-analysis.gif" alt="Full agent team completed with strategy report" width="100%">
 
 *Every analyst, the Research and Risk teams, the Trader, and the Portfolio Manager complete in sequence, producing a final decision and a scaling / risk-management strategy.*
 
