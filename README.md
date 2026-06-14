@@ -8,7 +8,10 @@
 
 A self-hosted web dashboard for running multi-agent LLM trading analysis: real-time agent streaming, Schwab portfolio scanning, S&P 500 automation, and container-based deployment.
 
+*A [Fathom Works](https://github.com/jemplayer82) project.*
+
 <div align="center">
+  <img alt="License: AGPL-3.0" src="https://img.shields.io/badge/License-AGPL--3.0-6cd5e6?labelColor=030d14">
   <img alt="Python 3.12" src="https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-Uvicorn-009688?logo=fastapi&logoColor=white">
   <img alt="Docker" src="https://img.shields.io/badge/Docker-ghcr.io-2496ED?logo=docker&logoColor=white">
@@ -522,22 +525,23 @@ ports:
 
 ---
 
-## Contributing
+## 🤝 Contributing
 
-Pull requests welcome! Areas of focus:
+Pull requests welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the CLA, PR guidelines, and code style requirements (`ruff` + `pytest` must pass).
 
-- UI/UX improvements (mobile responsiveness, keyboard shortcuts)
-- New LLM providers
-- Chart enhancements (more indicators, drawing tools)
-- Performance optimizations
-- Testing (unit, integration, E2E)
-- Documentation
+Areas of focus: UI/UX improvements, new LLM providers, chart enhancements, performance optimizations, testing, documentation.
 
 ---
 
-## License & Credits
+## ⚖️ License
 
-This project builds on the open-source [TradingAgents](https://github.com/TauricResearch/TradingAgents) multi-agent framework. The repository is **self-contained** — the framework is vendored in and extended here with a full web dashboard, Schwab integration, and container-based deployment, so it builds and runs independently. See the repository for license details.
+Licensed under the [GNU Affero General Public License v3.0](./LICENSE) (AGPL-3.0) — © 2026 Fathom Works.
+
+Commercial licensing available. For inquiries: [github.com/jemplayer82](https://github.com/jemplayer82)
+
+## 🙏 Credits
+
+This project builds on the open-source [TradingAgents](https://github.com/TauricResearch/TradingAgents) multi-agent framework, vendored and extended here with a full web dashboard, Schwab integration, and container-based deployment.
 
 Powered by FastAPI, LangChain, yfinance, stockstats, lightweight-charts, APScheduler, and many other open-source libraries.
 
