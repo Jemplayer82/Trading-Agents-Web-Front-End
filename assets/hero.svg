@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 460" font-family="-apple-system,BlinkMacSystemFont,&#39;Segoe UI&#39;,Helvetica,Arial,sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b0f17"></stop>
+      <stop offset="0.55" stop-color="#0d1117"></stop>
+      <stop offset="1" stop-color="#0a1a12"></stop>
+    </linearGradient>
+    <linearGradient id="green" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2ea043"></stop>
+      <stop offset="1" stop-color="#56d364"></stop>
+    </linearGradient>
+    <radialGradient id="glowG" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#3fb950" stop-opacity="0.45"></stop>
+      <stop offset="1" stop-color="#3fb950" stop-opacity="0"></stop>
+    </radialGradient>
+    <radialGradient id="glowTitle" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#1f6feb" stop-opacity="0.25"></stop>
+      <stop offset="1" stop-color="#1f6feb" stop-opacity="0"></stop>
+    </radialGradient>
+    <pattern id="grid" width="34" height="34" patternUnits="userSpaceOnUse">
+      <path d="M34 0H0V34" fill="none" stroke="#ffffff" stroke-opacity="0.035" stroke-width="1"></path>
+    </pattern>
+    <linearGradient id="trend" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#56d364" stop-opacity="0.15"></stop>
+      <stop offset="1" stop-color="#56d364" stop-opacity="0.9"></stop>
+    </linearGradient>
+    <marker id="a" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0 1 L7 4 L0 7" fill="none" stroke="#3fb950" stroke-width="1.6"></path>
+    </marker>
+  </defs>
+
+  
+  <rect width="1200" height="460" rx="16" fill="url(#bg)"></rect>
+  <rect width="1200" height="460" rx="16" fill="url(#grid)"></rect>
+  <ellipse cx="1000" cy="150" rx="360" ry="240" fill="url(#glowG)"></ellipse>
+  <ellipse cx="180" cy="170" rx="340" ry="220" fill="url(#glowTitle)"></ellipse>
+  <rect x="1" y="1" width="1198" height="458" rx="16" fill="none" stroke="#30363d" stroke-opacity="0.7"></rect>
+
+  
+  <text x="70" y="98" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="15" letter-spacing="3" fill="#3fb950" font-weight="600">// MULTI-AGENT TRADING INTELLIGENCE</text>
+
+  <text x="68" y="170" font-size="62" font-weight="800" fill="#e6edf3" letter-spacing="-1">TradingAgents</text>
+
+  <text x="70" y="212" font-size="20" fill="#adbac7">A team of specialized LLM agents debate every ticker —</text>
+  <text x="70" y="240" font-size="20" fill="#adbac7">streamed live, scored, and <tspan fill="#56d364" font-weight="600">deployed on your own hardware.</tspan></text>
+
+  
+  <g>
+    <rect x="716" y="60" width="418" height="232" rx="12" fill="#0e141b" stroke="#30363d"></rect>
+    
+    <circle cx="740" cy="84" r="5" fill="#f85149"></circle>
+    <circle cx="758" cy="84" r="5" fill="#d29922"></circle>
+    <circle cx="776" cy="84" r="5" fill="#3fb950"></circle>
+    <text x="800" y="89" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="12" fill="#6e7781">live analysis · AAPL</text>
+    
+    <rect x="1028" y="73" width="86" height="26" rx="13" fill="url(#green)"></rect>
+    <text x="1071" y="91" text-anchor="middle" font-size="14" font-weight="800" fill="#04130a">BUY ▲</text>
+
+    <line x1="730" y1="120" x2="1120" y2="120" stroke="#21262d" stroke-width="1"></line>
+    <line x1="730" y1="170" x2="1120" y2="170" stroke="#21262d" stroke-width="1"></line>
+    <line x1="730" y1="220" x2="1120" y2="220" stroke="#21262d" stroke-width="1"></line>
+
+    
+    <g stroke-width="2">
+      <line x1="748" y1="212" x2="748" y2="244" stroke="#3fb950"></line><rect x="743" y="220" width="10" height="16" fill="#3fb950"></rect>
+      <line x1="775" y1="196" x2="775" y2="234" stroke="#3fb950"></line><rect x="770" y="206" width="10" height="22" fill="#3fb950"></rect>
+      <line x1="802" y1="198" x2="802" y2="240" stroke="#f85149"></line><rect x="797" y="210" width="10" height="22" fill="#f85149"></rect>
+      <line x1="829" y1="190" x2="829" y2="228" stroke="#3fb950"></line><rect x="824" y="200" width="10" height="20" fill="#3fb950"></rect>
+      <line x1="856" y1="172" x2="856" y2="214" stroke="#3fb950"></line><rect x="851" y="182" width="10" height="26" fill="#3fb950"></rect>
+      <line x1="883" y1="174" x2="883" y2="208" stroke="#f85149"></line><rect x="878" y="184" width="10" height="16" fill="#f85149"></rect>
+      <line x1="910" y1="158" x2="910" y2="200" stroke="#3fb950"></line><rect x="905" y="166" width="10" height="26" fill="#3fb950"></rect>
+      <line x1="937" y1="164" x2="937" y2="206" stroke="#f85149"></line><rect x="932" y="174" width="10" height="24" fill="#f85149"></rect>
+      <line x1="964" y1="148" x2="964" y2="192" stroke="#3fb950"></line><rect x="959" y="156" width="10" height="24" fill="#3fb950"></rect>
+      <line x1="991" y1="130" x2="991" y2="172" stroke="#3fb950"></line><rect x="986" y="140" width="10" height="24" fill="#3fb950"></rect>
+      <line x1="1018" y1="136" x2="1018" y2="168" stroke="#f85149"></line><rect x="1013" y="144" width="10" height="16" fill="#f85149"></rect>
+      <line x1="1045" y1="118" x2="1045" y2="156" stroke="#3fb950"></line><rect x="1040" y="126" width="10" height="24" fill="#3fb950"></rect>
+      <line x1="1072" y1="102" x2="1072" y2="140" stroke="#3fb950"></line><rect x="1067" y="110" width="10" height="24" fill="#3fb950"></rect>
+      <line x1="1099" y1="94" x2="1099" y2="128" stroke="#3fb950"></line><rect x="1094" y="102" width="10" height="20" fill="#3fb950"></rect>
+    </g>
+    
+    <polyline points="748,228 775,216 802,221 829,210 856,193 883,192 910,178 937,186 964,168 991,150 1018,152 1045,136 1072,120 1099,110" fill="none" stroke="url(#trend)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"></polyline>
+    <circle cx="1099" cy="110" r="4" fill="#56d364"></circle>
+  </g>
+
+  
+  <g font-size="15" font-weight="600">
+    <g stroke="#3fb950" stroke-width="2" fill="none" opacity="0.8">
+      <path d="M232 360 H266" marker-end="url(#a)"></path>
+      <path d="M452 360 H486" marker-end="url(#a)"></path>
+      <path d="M628 360 H662" marker-end="url(#a)"></path>
+      <path d="M838 360 H872" marker-end="url(#a)"></path>
+    </g>
+
+    <rect x="70" y="338" width="162" height="44" rx="10" fill="#161b22" stroke="#30363d"></rect>
+    <circle cx="90" cy="360" r="5" fill="#1f6feb"></circle>
+    <text x="106" y="365" fill="#e6edf3">Analysts</text>
+
+    <rect x="266" y="338" width="186" height="44" rx="10" fill="#161b22" stroke="#30363d"></rect>
+    <circle cx="286" cy="360" r="5" fill="#8957e5"></circle>
+    <text x="302" y="365" fill="#e6edf3">Researchers</text>
+
+    <rect x="486" y="338" width="142" height="44" rx="10" fill="#161b22" stroke="#30363d"></rect>
+    <circle cx="506" cy="360" r="5" fill="#d29922"></circle>
+    <text x="522" y="365" fill="#e6edf3">Trader</text>
+
+    <rect x="662" y="338" width="176" height="44" rx="10" fill="#161b22" stroke="#30363d"></rect>
+    <circle cx="682" cy="360" r="5" fill="#f85149"></circle>
+    <text x="698" y="365" fill="#e6edf3">Risk &amp; PM</text>
+
+    <rect x="872" y="336" width="258" height="48" rx="11" fill="#0f2a18" stroke="#2ea043"></rect>
+    <text x="892" y="358" fill="#8b949e" font-size="12" font-weight="600">DECISION</text>
+    <text x="892" y="375" fill="#56d364" font-size="16" font-weight="800">BUY · SELL · HOLD</text>
+    <text x="1070" y="368" font-size="22">📈</text>
+  </g>
+</svg>
