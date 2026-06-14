@@ -28,13 +28,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      # Use uv (with the committed uv.lock) so CI reproduces the local env
+      # exactly. pytest lives in the [dependency-groups] dev group, which the
+      # old `pip install -e ".[web]"` never installed — so the test job had
+      # silently failed on every run ("No module named pytest").
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install dependencies
-        run: pip install -e ".[web]"
+          enable-cache: true
 
       - name: Run tests
-        run: python -m pytest -q
+        run: uv run --extra web python -m pytest -q
