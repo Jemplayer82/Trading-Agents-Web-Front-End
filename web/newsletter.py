@@ -80,8 +80,14 @@ def render(scan: dict[str, Any]) -> tuple[str, str]:
     return subject, html
 
 
-def send(scan: dict[str, Any]) -> str | None:
-    """Render and SMTP-send. Returns Message-ID on success, None on failure."""
+def _smtp_send(subject: str, html: str) -> str | None:
+    """Build an HTML email and SMTP-send it. Returns Message-ID, or None.
+
+    Shared transport for both the newsletter (send) and failure alerts
+    (send_alert). Reads SMTP_*/NEWSLETTER_* at call time so dashboard-saved
+    config applies without a restart; returns None (logged) when SMTP isn't
+    configured, so callers degrade gracefully on deployments with no mail set up.
+    """
     host = os.environ.get("SMTP_HOST")
     port = int(os.environ.get("SMTP_PORT", "587"))
     user = os.environ.get("SMTP_USER")
@@ -91,7 +97,6 @@ def send(scan: dict[str, Any]) -> str | None:
     if not (host and user and password and recipient):
         log.warning("[newsletter] SMTP env missing — skipping send")
         return None
-    subject, html = render(scan)
     msg = EmailMessage()
     msg["From"] = sender
     msg["To"] = recipient
@@ -120,3 +125,18 @@ def send(scan: dict[str, Any]) -> str | None:
         # SMTP_PASS can't leak into the logs. Keep it that way.
         log.exception("[newsletter] SMTP send failed: %s", exc)
         return None
+
+
+def send(scan: dict[str, Any]) -> str | None:
+    """Render the overnight scan and SMTP-send it. Returns Message-ID or None."""
+    subject, html = render(scan)
+    return _smtp_send(subject, html)
+
+
+def send_alert(subject: str, html: str) -> str | None:
+    """SMTP-send a pre-rendered alert email (e.g. a run-failure notice).
+
+    Thin wrapper over the shared transport so web/alerts.py can reach email
+    without knowing anything about SMTP. Returns None when mail isn't configured.
+    """
+    return _smtp_send(subject, html)

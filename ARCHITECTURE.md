@@ -44,7 +44,7 @@ All share one Docker image and one data volume (`tradingagents_data`, mounted at
 |---------|-------------|------|
 | `tradingagents-api` | `uvicorn web.main:app` | Dashboard backend: single-ticker analysis (WebSocket-streamed), auth/login, settings/credentials, Schwab OAuth. |
 | `tradingagents-portfolio` | `uvicorn web.portfolio_main:app` | **Separate** app so long portfolio/S&P scans don't block the ad-hoc api. Runs each holding through the core, then the aggregator. |
-| `tradingagents-scheduler` | `python -m web.scheduler` | APScheduler daemon: nightly portfolio scan (22:00 ET), 5am newsletter, hourly Schwab-token health check. Calls the api/portfolio apps over the Docker network. |
+| `tradingagents-scheduler` | `python -m web.scheduler` | APScheduler daemon: nightly portfolio scan (22:00 ET Mon-Fri), 5am newsletter, hourly Schwab-token health check, and a 20-min stuck-run reaper (fails+alerts crashed runs). Calls the api/portfolio apps over the Docker network. |
 | `tradingagents-web` | nginx image | Serves `web/static/` and reverse-proxies the `/api/*` routes (see route priority below). Holds no secrets. |
 | `switchboard` | `ghcr.io/jemplayer82/mcp-switchboard` | **Optional, internal-only** message bus for the live Agent Bus feed (see below). No host port; reachable only on the Docker network at `switchboard:3107`. Own SQLite volume (`switchboard_data`). |
 | `tradingagents` | (CLI) | The Typer TUI, attached to interactively. |
@@ -115,6 +115,27 @@ symbols (expiration/strike/put-call/underlying). `web/portfolio_main.py` (`_acco
 `_mcp_positions`) consumes this; adding a broker = one new provider class. The legacy
 `_parse_schwab_account` helper (Schwab-only, `/api/spy-account` drift views) is deprecated
 in favor of it.
+
+## Failure alerts & the stuck-run reaper
+
+When any run fails — single-ticker analysis, portfolio scan, S&P 500 scan — the user is
+alerted out-of-band over **both** channels: the webhook (`FRED_NOTIFY_URL`, `web/notifier.py`)
+and email (SMTP, `web/newsletter.py:send_alert`). `web/alerts.py:notify_run_failed()` is the
+one entry point; it fires both on a daemon thread and **never raises into** a failing run's
+teardown. It's called from the three failure chokepoints — `web/runner.py` (analysis except),
+and `web/portfolio_main.py` `_run_scan_thread` / `_run_spy_scan_thread` (after the `fail_*`
+write; **not** on `ScanCancelled`, which is a user action, not a failure).
+
+That covers runs that *catch* their own exception. A worker that hard-crashes (OOM, container
+death) never runs that except, so the run sits in `running`/`pending` forever — invisible, and
+showing as phantom progress on the Analysis-tab banner. The **reaper**
+(`web/scheduler.py:job_reap_stuck_runs`, every 20 min + once at startup) closes that hole:
+scans carry an `updated_at` liveness stamp (touched on every progress write in
+`update_portfolio_scan` / `update_spy_scan`), and the reaper fails+alerts any scan with no
+progress for `STUCK_SCAN_STALL_MIN` min or any analysis still `running` past
+`STUCK_ANALYSIS_MIN` min (`db.find_stuck_*`, using `COALESCE(updated_at, created_at)` so a
+scan that died before its first tick still counts). Thresholds are generous by default so a
+slow-but-healthy deep dive isn't reaped.
 
 ## LLM providers (`tradingagents/llm_clients/`)
 

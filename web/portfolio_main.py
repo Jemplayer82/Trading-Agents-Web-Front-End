@@ -43,7 +43,7 @@ from tradingagents.constants import SIGNALS
 from tradingagents.dataflows import schwab_mcp
 from tradingagents.default_config import DEFAULT_CONFIG
 
-from . import auth_app, brokerages, db, spy_allocator, spy_scanner
+from . import alerts, auth_app, brokerages, db, spy_allocator, spy_scanner
 from . import credentials as creds
 from ._logging import configure_logging
 from .portfolio import aggregator
@@ -172,6 +172,9 @@ def _run_scan_thread(scan_id: int, trade_date: str) -> None:
     except Exception as exc:
         log.exception("Scan %s crashed", scan_id)
         db.fail_portfolio_scan(scan_id, str(exc))
+        alerts.notify_run_failed(
+            kind="Portfolio scan", run_id=scan_id, label=trade_date, error=str(exc)
+        )
 
 
 def _mcp_positions() -> list[dict[str, Any]]:
@@ -616,11 +619,15 @@ def _run_spy_scan_thread(scan_id: int, trade_date: str) -> None:
     try:
         _run_spy_scan(scan_id, trade_date)
     except spy_scanner.ScanCancelled:
+        # A user cancel is not a failure — don't alert.
         log.info("SPY scan %s cancelled by user", scan_id)
         db.update_spy_scan(scan_id, status="cancelled")
     except Exception as exc:
         log.exception("SPY scan %s crashed", scan_id)
         db.fail_spy_scan(scan_id, str(exc))
+        alerts.notify_run_failed(
+            kind="S&P 500 scan", run_id=scan_id, label=trade_date, error=str(exc)
+        )
 
 
 @contextmanager

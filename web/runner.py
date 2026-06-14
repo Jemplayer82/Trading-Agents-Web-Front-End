@@ -38,7 +38,7 @@ from cli.utils import detect_asset_type
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 
-from . import db
+from . import alerts, db
 
 try:
     from .bus_mirror import RunMirror
@@ -362,6 +362,13 @@ def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Qu
         except Exception:
             pass
         emit({"type": "error", "message": str(exc), "traceback": tb})
+        # Push an out-of-band alert too — the live "error" frame above is only
+        # seen if the browser is still attached. Label from params, since the
+        # local `ticker` may be unbound if the failure happened before it was set.
+        alerts.notify_run_failed(
+            kind="Analysis", run_id=analysis_id,
+            label=str(params.get("ticker") or "?"), error=str(exc),
+        )
         if mirror:
             mirror.on_error(str(exc))
     finally:
