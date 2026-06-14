@@ -48,7 +48,7 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
 
 **🖥️ Web Dashboard**
 - Terminal-aesthetic UI with dark theme and color-coded signals
-- 5-tab interface: Run Analysis, Schwab Connection, Portfolio Scan, S&P 500 Scanner, Credentials
+- 4-tab interface: Run Analysis, Portfolio Scan, S&P 500 Scanner, Settings (Schwab connection + credentials live under Settings)
 - Real-time WebSocket streaming of agent progress and reports
 - Interactive technical charts with RSI, MACD, Bollinger Bands overlays
 - Per-analysis Q&A thread (multi-turn conversation without re-running)
@@ -169,7 +169,7 @@ export OLLAMA_API_KEY=your_key
 export OLLAMA_BASE_URL=https://ollama.com/v1
 
 # Run the FastAPI dashboard (serves API + SPA on one port)
-uvicorn tradingagents.web.main:app --reload --port 8000
+uvicorn web.main:app --reload --port 8000
 ```
 
 Open `http://localhost:8000`.
@@ -187,7 +187,7 @@ Single-ticker deep analysis with real-time streaming:
 3. **Reports** — Market, sentiment, news, fundamentals, research plan, trader plan, final decision
 4. **Technical Chart** — Price candles + RSI + MACD with interactive overlays
 5. **Q&A Thread** — Multi-turn follow-up questions without re-running the full analysis
-6. **Messages Log** — Every agent message and tool call
+6. **Live Reasoning** — each agent's streamed train-of-thought (tool calls included), shown beneath the reports
 
 ### Schwab Tab
 
@@ -366,8 +366,7 @@ tradingagents/
 ### Running Tests
 
 ```bash
-pytest tradingagents/tests/
-pytest web/tests/ -v
+pytest tests/ -v
 ```
 
 ---
