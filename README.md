@@ -8,15 +8,15 @@
 
 **A self-hosted multi-agent LLM trading dashboard** — real-time agent streaming, Schwab portfolio scanning, S&P 500 automation, and container-based deployment.
 
+*A [Fathom Works](https://github.com/jemplayer82) project.*
+
 <div align="center">
-
-![license](https://img.shields.io/badge/license-AGPL--3.0-6cd5e6?style=flat-square&labelColor=030d14)
-![python](https://img.shields.io/badge/python-3.12-6cd5e6?style=flat-square&labelColor=030d14)
-![framework](https://img.shields.io/badge/framework-FastAPI-6cd5e6?style=flat-square&labelColor=030d14)
-![image](https://img.shields.io/badge/image-ghcr.io-6cd5e6?style=flat-square&labelColor=030d14)
-![llm](https://img.shields.io/badge/llm-Ollama_Cloud-6cd5e6?style=flat-square&labelColor=030d14)
-![state](https://img.shields.io/badge/state-SQLite_WAL-6cd5e6?style=flat-square&labelColor=030d14)
-
+  <img alt="License: AGPL-3.0" src="https://img.shields.io/badge/License-AGPL--3.0-6cd5e6?labelColor=030d14">
+  <img alt="Python 3.12" src="https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white">
+  <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-Uvicorn-009688?logo=fastapi&logoColor=white">
+  <img alt="Docker" src="https://img.shields.io/badge/Docker-ghcr.io-2496ED?logo=docker&logoColor=white">
+  <img alt="Ollama" src="https://img.shields.io/badge/LLM-Ollama_Cloud-000000?logo=ollama&logoColor=white">
+  <img alt="SQLite" src="https://img.shields.io/badge/SQLite-WAL-003B57?logo=sqlite&logoColor=white">
 </div>
 
 > [!WARNING]
@@ -505,7 +505,7 @@ ports:
 
 ---
 
-## `[ contributing ]`
+## 🤝 Contributing
 
 Pull requests welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the CLA, PR guidelines, and code style requirements (`ruff` + `pytest` must pass).
 
@@ -513,9 +513,15 @@ Areas of focus: UI/UX improvements, new LLM providers, chart enhancements, perfo
 
 ---
 
-## `[ license ]`
+## ⚖️ License
 
-AGPL-3.0 — see [LICENSE](./LICENSE)
+Licensed under the [GNU Affero General Public License v3.0](./LICENSE) (AGPL-3.0) — © 2026 Fathom Works.
+
+Commercial licensing available. For inquiries: [github.com/jemplayer82](https://github.com/jemplayer82)
+
+## 🙏 Credits
+
+This project builds on the open-source [TradingAgents](https://github.com/TauricResearch/TradingAgents) multi-agent framework, vendored and extended here with a full web dashboard, Schwab integration, and container-based deployment.
 
 © 2026 Fathom Works. Commercial licensing available — [github.com/jemplayer82](https://github.com/jemplayer82)
 
