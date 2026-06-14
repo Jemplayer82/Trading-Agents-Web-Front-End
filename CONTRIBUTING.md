@@ -1,7 +1,8 @@
 # Contributing to Trading-Agents-Web-Front-End
 
 Thank you for your interest in contributing! This project is licensed under the
-**Apache License 2.0** and maintained by Landon ([@jemplayer82](https://github.com/jemplayer82)).
+**GNU Affero General Public License v3.0 (AGPL-3.0)** and maintained by
+Fathom Consulting LLC ([@jemplayer82](https://github.com/jemplayer82)).
 
 ---
 
@@ -11,16 +12,17 @@ By submitting a pull request or patch to this project, you agree to the followin
 
 1. **You own the contribution** — or have the legal right to submit it.
 2. **You grant a perpetual, irrevocable license** to the project maintainer(s) to use,
-   modify, sublicense, and distribute your contribution under the Apache License 2.0
+   modify, sublicense, and distribute your contribution under the AGPL-3.0
    **and any future license the maintainer chooses**, including a commercial license.
 3. **You grant patent rights** — you license any patents you hold that are necessarily
    infringed by your contribution.
 4. **You understand** that your contribution will be publicly visible and may be
    redistributed under the terms of this project's license.
 
-> **Why a CLA?** This project may offer a dual-license model in the future (open source +
+> **Why a CLA?** This project uses a dual-license model (AGPL-3.0 open source +
 > commercial). The CLA ensures the maintainer can offer commercial licenses without
-> needing to re-contact every contributor.
+> needing to re-contact every contributor. For commercial licensing inquiries, contact:
+> github.com/jemplayer82
 
 If you are contributing on behalf of a company or organization, you represent that
 you are authorized to accept these terms on their behalf.
@@ -60,4 +62,4 @@ docs: update README with agent coordination example
 ## License
 
 By contributing, you agree that your contributions will be licensed under the
-[Apache License 2.0](./LICENSE).
+[GNU Affero General Public License v3.0](./LICENSE).
