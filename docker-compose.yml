@@ -69,7 +69,7 @@ services:
       SMTP_PASS: ${SMTP_PASS}
       NEWSLETTER_FROM: ${NEWSLETTER_FROM}
       NEWSLETTER_TO: ${NEWSLETTER_TO}
-      DASHBOARD_URL: ${DASHBOARD_URL:-https://trading.txferguson.net}
+      DASHBOARD_URL: ${DASHBOARD_URL:-http://localhost:8080}
       SCHEDULER_TIMEZONE: America/New_York
       TRADINGAGENTS_API_URL: http://tradingagents-api:8000
       TRADINGAGENTS_PORTFOLIO_URL: http://tradingagents-portfolio:8000
