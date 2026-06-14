@@ -4,9 +4,9 @@
   <img src="assets/hero.svg" alt="TradingAgents — multi-agent LLM trading intelligence, streamed live and self-hosted" width="100%">
 </p>
 
-# TradingAgents — Web Dashboard & Deployment
+# `$ tradingagents-web`
 
-A self-hosted web dashboard for running multi-agent LLM trading analysis: real-time agent streaming, Schwab portfolio scanning, S&P 500 automation, and container-based deployment.
+**A self-hosted multi-agent LLM trading dashboard** — real-time agent streaming, Schwab portfolio scanning, S&P 500 automation, and container-based deployment.
 
 *A [Fathom Works](https://github.com/jemplayer82) project.*
 
@@ -19,11 +19,12 @@ A self-hosted web dashboard for running multi-agent LLM trading analysis: real-t
   <img alt="SQLite" src="https://img.shields.io/badge/SQLite-WAL-003B57?logo=sqlite&logoColor=white">
 </div>
 
-> **For research and educational purposes only.** Trading performance varies with the chosen models, data quality, and market conditions. This is **not** financial, investment, or trading advice.
+> [!WARNING]
+> For research and educational purposes only. Trading performance varies with the chosen models, data quality, and market conditions. This is not financial, investment, or trading advice.
 
 ---
 
-## Overview
+## `[ overview ]`
 
 TradingAgents runs a team of specialized LLM agents that mirror the desks of a real trading firm — analysts, researchers, a trader, and a risk/portfolio manager — and surfaces the whole pipeline in a real-time web dashboard. Submit a ticker and watch each agent stream its reasoning, ending in a BUY / SELL / HOLD decision with full reports; connect a Schwab account to scan a live portfolio; or let the scheduler sweep the entire S&P 500 every week and rebalance a paper portfolio on its own.
 
@@ -31,7 +32,7 @@ The project ships as container images and deploys as a Portainer edge stack, bac
 
 ---
 
-## The Agent Team
+## `[ agent team ]`
 
 Each agent owns a narrow slice of the decision and hands its findings to the next stage.
 
@@ -49,9 +50,9 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
 
 ---
 
-## Features
+## `[ features ]`
 
-**🖥️ Web Dashboard**
+**Web Dashboard**
 - Terminal-aesthetic UI with dark theme and color-coded signals
 - 4-tab interface: Run Analysis, Portfolio Scan, S&P 500 Scanner, Settings (Schwab connection + credentials live under Settings)
 - Real-time WebSocket streaming of agent progress and reports
@@ -59,34 +60,34 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
 - Per-analysis Q&A thread (multi-turn conversation without re-running)
 - Live **Agent Bus** feed — watch analysts, researchers, and the risk team communicate in real time as the pipeline runs
 
-**📊 Portfolio & Market Automation**
+**Portfolio & Market Automation**
 - Schwab OAuth integration for brokerage account scanning
 - Selectable data source — Schwab MCP server or built-in collection method (toggle in settings)
 - Automated nightly portfolio analysis of all holdings
 - S&P 500 weekly scanner (all ~500 tickers, deep-dive top 50, $100k portfolio builder)
 - Background job scheduler (APScheduler with cron expressions)
 
-**🔐 Provider & Credential Management**
+**Provider & Credential Management**
 - Ollama Cloud as the deployed default backend, with 14+ LLM providers supported (OpenAI, Anthropic, Google, xAI, DeepSeek, Qwen, GLM, MiniMax, OpenRouter, Azure, Ollama, Mistral, custom)
 - Dashboard API key management — add/update/delete provider keys without `.env`
 - Dynamic model selection with custom model name input
 - Secure credential storage in SQLite (masked in UI)
 
-**🏗️ Deployment Architecture**
+**Deployment Architecture**
 - Six-container stack from three pre-built images: backends/CLI (`tradingagents`), nginx web tier (`tradingagents-web`), and the Agent Bus (`mcp-switchboard`)
 - nginx serves the SPA and reverse-proxies separate `api` and `portfolio` FastAPI backends
 - Dedicated scheduler container (APScheduler) for nightly portfolio scans, the weekly S&P 500 sweep, the 5am newsletter, and hourly Schwab-token health
 - SQLite with WAL mode for concurrent access and persistence
 - Deployed as a Portainer edge stack; images built and pushed to `ghcr.io` by GitHub Actions CI
 
-**🔗 Companion: [schwab-mcp](https://github.com/Jemplayer82/schwab-mcp)**
+**Companion: [schwab-mcp](https://github.com/Jemplayer82/schwab-mcp)**
 - Containerized Node.js MCP server that gives TradingAgents a direct, real-time connection to your Schwab brokerage account
 - Enables the dashboard to query live quotes, account positions, orders, and transaction history straight from Schwab
 - Optional — a settings checkbox switches between the MCP server and the built-in data collection method
 
 ---
 
-## Screenshots
+## `[ screenshots ]`
 
 ### Run Analysis
 
@@ -114,7 +115,7 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
 
 ---
 
-## Quick Start
+## `[ quick start ]`
 
 ### Prerequisites
 
@@ -123,63 +124,64 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
 - Python 3.12+ (for local CLI development)
 - Portainer (optional — for edge stack deployment on a home lab / remote host)
 
-### Docker Deployment (Recommended)
+### Docker Deployment
 
-The full stack is defined in the repo's `docker-compose.yml` — **six services across three pre-built `ghcr.io` images** (built by GitHub Actions). Clone, configure, and bring it up:
+The full stack is defined in the repo's `docker-compose.yml` — six services across three pre-built `ghcr.io` images built by GitHub Actions. Clone, configure, and bring it up:
 
 ```bash
-git clone https://github.com/Jemplayer82/TradingAgents.git
-cd TradingAgents
-cp .env.example .env
+$ git clone https://github.com/Jemplayer82/TradingAgents.git
+$ cd TradingAgents
+$ cp .env.example .env
 
 # Edit .env — at minimum set:
 #   OLLAMA_API_KEY=        your Ollama Cloud key (https://ollama.com)
 #   TOKEN_ENCRYPTION_KEY=  python -c "import base64,os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())"
 #   SWITCHBOARD_MCP_TOKEN= python -c "import secrets; print(secrets.token_urlsafe(32))"
 
-docker compose up -d
+$ docker compose up -d
 ```
 
-Open **http://localhost:8080** — the `tradingagents-web` nginx container serves the dashboard and reverse-proxies the API backends. On a Portainer host, browse to `http://<host>:8080`.
+Open `http://localhost:8080`. The `tradingagents-web` nginx container serves the dashboard and reverse-proxies the API backends. On a Portainer host, browse to `http://<host>:8080`.
 
-> **Portainer edge stack:** set all secrets in the stack environment (never in the committed compose file). After each fresh CI build, force-pull the `:latest` images on the host before redeploying so cached images aren't reused.
+> [!TIP]
+> **Portainer edge stack:** set all secrets in the stack environment — never in the committed compose file. After each fresh CI build, force-pull `:latest` on the host before redeploying so cached images aren't reused.
 
 ### Interactive CLI
 
-The `tradingagents` service runs the interactive CLI from the same image as the backends, accessed via the Portainer console (or `docker attach`):
+The `tradingagents` service runs the interactive CLI from the same image as the backends, accessed via the Portainer console or `docker attach`:
 
 ```bash
-docker run -it \
-  -e OLLAMA_API_KEY=your_key \
-  -e OLLAMA_BASE_URL=https://ollama.com/v1 \
-  ghcr.io/jemplayer82/tradingagents:latest
+$ docker run -it \
+    -e OLLAMA_API_KEY=your_key \
+    -e OLLAMA_BASE_URL=https://ollama.com/v1 \
+    ghcr.io/jemplayer82/tradingagents:latest
 ```
 
 ### Local Development
 
 ```bash
-pip install -e .
-pip install -r requirements.txt
+$ pip install -e .
+$ pip install -r requirements.txt
 
-export TRADINGAGENTS_WEB_DB=./web.db   # optional; defaults to ~/.tradingagents/web.db
-export OLLAMA_API_KEY=your_key
-export OLLAMA_BASE_URL=https://ollama.com/v1
+$ export TRADINGAGENTS_WEB_DB=./web.db
+$ export OLLAMA_API_KEY=your_key
+$ export OLLAMA_BASE_URL=https://ollama.com/v1
 
 # Analysis + Schwab OAuth API
-uvicorn web.main:app --reload --port 8000
+$ uvicorn web.main:app --reload --port 8000
 
 # Portfolio / S&P 500 scan API (separate process)
-uvicorn web.portfolio_main:app --reload --port 8001
+$ uvicorn web.portfolio_main:app --reload --port 8001
 
 # Scheduler (nightly scan · newsletter · token health)
-python -m web.scheduler
+$ python -m web.scheduler
 ```
 
 The nginx `tradingagents-web` tier is only needed in Docker; in local dev hit the API ports directly.
 
 ---
 
-## Features in Detail
+## `[ features in detail ]`
 
 ### Run Analysis Tab
 
@@ -227,7 +229,7 @@ API keys are managed directly from the Credentials tab — no `.env` editing req
 
 ---
 
-## Agent Bus — Watch the Agents Talk
+## `[ agent bus ]`
 
 The **Agent Bus** mirrors every inter-agent handoff from the multi-agent pipeline onto a dedicated [mcp-switchboard](https://github.com/Jemplayer82/mcp-switchboard) instance running inside the stack, then streams the messages to a live feed panel in the dashboard. A visitor can watch the analysts deliver reports, the bull and bear researchers debate, the risk team stress-test the trade, and the portfolio manager reach a final decision — in real time, as the run happens.
 
@@ -257,8 +259,7 @@ The pipeline orchestrator stays in charge. The bus is a **read-only mirror** —
 The `switchboard` service is already defined in `docker-compose.yml`. Generate a bearer token and set one environment variable — it starts on the next `docker compose up`:
 
 ```bash
-# Generate a fresh bearer token — keep this secret, like a password
-python -c "import secrets; print(secrets.token_urlsafe(32))"
+$ python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
 Add the output to your `.env` (or Portainer stack environment):
@@ -279,13 +280,11 @@ The `switchboard` container starts automatically, `tradingagents-web` connects t
 
 ---
 
-## Schwab MCP Companion
+## `[ schwab mcp ]`
 
 [**schwab-mcp**](https://github.com/Jemplayer82/schwab-mcp) is a companion containerized Node.js MCP server that gives TradingAgents a direct, real-time connection to your Schwab brokerage account. Rather than relying on manual data exports or delayed feeds, the dashboard communicates with Schwab through schwab-mcp to pull live quotes, account positions, open orders, and transaction history — enabling the Portfolio Scan, S&P 500 scanner, and OAuth token management to work seamlessly.
 
-Using schwab-mcp is optional. A checkbox in the Schwab settings lets you switch between the MCP server and the dashboard's built-in data collection method, so you can run with or without the companion server.
-
-### Available Tools
+Using schwab-mcp is optional. A checkbox in the Schwab settings lets you switch between the MCP server and the dashboard's built-in data collection method.
 
 | Tool | Description |
 |------|-------------|
@@ -297,24 +296,24 @@ Using schwab-mcp is optional. A checkbox in the Schwab settings lets you switch 
 | `get_market_hours` | Market open/close status |
 
 ```bash
-docker run -p 3000:3000 \
-  -e SCHWAB_CLIENT_ID=your_client_id \
-  -e SCHWAB_CLIENT_SECRET=your_secret \
-  ghcr.io/jemplayer82/schwab-mcp:latest
+$ docker run -p 3000:3000 \
+    -e SCHWAB_CLIENT_ID=your_client_id \
+    -e SCHWAB_CLIENT_SECRET=your_secret \
+    ghcr.io/jemplayer82/schwab-mcp:latest
 ```
 
 See [Jemplayer82/schwab-mcp](https://github.com/Jemplayer82/schwab-mcp) for full setup and MCP client configuration.
 
 ---
 
-## Architecture
+## `[ architecture ]`
 
 ### Deployment Topology
 
-The stack runs **six containers built from three pre-built `ghcr.io` images** (GitHub Actions CI), deployed as a Portainer edge stack. The `tradingagents-web` nginx tier is the only published port; everything else talks over the internal Docker network:
+Six containers built from three pre-built `ghcr.io` images, deployed as a Portainer edge stack. The `tradingagents-web` nginx tier is the only published port; everything else talks over the internal Docker network:
 
 ```
-Portainer Edge Stack  (openclaw home lab)
+Portainer Edge Stack
 │
 ├─ tradingagents-web         ghcr.io/jemplayer82/tradingagents-web   (nginx)
 │    host 8080 → container 8000  ·  static SPA + reverse proxy
@@ -332,7 +331,7 @@ Portainer Edge Stack  (openclaw home lab)
 │    nightly portfolio scan · 5am newsletter · hourly Schwab-token health
 │    └─ depends_on tradingagents-portfolio
 │
-├─ switchboard               ghcr.io/jemplayer82/mcp-switchboard                  (Agent Bus · :3107 internal)
+├─ switchboard               ghcr.io/jemplayer82/mcp-switchboard     (Agent Bus · :3107 internal)
 │    read-only mirror of inter-agent handoffs → streamed to the dashboard via /api/bus
 │
 └─ tradingagents             ghcr.io/jemplayer82/tradingagents       (interactive CLI · console attach)
@@ -356,29 +355,25 @@ The four FastAPI/CLI roles (`api`, `portfolio`, `scheduler`, `cli`) share **one 
 
 ---
 
-## Configuration
-
-### Environment Variables
+## `[ configuration ]`
 
 ```bash
 # Database (auto-creates on the tradingagents_data volume)
-TRADINGAGENTS_WEB_DB=/home/appuser/.tradingagents/web.db   # optional; this is the default
+TRADINGAGENTS_WEB_DB=/home/appuser/.tradingagents/web.db
 
 # LLM backend — Ollama Cloud (deployed default)
-OLLAMA_API_KEY=your_key                 # stack env only — never commit
+OLLAMA_API_KEY=your_key
 OLLAMA_BASE_URL=https://ollama.com/v1
 
 # Schwab OAuth (tradingagents-api + tradingagents-portfolio)
 SCHWAB_APP_KEY=your_app_key
 SCHWAB_APP_SECRET=your_app_secret
 SCHWAB_CALLBACK_URL=https://your-host/api/auth/schwab/callback
-TOKEN_ENCRYPTION_KEY=<base64-32-bytes>  # encrypts stored Schwab tokens
-                                        # generate: python -c "import base64,os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())"
+TOKEN_ENCRYPTION_KEY=<base64-32-bytes>
 
 # Agent Bus (switchboard container)
-SWITCHBOARD_MCP_TOKEN=<generated>       # bearer token — python -c "import secrets; print(secrets.token_urlsafe(32))"
-BUS_MIRROR=analysis                     # set to "off" to disable bus publishing without stopping the container
-# SWITCHBOARD_URL is resolved by compose → http://switchboard:3107
+SWITCHBOARD_MCP_TOKEN=<generated>
+BUS_MIRROR=analysis
 
 # Scheduler — nightly newsletter + alerts (tradingagents-scheduler)
 SCHEDULER_TIMEZONE=America/New_York
@@ -391,11 +386,12 @@ NEWSLETTER_FROM=...
 NEWSLETTER_TO=...
 ```
 
-> **Security:** every secret above must be injected via the Portainer stack environment (or a local `.env` that is git-ignored) — never committed to the public repo.
+> [!IMPORTANT]
+> Every secret above must be injected via the Portainer stack environment or a local `.env` that is git-ignored — never committed to the repo.
 
 ---
 
-## Technical Stack
+## `[ technical stack ]`
 
 | Layer | Technology |
 |-------|------------|
@@ -416,7 +412,7 @@ NEWSLETTER_TO=...
 
 ---
 
-## Project Structure
+## `[ project structure ]`
 
 ```
 tradingagents/
@@ -448,79 +444,63 @@ tradingagents/
 └── docker-compose.yml      # 6-service stack
 ```
 
-### Running Tests
-
 ```bash
-pytest tests/ -v
+$ pytest tests/ -v
 ```
 
 ---
 
-## Troubleshooting
+## `[ troubleshooting ]`
 
 ### Chart endpoint returns 500 error
 
-**Cause:** Legacy cached OHLCV CSV files have an `index` column instead of `Date`.
-
-**Fix:** Code normalizes column names automatically. If it persists, clear the cache:
+Legacy cached OHLCV CSV files have an `index` column instead of `Date`. Code normalizes this automatically. If it persists, clear the cache:
 
 ```bash
-rm -rf ~/.tradingagents/cache/*.csv
+$ rm -rf ~/.tradingagents/cache/*.csv
 ```
 
 ### Schwab scan doesn't start
 
-**Cause:** OAuth token not saved or expired.
-
-**Fix:** Click "Connect to Schwab" in the Schwab tab, complete the OAuth flow, and check token status.
+OAuth token not saved or expired. Click "Connect to Schwab" in the Schwab tab and complete the OAuth flow.
 
 ### S&P 500 scan hangs
 
-**Cause:** Network slowness, LLM provider overload, or database lock.
-
-**Fix:** Check the portfolio backend logs, retry, and verify the Ollama Cloud key:
+Check the portfolio backend logs and verify the Ollama Cloud key:
 
 ```bash
-docker logs tradingagents-portfolio
+$ docker logs tradingagents-portfolio
 ```
 
 ### API key not taking effect
 
-**Cause:** Process running with stale config.
-
-**Fix:** Restart the analysis backend (and the scheduler if a scheduled job uses it):
+Restart the analysis backend:
 
 ```bash
-docker restart tradingagents-api
+$ docker restart tradingagents-api
 ```
 
 ### Agent Bus panel stays empty
 
-**Cause:** `SWITCHBOARD_MCP_TOKEN` not set, or the `switchboard` container didn't start.
-
-**Fix:** Confirm the token is in the stack env and the container is healthy:
+`SWITCHBOARD_MCP_TOKEN` not set or the `switchboard` container didn't start:
 
 ```bash
-docker logs switchboard
+$ docker logs switchboard
 ```
 
 ### Stale image after a fresh CI build
 
-**Cause:** The host reused a cached `:latest` image.
-
-**Fix:** Force-pull all images before redeploying the stack:
-
 ```bash
-docker compose pull && docker compose up -d
+$ docker compose pull && docker compose up -d
 ```
 
 ### Port 8080 already in use
 
-**Fix:** Change the host side of the `tradingagents-web` port mapping in `docker-compose.yml`:
+Change the host side of the `tradingagents-web` port mapping in `docker-compose.yml`:
 
 ```yaml
 ports:
-  - "9090:8000"   # change 9090 to any free host port
+  - "9090:8000"
 ```
 
 ---
@@ -543,11 +523,14 @@ Commercial licensing available. For inquiries: [github.com/jemplayer82](https://
 
 This project builds on the open-source [TradingAgents](https://github.com/TauricResearch/TradingAgents) multi-agent framework, vendored and extended here with a full web dashboard, Schwab integration, and container-based deployment.
 
-Powered by FastAPI, LangChain, yfinance, stockstats, lightweight-charts, APScheduler, and many other open-source libraries.
+© 2026 Fathom Works. Commercial licensing available — [github.com/jemplayer82](https://github.com/jemplayer82)
 
 ---
 
-**Last Updated:** June 14, 2026
-**Repo:** https://github.com/Jemplayer82/TradingAgents
+#### `[ credits ]`
+
+This project builds on the open-source [TradingAgents](https://github.com/TauricResearch/TradingAgents) multi-agent framework, vendored and extended here with a full web dashboard, Schwab integration, and container-based deployment.
+
+Powered by FastAPI, LangChain, yfinance, stockstats, lightweight-charts, APScheduler, and many other open-source libraries.
 
 <img src="assets/fathom-footer-banner.svg" alt="Fathom Works — sound the depths before you set a course" width="100%">
