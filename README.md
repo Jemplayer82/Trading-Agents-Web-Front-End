@@ -1,3 +1,5 @@
+<img src="assets/fathom-header-banner.svg" alt="Fathom Works — TradingAgents" width="100%">
+
 <p align="center">
   <img src="assets/hero.svg" alt="TradingAgents — multi-agent LLM trading intelligence, streamed live and self-hosted" width="100%">
 </p>
@@ -541,5 +543,7 @@ Powered by FastAPI, LangChain, yfinance, stockstats, lightweight-charts, APSched
 
 ---
 
-**Last Updated:** June 13, 2026
+**Last Updated:** June 14, 2026
 **Repo:** https://github.com/Jemplayer82/TradingAgents
+
+<img src="assets/fathom-footer-banner.svg" alt="Fathom Works — sound the depths before you set a course" width="100%">
