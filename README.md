@@ -1,5 +1,3 @@
-<img src="assets/fathom-header-banner.svg" alt="Fathom Works — TradingAgents" width="100%">
-
 <p align="center">
   <img src="assets/hero.svg" alt="TradingAgents — multi-agent LLM trading intelligence, streamed live and self-hosted" width="100%">
 </p>
