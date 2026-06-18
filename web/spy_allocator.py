@@ -36,21 +36,22 @@ log = logging.getLogger(__name__)
 
 # ─── Fresh allocation (week 1 or first ever run) ──────────────────────────────
 
-FRESH_SYSTEM_PROMPT = """You are a quantitative portfolio manager. You have up to
-$100,000 of paper capital and a shortlist of deep-dive analyses for the top S&P
+_FRESH_SYSTEM_TEMPLATE = """You are a quantitative portfolio manager. You have up to
+${capital:,.0f} of paper capital and a shortlist of deep-dive analyses for the top S&P
 500 candidates.
-
+{bias_context}
 Capital discipline (IMPORTANT):
 - The candidate list is a SHORTLIST for review — NOT a mandate to buy all of them.
-- You do NOT have to deploy the full $100,000. Hold the remainder as cash whenever
+- You do NOT have to deploy the full ${capital:,.0f}. Hold the remainder as cash whenever
   there aren't enough genuinely compelling, high-conviction opportunities.
 - Only deploy capital to names you would actually buy with real money. It is
-  perfectly fine (and often correct) to invest well under $100,000 in just a
+  perfectly fine (and often correct) to invest well under ${capital:,.0f} in just a
   handful of positions and leave the rest in cash.
 
 Rules:
-- Total invested must be ≤ $100,000 (anything not invested is cash).
-- Minimum position: $500. Maximum position: $15,000 (15%).
+- Total invested must be ≤ ${capital:,.0f} (anything not invested is cash).
+- Minimum position: $500. Maximum position: ${max_pos:,.0f} ({max_pct}% of capital).
+- At least {min_cash_pct}% of capital must remain as cash (uninvested buffer).
 - Weight positions by signal strength and conviction score.
 - Only BUY-rated tickers should receive meaningful allocation (>1%).
 - HOLD tickers may receive small allocations (0.5–3%) as speculative, or none.
@@ -60,17 +61,15 @@ Rules:
 
 Output format (array of objects):
 [
-  {"ticker": "NVDA", "action": "NEW", "allocation_pct": 8.5, "dollar_amount": 8500,
-   "entry_price": 145.23, "rationale": "...one sentence..."},
+  {{"ticker": "NVDA", "action": "NEW", "allocation_pct": 8.5, "dollar_amount": 8500,
+   "entry_price": 145.23, "rationale": "...one sentence..."}},
   ...
 ]
 """
 
-# ─── Weekly rebalance (week 2+) ───────────────────────────────────────────────
-
-REBALANCE_SYSTEM_PROMPT = """You are a quantitative portfolio manager running a
+_REBALANCE_SYSTEM_TEMPLATE = """You are a quantitative portfolio manager running a
 weekly rebalance of a paper portfolio.
-
+{bias_context}
 You will receive:
 1. The total capital available for this week (starting value).
 2. Current holdings with this week's updated signals.
@@ -84,7 +83,8 @@ Capital discipline (IMPORTANT):
 
 Rebalancing rules:
 - Total invested must be ≤ the starting capital (the rest is cash).
-- Minimum position: $500. Maximum: 15% of starting capital.
+- Minimum position: $500. Maximum: {max_pct}% of starting capital.
+- At least {min_cash_pct}% of capital must remain as cash (uninvested buffer).
 - EXITED positions (SELL signal or dropped out of top candidates) free up capital.
 - Kept positions maintain their original entry_price for P&L tracking.
 - New positions use the current entry_price provided.
@@ -101,13 +101,32 @@ Action values:
 
 Output format (array of objects, include EXITED positions with dollar_amount 0):
 [
-  {"ticker": "NVDA", "action": "HOLD", "allocation_pct": 8.5, "dollar_amount": 8500,
-   "entry_price": 145.23, "rationale": "...one sentence..."},
-  {"ticker": "META", "action": "EXITED", "allocation_pct": 0, "dollar_amount": 0,
-   "entry_price": 520.00, "rationale": "Signal flipped to SELL."},
+  {{"ticker": "NVDA", "action": "HOLD", "allocation_pct": 8.5, "dollar_amount": 8500,
+   "entry_price": 145.23, "rationale": "...one sentence..."}},
+  {{"ticker": "META", "action": "EXITED", "allocation_pct": 0, "dollar_amount": 0,
+   "entry_price": 520.00, "rationale": "Signal flipped to SELL."}},
   ...
 ]
 """
+
+_BIAS_CONTEXT = {
+    "bullish": "\nMarket stance: BULLISH — prefer larger positions on high-conviction BUYs. "
+               "Deploy more capital when signals are strong. In borderline Buy/Hold cases, lean Buy.\n",
+    "bearish": "\nMarket stance: BEARISH — prefer smaller positions and higher cash buffers. "
+               "Be selective; only deploy to the highest-conviction BUYs. In borderline Hold/Sell cases, lean Sell.\n",
+    "neutral": "",
+}
+
+
+def _position_limits(aggressiveness: int, capital: float) -> tuple[float, int, int]:
+    """Return (max_position_dollars, max_pct, min_cash_pct) from aggressiveness 1–10."""
+    if aggressiveness <= 3:
+        max_pct, min_cash_pct = 7, 20
+    elif aggressiveness <= 7:
+        max_pct, min_cash_pct = 12, 10
+    else:
+        max_pct, min_cash_pct = 20, 5
+    return capital * max_pct / 100, max_pct, min_cash_pct
 
 FRESH_USER_HEADER = "Date: {trade_date}\nCandidates ({n} tickers):\n"
 
@@ -208,14 +227,15 @@ def run(
     config: dict[str, Any],
     previous_portfolio: list[dict[str, Any]] | None = None,
     starting_value: float | None = None,
+    aggressiveness: int = 5,
+    bias: str = "neutral",
 ) -> dict[str, Any]:
     """Return {allocations, total, cash, report_md, starting_value}.
 
     If previous_portfolio is provided (week 2+), performs a rebalance;
-    otherwise allocates a fresh $100k portfolio (week 1). LLM dollar targets
-    are converted to whole shares (floor) — the rounding remainder, and any
-    target too small for one share, stays in cash. Falls back to deterministic
-    equal-weighting if the LLM call or its JSON parse fails.
+    otherwise allocates a fresh portfolio (week 1). aggressiveness (1–10)
+    controls position sizing limits; bias (bullish/neutral/bearish) shifts
+    the LLM prompt toward more or less aggressive stance.
     """
     if not candidates:
         return {"allocations": [], "total": 0, "report_md": "No candidates provided.",
@@ -223,6 +243,8 @@ def run(
 
     is_rebalance = bool(previous_portfolio)
     capital = starting_value if (is_rebalance and starting_value) else 100_000.0
+    max_pos, max_pct, min_cash_pct = _position_limits(aggressiveness, capital)
+    bias_context = _BIAS_CONTEXT.get(bias, "")
 
     # ── Build the user message ────────────────────────────────────────────────
     if not is_rebalance:
@@ -236,7 +258,10 @@ def run(
                 entry_price=c.get("entry_price") or 0.0,
                 excerpt=excerpt,
             )
-        system = FRESH_SYSTEM_PROMPT
+        system = _FRESH_SYSTEM_TEMPLATE.format(
+            capital=capital, max_pos=max_pos, max_pct=max_pct,
+            min_cash_pct=min_cash_pct, bias_context=bias_context,
+        )
         fallback_fn = lambda: _fallback_fresh(candidates)
     else:
         prev_map = {p["ticker"]: p for p in (previous_portfolio or [])}
@@ -282,7 +307,9 @@ def run(
                     excerpt=excerpt,
                 )
 
-        system = REBALANCE_SYSTEM_PROMPT
+        system = _REBALANCE_SYSTEM_TEMPLATE.format(
+            max_pct=max_pct, min_cash_pct=min_cash_pct, bias_context=bias_context,
+        )
         fallback_fn = lambda: _fallback_rebalance(candidates, previous_portfolio or [], capital)
 
     # ── Call the LLM ─────────────────────────────────────────────────────────
@@ -336,9 +363,11 @@ def run(
 
     # ── Build markdown report ─────────────────────────────────────────────────
     mode_label = "Rebalance" if is_rebalance else "Initial Portfolio"
+    bias_label = bias.capitalize() if bias != "neutral" else "Neutral"
     lines = [
         f"# S&P 500 Paper Portfolio — {trade_date} ({mode_label})",
         f"**Starting capital:** ${capital:,.0f}  ",
+        f"**Aggressiveness:** {aggressiveness}/10 | **Bias:** {bias_label}  ",
         f"**Total deployed:** ${total:,.0f} ({(total / capital * 100) if capital else 0:.1f}%)  ",
         f"**Cash (uninvested):** ${cash:,.0f} ({cash_pct:.1f}%)  ",
         f"**Positions:** {len([a for a in allocations if a.get('action') != 'EXITED'])}",

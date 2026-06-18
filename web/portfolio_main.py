@@ -13,7 +13,7 @@ triggerable from the dashboard:
 
 - Portfolio scan (_run_scan): real holdings via brokerages.fetch_all_accounts()
   (normalized cross-brokerage dicts, account ids namespaced "schwab:12345678"),
-  each equity through TradingAgentsGraph, then the aggregator briefing. Option
+  each equity through SwitchboardOrchestrator, then the aggregator briefing. Option
   positions are display-only on the dashboard and are skipped (logged) before
   the analysis loop.
 - S&P scan (_run_spy_scan): quick-screen all ~500 tickers, deep-dive the top
@@ -236,7 +236,7 @@ def _run_scan(scan_id: int, trade_date: str) -> None:
     # Step 3: for each position, create an analyses row + run the graph
     per_ticker_payload: list[dict[str, Any]] = []
 
-    from tradingagents.graph.portfolio_graph import run_single_ticker
+    from tradingagents.orchestrator import SwitchboardOrchestrator
 
     counts = {sig: 0 for sig in SIGNALS}
     for i, pos in enumerate(pos_dicts, start=1):
@@ -256,9 +256,9 @@ def _run_scan(scan_id: int, trade_date: str) -> None:
             "language": prefs.get("language", "English"),
         })
         try:
-            result = run_single_ticker(ticker, trade_date, config, selected_analysts)
-            final_state = result["final_state"]
-            signal = (result.get("signal") or "").upper()
+            orch = SwitchboardOrchestrator(config=config, selected_analysts=selected_analysts)
+            final_state, signal = orch.run(ticker, trade_date)
+            signal = (signal or "").upper()
             db.complete_analysis(analysis_id, final_state, signal)
             if signal in counts:
                 counts[signal] += 1
@@ -299,29 +299,106 @@ def _run_scan(scan_id: int, trade_date: str) -> None:
     log.info("[scan %s] done — %s", scan_id, counts)
 
 
+# ---------- Paper trading accounts ----------
+
+@app.get("/api/paper-accounts")
+def list_paper_accounts() -> dict[str, Any]:
+    return {"accounts": db.list_paper_accounts()}
+
+
+@app.post("/api/paper-accounts")
+def create_paper_account(body: dict[str, Any]) -> dict[str, Any]:
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    try:
+        account_id = db.create_paper_account(
+            name=name,
+            starting_capital=float(body.get("starting_capital") or 100_000),
+            aggressiveness=int(body.get("aggressiveness") or 5),
+            bias=body.get("bias") or "neutral",
+        )
+    except Exception as exc:
+        if "UNIQUE" in str(exc):
+            raise HTTPException(status_code=409, detail=f"Account '{name}' already exists")
+        raise
+    account = db.get_paper_account(account_id)
+    return {"account": account}
+
+
+@app.put("/api/paper-accounts/{account_id}")
+def update_paper_account(account_id: int, body: dict[str, Any]) -> dict[str, Any]:
+    if not db.get_paper_account(account_id):
+        raise HTTPException(status_code=404, detail="not found")
+    db.update_paper_account(
+        account_id=account_id,
+        name=body.get("name"),
+        starting_capital=float(body["starting_capital"]) if "starting_capital" in body else None,
+        aggressiveness=int(body["aggressiveness"]) if "aggressiveness" in body else None,
+        bias=body.get("bias"),
+    )
+    return {"account": db.get_paper_account(account_id)}
+
+
+@app.delete("/api/paper-accounts/{account_id}")
+def delete_paper_account(account_id: int) -> dict[str, Any]:
+    if not db.delete_paper_account(account_id):
+        raise HTTPException(status_code=404, detail="not found")
+    return {"status": "deleted", "id": account_id}
+
+
 # ---------- S&P 500 scanner endpoints ----------
 
 @app.post("/api/spy-scan")
-async def start_spy_scan(background_tasks: BackgroundTasks) -> dict[str, Any]:
-    """Trigger a full S&P 500 scan. Idempotent for today."""
+async def start_spy_scan(
+    body: dict[str, Any] | None = None,
+    background_tasks: BackgroundTasks = None,
+) -> dict[str, Any]:
+    """Trigger a full S&P 500 scan. Idempotent for today.
+
+    Optional body: {account_id: int} — ties the scan to a paper account and
+    inherits its starting_capital, aggressiveness, and bias settings.
+    """
+    body = body or {}
     today = datetime.utcnow().date().isoformat()
+
+    account_id: int | None = body.get("account_id")
+    account: dict[str, Any] | None = None
+    if account_id:
+        account = db.get_paper_account(int(account_id))
+        if not account:
+            raise HTTPException(status_code=404, detail="paper account not found")
+
+    aggressiveness = int(body.get("aggressiveness") or (account or {}).get("aggressiveness") or 5)
+    bias = body.get("bias") or (account or {}).get("bias") or "neutral"
+
     # A failed or cancelled scan from today must NOT block a fresh run.
     with db.connect() as conn:
+        where = "trade_date = ? AND status NOT IN ('failed', 'cancelled')"
+        params: list[Any] = [today]
+        if account_id:
+            where += " AND paper_account_id = ?"
+            params.append(account_id)
         row = conn.execute(
-            "SELECT id, status FROM spy_scans WHERE trade_date = ? AND status NOT IN ('failed', 'cancelled') ORDER BY id DESC LIMIT 1",
-            (today,),
+            f"SELECT id, status FROM spy_scans WHERE {where} ORDER BY id DESC LIMIT 1",
+            params,
         ).fetchone()
     if row:
         return {"scan_id": int(row["id"]), "status": row["status"], "new": False}
 
-    scan_id = db.create_spy_scan(today)
+    scan_id = db.create_spy_scan(
+        today,
+        paper_account_id=account_id,
+        aggressiveness=aggressiveness,
+        bias=bias,
+    )
     background_tasks.add_task(_run_spy_scan_thread, scan_id, today)
     return {"scan_id": scan_id, "status": "running_quick", "new": True}
 
 
 @app.get("/api/spy-scans")
-def list_spy_scans(limit: int = 50) -> dict[str, Any]:
-    return {"scans": db.list_spy_scans(limit=limit)}
+def list_spy_scans(limit: int = 50, account_id: int | None = None) -> dict[str, Any]:
+    return {"scans": db.list_spy_scans(limit=limit, paper_account_id=account_id)}
 
 
 @app.get("/api/spy-scans/{scan_id}")
@@ -664,11 +741,32 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
     }
     selected_analysts = prefs.get("analysts") or ["market", "social", "news", "fundamentals"]
 
-    # Look up the previous completed scan to enable rebalancing.
-    prev_scan = db.get_latest_completed_spy_scan(exclude_id=scan_id)
+    # Read aggressiveness and bias from the scan row (set at creation from the account).
+    scan_row = db.get_spy_scan(scan_id) or {}
+    aggressiveness = int(scan_row.get("aggressiveness") or 5)
+    bias = scan_row.get("bias") or "neutral"
+    paper_account_id = scan_row.get("paper_account_id")
+
+    # Derive debate depth from aggressiveness (1–3→1 round, 4–7→2, 8–10→3).
+    if aggressiveness <= 3:
+        debate_rounds = 1
+    elif aggressiveness <= 7:
+        debate_rounds = 2
+    else:
+        debate_rounds = 3
+    config["max_debate_rounds"] = debate_rounds
+    config["max_risk_discuss_rounds"] = debate_rounds
+
+    # Look up the previous completed scan for the same account to enable rebalancing.
+    prev_scan = db.get_latest_completed_spy_scan(
+        exclude_id=scan_id,
+        paper_account_id=paper_account_id,
+    )
     previous_portfolio: list[dict[str, Any]] | None = None
     previous_scan_id: int | None = None
-    starting_value: float = 100_000.0
+    starting_value: float = float(
+        (db.get_paper_account(paper_account_id) or {}).get("starting_capital") or 100_000.0
+    ) if paper_account_id else 100_000.0
 
     if prev_scan:
         prev_portfolio_raw = prev_scan.get("portfolio_json") or []
@@ -683,7 +781,7 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
             else:
                 starting_value = float(sum(
                     p.get("dollar_amount", 0) for p in active_prev
-                )) or 100_000.0
+                )) or starting_value
             log.info(
                 "[spy %s] rebalancing from scan #%s, capital $%s",
                 scan_id, previous_scan_id, f"{starting_value:,.0f}",
@@ -711,7 +809,7 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
     if db.is_spy_scan_cancelled(scan_id):
         raise spy_scanner.ScanCancelled()
 
-    # Phase 3: allocator (rebalance if a previous portfolio exists, else fresh $100k)
+    # Phase 3: allocator (rebalance if a previous portfolio exists, else fresh capital)
     db.update_spy_scan(scan_id, status="running_alloc")
     with _phase("Portfolio allocation failed"):
         alloc_result = spy_allocator.run(
@@ -720,6 +818,8 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
             config,
             previous_portfolio=previous_portfolio,
             starting_value=starting_value,
+            aggressiveness=aggressiveness,
+            bias=bias,
         )
     portfolio = alloc_result.get("allocations", [])
 
