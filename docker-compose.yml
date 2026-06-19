@@ -109,6 +109,28 @@ services:
     # ports:
     #   - "3109:3107"   # ops debugging only (3109 host-side: 3107/3108 taken by mcp-shared elsewhere)
 
+  # LLM router — registers on the bus as the target agent and bridges
+  # llm_request DMs to Ollama / OpenAI-compatible backends. Same image,
+  # different entrypoint. Required for LLM_PROVIDER=switchboard with a
+  # non-Claude backend (Claude is handled by an external CLI + hook instead).
+  tradingagents-llm-router:
+    image: ghcr.io/jemplayer82/tradingagents:latest
+    pull_policy: always
+    entrypoint: ["python", "-m", "tradingagents.llm_router"]
+    environment:
+      SWITCHBOARD_URL: http://switchboard:3107
+      SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN}
+      SWITCHBOARD_AGENT_ID: ${SWITCHBOARD_TARGET_AGENT:-llm-router}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      CLAUDE_AGENT_ID: ${CLAUDE_AGENT_ID:-claude-code}
+      LLM_ROUTER_CONCURRENCY: ${LLM_ROUTER_CONCURRENCY:-8}
+    restart: unless-stopped
+    depends_on:
+      - switchboard
+
 volumes:
   tradingagents_data:
   switchboard_data:

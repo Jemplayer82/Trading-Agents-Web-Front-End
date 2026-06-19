@@ -176,7 +176,11 @@ def main() -> None:
     url = os.environ["SWITCHBOARD_URL"]
     token = os.environ["SWITCHBOARD_MCP_TOKEN"]  # pragma: allowlist secret
     agent_id = os.environ.get("SWITCHBOARD_AGENT_ID", "llm-router")
-    ollama_base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    # OLLAMA_BASE_URL already includes the /v1 suffix by convention (default
+    # http://localhost:11434/v1; Ollama Cloud is https://ollama.com/v1) — use
+    # it as-is, matching tradingagents.llm_clients.defaults.
+    ollama_base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    ollama_key = os.environ.get("OLLAMA_API_KEY", "")  # pragma: allowlist secret
     openai_key = os.environ.get("OPENAI_API_KEY", "")  # pragma: allowlist secret
     openai_base = os.environ.get("OPENAI_BASE_URL", "")
     claude_agent = os.environ.get("CLAUDE_AGENT_ID", "claude-code")
@@ -201,8 +205,8 @@ def main() -> None:
             with _cache_lock:
                 if key not in _openai_client_cache:
                     _openai_client_cache[key] = openai.OpenAI(
-                        base_url=ollama_base.rstrip("/") + "/v1",
-                        api_key="ollama",  # pragma: allowlist secret
+                        base_url=ollama_base,
+                        api_key=ollama_key or "ollama",  # pragma: allowlist secret
                     )
                 return _openai_client_cache[key]
         base = openai_base
