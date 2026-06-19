@@ -20,7 +20,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import BaseTool
-from pydantic import Field, PrivateAttr
+from pydantic import Field
 
 from .base_client import BaseLLMClient
 
@@ -130,8 +130,6 @@ class SwitchboardChatModel(BaseChatModel):
     provider: str = Field(default="")
     timeout_s: float = Field(default=180.0)
 
-    _registered: bool = PrivateAttr(default=False)
-
     def __init__(self, **data):
         if not data.get("bus_url"):
             data["bus_url"] = os.environ.get("SWITCHBOARD_URL", "")
@@ -168,8 +166,13 @@ class SwitchboardChatModel(BaseChatModel):
         system, anthro_msgs = _to_anthropic_format(messages)
         tools: list[dict] = kwargs.get("tools", [])
         thread_id = str(uuid4())
-
-        self._lazy_register()
+        # Per-call private reply inbox. Concurrent _generate calls must NOT share
+        # an agent_id: the bus DRAINS an inbox on read, so one call's poll would
+        # consume (and discard) another call's reply, hanging it until timeout.
+        # A unique id per call gives each its own inbox. No registration needed —
+        # the bus delivers DMs by to_agent regardless, and an unregistered sender
+        # never pollutes the agent list (send only touches existing rows).
+        reply_id = f"{self.self_agent_id}-{uuid4().hex[:12]}"
 
         payload = json.dumps({
             "provider": self.provider,
@@ -181,7 +184,7 @@ class SwitchboardChatModel(BaseChatModel):
         })
 
         send_result = self._bus_call("send_message", {
-            "from": self.self_agent_id,
+            "from": reply_id,
             "to": self.target_agent_id,
             "type": "llm_request",
             "thread_id": thread_id,
@@ -197,7 +200,7 @@ class SwitchboardChatModel(BaseChatModel):
             poll_s = min(25.0, max(1.0, remaining))
             try:
                 result = self._bus_call("wait_for_message", {
-                    "agent_id": self.self_agent_id,
+                    "agent_id": reply_id,
                     "timeout_seconds": int(poll_s),
                 })
             except Exception as exc:
@@ -276,18 +279,6 @@ class SwitchboardChatModel(BaseChatModel):
         if not content:
             return {}
         return json.loads(content[0].get("text", "{}"))
-
-    def _lazy_register(self) -> None:
-        if self._registered:
-            return
-        try:
-            self._bus_call("register_agent", {
-                "agent_id": self.self_agent_id,
-                "name": "TradingAgents LLM Client",
-            })
-            self._registered = True
-        except Exception as exc:
-            log.debug("SwitchboardChatModel: register_agent skipped: %s", exc)
 
 
 # ---------------------------------------------------------------------------

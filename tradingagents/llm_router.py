@@ -28,7 +28,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 import httpx
@@ -187,36 +189,72 @@ def main() -> None:
     bus("set_status", {"agent_id": agent_id, "activity": "ready"})
     log.info("llm-router registered as '%s'", agent_id)
 
-    # Lazy openai import
+    # Lazy openai import; client cache shared across worker threads (lock-guarded
+    # because check-then-create on a plain dict races under concurrency).
     _openai_client_cache: dict = {}
+    _cache_lock = threading.Lock()
 
     def get_openai_client(provider: str, model: str):
         import openai
         if provider == "ollama":
             key = f"ollama:{ollama_base}"
-            if key not in _openai_client_cache:
-                _openai_client_cache[key] = openai.OpenAI(
-                    base_url=ollama_base.rstrip("/") + "/v1",
-                    api_key="ollama",  # pragma: allowlist secret
-                )
-            return _openai_client_cache[key]
-        else:
-            base = openai_base
-            # Provider-specific default base URLs
-            if not base:
-                if provider == "xai":
-                    base = "https://api.x.ai/v1"
-                elif provider in ("grok",):
-                    base = "https://api.x.ai/v1"
-                elif provider == "deepseek":
-                    base = "https://api.deepseek.com"
-            key = f"{provider}:{base}"
+            with _cache_lock:
+                if key not in _openai_client_cache:
+                    _openai_client_cache[key] = openai.OpenAI(
+                        base_url=ollama_base.rstrip("/") + "/v1",
+                        api_key="ollama",  # pragma: allowlist secret
+                    )
+                return _openai_client_cache[key]
+        base = openai_base
+        # Provider-specific default base URLs
+        if not base:
+            if provider in ("xai", "grok"):
+                base = "https://api.x.ai/v1"
+            elif provider == "deepseek":
+                base = "https://api.deepseek.com"
+        key = f"{provider}:{base}"
+        with _cache_lock:
             if key not in _openai_client_cache:
                 kwargs: dict = {"api_key": openai_key or "x"}  # pragma: allowlist secret
                 if base:
                     kwargs["base_url"] = base
                 _openai_client_cache[key] = openai.OpenAI(**kwargs)
             return _openai_client_cache[key]
+
+    def dispatch(msg: dict) -> None:
+        """Handle one llm_request in a worker thread; reply llm_error on failure."""
+        try:
+            _handle(
+                msg=msg,
+                bus=bus,
+                agent_id=agent_id,
+                claude_agent=claude_agent,
+                get_openai_client=get_openai_client,
+                url=url,
+                token=token,  # pragma: allowlist secret
+            )
+        except Exception:
+            log.exception("Error handling message %s", msg.get("id"))
+            try:
+                bus("send_message", {
+                    "from": agent_id,
+                    "to": msg.get("from"),
+                    "type": "llm_error",
+                    "thread_id": msg.get("thread_id"),
+                    "reply_to": msg.get("id"),
+                    "content": json.dumps({"error": "router failed handling request"}),
+                })
+            except Exception:
+                pass
+
+    # Concurrent dispatch: analysts fan out in parallel, so requests must be
+    # handled concurrently or later ones blow past the client's wall-clock
+    # timeout. The main loop is the SOLE poller of `agent_id`; workers either
+    # don't poll (openai path) or poll their own private inbox (claude path),
+    # so no worker can drain a request out from under the main loop.
+    concurrency = max(1, int(os.environ.get("LLM_ROUTER_CONCURRENCY", "8")))
+    executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="llm-router")
+    log.info("llm-router dispatching with up to %d concurrent workers", concurrency)
 
     while True:
         try:
@@ -229,35 +267,7 @@ def main() -> None:
         for msg in result.get("messages", []):
             if msg.get("type") != "llm_request":
                 continue
-
-            try:
-                _handle(
-                    msg=msg,
-                    bus=bus,
-                    agent_id=agent_id,
-                    claude_agent=claude_agent,
-                    get_openai_client=get_openai_client,
-                    url=url,
-                    token=token,  # pragma: allowlist secret
-                )
-            except Exception as exc:
-                log.exception("Error handling message %s", msg.get("id"))
-                try:
-                    bus("send_message", {
-                        "from": agent_id,
-                        "to": msg.get("from"),
-                        "type": "llm_error",
-                        "thread_id": msg.get("thread_id"),
-                        "reply_to": msg.get("id"),
-                        "content": json.dumps({"error": str(exc)}),
-                    })
-                except Exception:
-                    pass
-
-            try:
-                bus("set_status", {"agent_id": agent_id, "activity": "ready"})
-            except Exception:
-                pass
+            executor.submit(dispatch, msg)
 
 
 def _handle(msg, bus, agent_id, claude_agent, get_openai_client, url, token):
@@ -273,13 +283,16 @@ def _handle(msg, bus, agent_id, claude_agent, get_openai_client, url, token):
     msg_id = msg.get("id")
 
     log.info("llm_request from=%s provider=%s model=%s", sender, provider, model)
-    bus("set_status", {"agent_id": agent_id, "activity": f"calling {provider}"})
 
     if provider == "claude":
-        # Forward to Claude CLI agent; relay the reply back to the original sender
+        # Forward to Claude CLI agent; relay the reply back to the original sender.
+        # Poll on a PRIVATE inbox (unique `from`), not the router's main agent_id —
+        # otherwise this blocking wait would drain (and discard) other analysts'
+        # incoming llm_requests while we sit here waiting on Claude.
+        fwd_inbox = f"{agent_id}-fwd-{uuid4().hex[:12]}"
         fwd_thread = str(uuid4())
         send_result = bus("send_message", {
-            "from": agent_id,
+            "from": fwd_inbox,
             "to": claude_agent,
             "type": "llm_request",
             "thread_id": fwd_thread,
@@ -290,9 +303,10 @@ def _handle(msg, bus, agent_id, claude_agent, get_openai_client, url, token):
         # Wait for Claude's reply
         deadline = time.monotonic() + 180
         reply_content = None
+        reply_type = "llm_response"
         while time.monotonic() < deadline:
             res = _bus_call(url, token, "wait_for_message", {
-                "agent_id": agent_id, "timeout_seconds": 25
+                "agent_id": fwd_inbox, "timeout_seconds": 25
             })
             for m in res.get("messages", []):
                 if (fwd_id and m.get("reply_to") == fwd_id) or m.get("thread_id") == fwd_thread:
