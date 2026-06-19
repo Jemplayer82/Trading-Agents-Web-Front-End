@@ -29,6 +29,7 @@ services:
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
       SWITCHBOARD_URL: http://switchboard:3107
       SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN}
+      SWITCHBOARD_TARGET_AGENT: ${SWITCHBOARD_TARGET_AGENT:-llm-router}
       BUS_MIRROR: ${BUS_MIRROR:-analysis}
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
@@ -49,6 +50,9 @@ services:
       SCHWAB_APP_KEY: ${SCHWAB_APP_KEY}
       SCHWAB_APP_SECRET: ${SCHWAB_APP_SECRET}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
+      SWITCHBOARD_URL: http://switchboard:3107
+      SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN}
+      SWITCHBOARD_TARGET_AGENT: ${SWITCHBOARD_TARGET_AGENT:-llm-router}
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
     restart: unless-stopped

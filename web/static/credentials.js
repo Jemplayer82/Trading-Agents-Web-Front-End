@@ -35,6 +35,7 @@
       "minimax-cn": "MiniMax (China)",
       openrouter: "OpenRouter",
       ollama: "Ollama",
+      switchboard: "Switchboard (Bus LLM)",
     };
     return map[key] || key;
   }
