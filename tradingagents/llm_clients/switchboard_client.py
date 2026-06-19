@@ -127,6 +127,7 @@ class SwitchboardChatModel(BaseChatModel):
     self_agent_id: str = Field(default="tradingagents-llm")
     target_agent_id: str = Field(default="llm-router")
     model_name: str = Field(default="claude-sonnet-4-6")
+    provider: str = Field(default="")
     timeout_s: float = Field(default=180.0)
 
     _registered: bool = PrivateAttr(default=False)
@@ -140,6 +141,8 @@ class SwitchboardChatModel(BaseChatModel):
             env_agent = os.environ.get("SWITCHBOARD_TARGET_AGENT", "")
             if env_agent:
                 data["target_agent_id"] = env_agent
+        if not data.get("provider"):
+            data["provider"] = os.environ.get("SWITCHBOARD_PROVIDER", "")
         super().__init__(**data)
 
     @property
@@ -169,6 +172,7 @@ class SwitchboardChatModel(BaseChatModel):
         self._lazy_register()
 
         payload = json.dumps({
+            "provider": self.provider,
             "model": self.model_name,
             "system": system,
             "messages": anthro_msgs,
@@ -183,7 +187,8 @@ class SwitchboardChatModel(BaseChatModel):
             "thread_id": thread_id,
             "content": payload,
         })
-        sent_id: int | None = send_result.get("id")
+        # send_message returns {"ok": true, "message_id": N} — NOT "id".
+        sent_id: int | None = send_result.get("message_id")
 
         # Poll for response
         deadline = time.monotonic() + self.timeout_s
@@ -292,9 +297,9 @@ class SwitchboardChatModel(BaseChatModel):
 class SwitchboardLLMClient(BaseLLMClient):
     """BaseLLMClient that creates a SwitchboardChatModel.
 
-    Reads SWITCHBOARD_URL, SWITCHBOARD_MCP_TOKEN, SWITCHBOARD_TARGET_AGENT
-    from env vars (already present in docker-compose.yml for the api/portfolio
-    services).
+    Reads SWITCHBOARD_URL, SWITCHBOARD_MCP_TOKEN, SWITCHBOARD_TARGET_AGENT,
+    SWITCHBOARD_PROVIDER from env vars (already present in docker-compose.yml
+    for the api/portfolio services).
     """
 
     def get_llm(self) -> SwitchboardChatModel:
@@ -303,6 +308,7 @@ class SwitchboardLLMClient(BaseLLMClient):
             token=os.environ.get("SWITCHBOARD_MCP_TOKEN", ""),  # pragma: allowlist secret
             target_agent_id=os.environ.get("SWITCHBOARD_TARGET_AGENT", "llm-router"),
             model_name=self.model,
+            provider=os.environ.get("SWITCHBOARD_PROVIDER", ""),
             timeout_s=float(self.kwargs.get("timeout_s", 180)),
         )
 

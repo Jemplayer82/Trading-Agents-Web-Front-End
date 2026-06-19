@@ -113,6 +113,7 @@ SETTINGS_REGISTRY: list[dict[str, Any]] = [
     {"key": "OLLAMA_BASE_URL", "label": "Ollama Base URL", "group": "LLM Infra", "secret": False, "placeholder": "https://ollama.com/v1 or http://host:11434/v1"},
     {"key": "OLLAMA_API_KEY", "label": "Ollama API Key", "group": "LLM Infra", "secret": True, "placeholder": "Ollama Cloud auth token"},
     {"key": "SWITCHBOARD_TARGET_AGENT", "label": "Switchboard — target agent ID", "group": "LLM Infra", "secret": False, "placeholder": "llm-router (bus agent that handles LLM requests)"},  # pragma: allowlist secret
+    {"key": "SWITCHBOARD_PROVIDER", "label": "Switchboard — backend provider", "group": "LLM Infra", "secret": False, "placeholder": "blank/ollama, openai, xai, grok, deepseek, or claude (which backend llm-router dispatches to)"},  # pragma: allowlist secret
     # Email / newsletter
     {"key": "SMTP_HOST", "label": "SMTP Host", "group": "Email / Newsletter", "secret": False, "placeholder": "smtp.gmail.com"},
     {"key": "SMTP_PORT", "label": "SMTP Port", "group": "Email / Newsletter", "secret": False, "placeholder": "587"},

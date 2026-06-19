@@ -30,6 +30,7 @@ services:
       SWITCHBOARD_URL: http://switchboard:3107
       SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN}
       SWITCHBOARD_TARGET_AGENT: ${SWITCHBOARD_TARGET_AGENT:-llm-router}
+      SWITCHBOARD_PROVIDER: ${SWITCHBOARD_PROVIDER:-}
       BUS_MIRROR: ${BUS_MIRROR:-analysis}
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
@@ -53,6 +54,7 @@ services:
       SWITCHBOARD_URL: http://switchboard:3107
       SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN}
       SWITCHBOARD_TARGET_AGENT: ${SWITCHBOARD_TARGET_AGENT:-llm-router}
+      SWITCHBOARD_PROVIDER: ${SWITCHBOARD_PROVIDER:-}
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
     restart: unless-stopped

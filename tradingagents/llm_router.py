@@ -285,7 +285,7 @@ def _handle(msg, bus, agent_id, claude_agent, get_openai_client, url, token):
             "thread_id": fwd_thread,
             "content": msg["content"],
         })
-        fwd_id = send_result.get("id")
+        fwd_id = send_result.get("message_id")  # send_message returns message_id, not id
 
         # Wait for Claude's reply
         deadline = time.monotonic() + 180
