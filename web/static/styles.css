@@ -897,7 +897,7 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .bus-msg[data-agent="risk-neutral"]         .bus-badge { background: #141c24; color: var(--dim); }
 
 /* Orchestrator — dim */
-.bus-msg[data-agent="langgraph-orchestrator"] .bus-badge { background: #0d1219; color: var(--dim); }
+.bus-msg[data-agent="switchboard-orchestrator"] .bus-badge { background: #0d1219; color: var(--dim); }
 
 /* msg_type chips */
 .bus-chip {
