@@ -47,6 +47,7 @@ from . import alerts, auth_app, brokerages, db, spy_allocator, spy_scanner
 from . import credentials as creds
 from ._logging import configure_logging
 from .portfolio import aggregator
+from .runner import aggressiveness_to_rounds, apply_indicator_vendor
 from .spy_tickers import get_sp500_tickers
 
 log = logging.getLogger(__name__)
@@ -101,10 +102,18 @@ def schwab_status() -> dict[str, Any]:
 
 
 @app.post("/api/portfolio-scan")
-async def start_scan(background_tasks: BackgroundTasks) -> dict[str, Any]:
+async def start_scan(
+    background_tasks: BackgroundTasks,
+    body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Kick off a portfolio scan. Idempotent for the same date — returns the
     existing scan_id if a non-failed scan was already created today.
+
+    Optional body: {aggressiveness: 1-10, bias: bullish|neutral|bearish}.
     """
+    body = body or {}
+    aggressiveness = int(body.get("aggressiveness") or 5)
+    bias = body.get("bias") or "neutral"
     today = datetime.utcnow().date().isoformat()
     # Idempotency check
     with db.connect() as conn:
@@ -121,7 +130,7 @@ async def start_scan(background_tasks: BackgroundTasks) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Schwab MCP not connected — re-authorize at https://schwab.txferguson.net/auth")
 
     scan_id = db.create_portfolio_scan(today)
-    background_tasks.add_task(_run_scan_thread, scan_id, today)
+    background_tasks.add_task(_run_scan_thread, scan_id, today, aggressiveness, bias)
     return {"scan_id": scan_id, "status": "running", "new": True}
 
 
@@ -164,11 +173,11 @@ def _refresh_creds_from_db() -> None:
         log.exception("[creds] refresh failed")
 
 
-def _run_scan_thread(scan_id: int, trade_date: str) -> None:
+def _run_scan_thread(scan_id: int, trade_date: str, aggressiveness: int = 5, bias: str = "neutral") -> None:
     """Synchronous worker run inside a thread by FastAPI BackgroundTasks."""
     _refresh_creds_from_db()
     try:
-        _run_scan(scan_id, trade_date)
+        _run_scan(scan_id, trade_date, aggressiveness, bias)
     except Exception as exc:
         log.exception("Scan %s crashed", scan_id)
         db.fail_portfolio_scan(scan_id, str(exc))
@@ -195,7 +204,7 @@ def _mcp_positions() -> list[dict[str, Any]]:
     return list(agg.values())
 
 
-def _run_scan(scan_id: int, trade_date: str) -> None:
+def _run_scan(scan_id: int, trade_date: str, aggressiveness: int = 5, bias: str = "neutral") -> None:
     """Portfolio scan worker: holdings -> per-ticker graph runs -> aggregator.
 
     A per-ticker failure is recorded (fail_analysis + an error row in the
@@ -223,14 +232,20 @@ def _run_scan(scan_id: int, trade_date: str) -> None:
     # Record the total number of tickers to be scanned so the frontend can show a progress bar.
     db.update_portfolio_scan(scan_id, scan_total=len(pos_dicts))
 
-    # Step 2: load user preferences for LLM / analyst config
+    # Step 2: load user preferences for LLM / analyst config. Aggressiveness
+    # (from the Run Scan form) drives debate depth; bias flows to each ticker's
+    # orchestrator just like the Run Analysis tab.
     prefs = db.get_preferences() or {}
+    rounds = aggressiveness_to_rounds(aggressiveness)
     config: dict[str, Any] = {
         "llm_provider": prefs.get("provider") or "ollama",
         "deep_think_llm": prefs.get("deep_model") or "gpt-oss:120b-cloud",
         "quick_think_llm": prefs.get("quick_model") or "gpt-oss:20b-cloud",
-        "max_debate_rounds": int(prefs.get("research_depth") or 1),
+        "max_debate_rounds": rounds,
+        "max_risk_discuss_rounds": rounds,
+        "bias": bias,
     }
+    apply_indicator_vendor(config)
     selected_analysts = prefs.get("analysts") or ["market", "social", "news", "fundamentals"]
 
     # Step 3: for each position, create an analyses row + run the graph
@@ -748,14 +763,13 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
     paper_account_id = scan_row.get("paper_account_id")
 
     # Derive debate depth from aggressiveness (1–3→1 round, 4–7→2, 8–10→3).
-    if aggressiveness <= 3:
-        debate_rounds = 1
-    elif aggressiveness <= 7:
-        debate_rounds = 2
-    else:
-        debate_rounds = 3
+    debate_rounds = aggressiveness_to_rounds(aggressiveness)
     config["max_debate_rounds"] = debate_rounds
     config["max_risk_discuss_rounds"] = debate_rounds
+    # Bias must reach the per-ticker orchestrator too (not just the allocator),
+    # so deep-dive decisions honor the chosen stance like the Run Analysis tab.
+    config["bias"] = bias
+    apply_indicator_vendor(config)
 
     # Look up the previous completed scan for the same account to enable rebalancing.
     prev_scan = db.get_latest_completed_spy_scan(

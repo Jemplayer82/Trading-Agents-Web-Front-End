@@ -55,6 +55,35 @@ REPORT_KEYS = (
 ALL_ANALYSTS = ["market", "social", "news", "fundamentals"]
 
 
+def aggressiveness_to_rounds(aggressiveness: int) -> int:
+    """Map an aggressiveness level (1–10) to debate/risk-discussion rounds (1–3).
+
+    Shared by the single-ticker config (build_config), the Portfolio Scan, and
+    the S&P 500 deep dive so the mapping can't drift between them.
+    """
+    if aggressiveness <= 3:
+        return 1
+    if aggressiveness <= 7:
+        return 2
+    return 3
+
+
+def apply_indicator_vendor(cfg: dict[str, Any]) -> None:
+    """Override cfg['data_vendors']['technical_indicators'] from the user setting.
+
+    The Settings UI writes TECHNICAL_INDICATOR_VENDOR to app_settings → os.environ.
+    Read it call-time and set it on a COPY of data_vendors (never mutate the shared
+    DEFAULT_CONFIG dict). No-op for an unset/unknown value (keeps the yfinance
+    default). Shared by all tabs so the choice applies everywhere.
+    """
+    vendor = (os.environ.get("TECHNICAL_INDICATOR_VENDOR") or "").strip().lower()
+    if vendor not in ("yfinance", "alpha_vantage"):
+        return
+    dv = dict(cfg.get("data_vendors") or DEFAULT_CONFIG.get("data_vendors") or {})
+    dv["technical_indicators"] = vendor
+    cfg["data_vendors"] = dv
+
+
 def build_config(params: dict[str, Any]) -> dict[str, Any]:
     """Merge user params with DEFAULT_CONFIG to build the orchestrator config."""
     cfg = dict(DEFAULT_CONFIG)
@@ -68,12 +97,7 @@ def build_config(params: dict[str, Any]) -> dict[str, Any]:
     # Aggressiveness (1–10) → debate rounds. Overrides research_depth when set.
     aggressiveness = int(params.get("aggressiveness") or 0)
     if aggressiveness:
-        if aggressiveness <= 3:
-            rounds = 1
-        elif aggressiveness <= 7:
-            rounds = 2
-        else:
-            rounds = 3
+        rounds = aggressiveness_to_rounds(aggressiveness)
         cfg["max_debate_rounds"] = rounds
         cfg["max_risk_discuss_rounds"] = rounds
     else:
@@ -83,6 +107,9 @@ def build_config(params: dict[str, Any]) -> dict[str, Any]:
 
     # Decision bias (bullish / neutral / bearish) → Portfolio Manager prompt modifier.
     cfg["bias"] = params.get("bias") or "neutral"
+
+    # Technical-indicator vendor (yfinance / alpha_vantage) from Settings.
+    apply_indicator_vendor(cfg)
 
     # Provider-specific thinking knobs (optional; ignored if provider doesn't use them).
     if params.get("openai_reasoning_effort"):

@@ -30,6 +30,7 @@ let activeSpyId = null;
 let spyPollTimer = null;
 let paperAccounts = [];
 let activePaperAccountId = null;
+let editingAccountId = null;
 
 // ===== Paper account management =====
 
@@ -99,6 +100,8 @@ function renderAccountsModal() {
             "Agg " + a.aggressiveness + "/10 · " + biasLabel +
           "</span>" +
         "</div>" +
+        "<button type=\"button\" class=\"ghost\" style=\"font-size:11px;padding:3px 8px;\" " +
+          "onclick=\"editPaperAccount(" + a.id + ")\">Edit</button>" +
         "<button type=\"button\" class=\"ghost\" style=\"font-size:11px;padding:3px 8px;color:var(--accent-red);border-color:var(--accent-red);\" " +
           "onclick=\"deletePaperAccount(" + a.id + ")\">Delete</button>" +
       "</div>"
@@ -108,34 +111,73 @@ function renderAccountsModal() {
 
 async function openManageAccounts() {
   await loadPaperAccounts();
+  resetAccountForm();
   const modal = $("paper-accounts-modal");
   if (modal) { modal.hidden = false; modal.style.display = "flex"; }
 }
 
 function closeManageAccounts() {
   const modal = $("paper-accounts-modal");
-  if (modal) modal.hidden = true;
+  if (modal) { modal.hidden = true; modal.style.display = "none"; }
 }
 
-async function createPaperAccount() {
+// Load an account's values into the New/Edit account form.
+function populateAccountForm(acct) {
+  if ($("new-acct-name")) $("new-acct-name").value = acct.name || "";
+  if ($("new-acct-capital")) $("new-acct-capital").value = acct.starting_capital || 100000;
+  if ($("new-acct-agg")) $("new-acct-agg").value = acct.aggressiveness || 5;
+  if ($("new-acct-agg-val")) $("new-acct-agg-val").textContent = acct.aggressiveness || 5;
+  const bias = acct.bias || "neutral";
+  document.querySelectorAll("#new-acct-bias .bias-btn").forEach((x) => {
+    x.classList.toggle("active", x.dataset.val === bias);
+  });
+}
+
+// Clear the form back to "create" defaults.
+function resetAccountForm() {
+  editingAccountId = null;
+  populateAccountForm({ name: "", starting_capital: 100000, aggressiveness: 5, bias: "neutral" });
+  const btn = $("btn-create-account");
+  if (btn) btn.textContent = "Create Account";
+}
+
+// Load an existing account into the form for editing (PUT on save).
+function editPaperAccount(id) {
+  const acct = paperAccounts.find((a) => a.id === id);
+  if (!acct) return;
+  editingAccountId = id;
+  populateAccountForm(acct);
+  const btn = $("btn-create-account");
+  if (btn) btn.textContent = "Save Changes";
+  const name = $("new-acct-name");
+  if (name) name.focus();
+}
+
+// Create (POST) or update (PUT) a paper account from the form.
+async function savePaperAccount() {
   const name = ($("new-acct-name") || {}).value?.trim();
   if (!name) { alert("Enter an account name."); return; }
   const capital = parseFloat(($("new-acct-capital") || {}).value || "100000");
   const agg = parseInt(($("new-acct-agg") || {}).value || "5", 10);
   const activeBiasBtn = document.querySelector("#new-acct-bias .bias-btn.active");
   const bias = activeBiasBtn?.dataset?.val || "neutral";
+  const body = JSON.stringify({ name, starting_capital: capital, aggressiveness: agg, bias });
 
   try {
-    await apiFetch("/api/paper-accounts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, starting_capital: capital, aggressiveness: agg, bias }),
-    });
-    if ($("new-acct-name")) $("new-acct-name").value = "";
+    if (editingAccountId) {
+      await apiFetch("/api/paper-accounts/" + editingAccountId, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body,
+      });
+    } else {
+      await apiFetch("/api/paper-accounts", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body,
+      });
+    }
+    resetAccountForm();        // back to create mode; list refresh shows the change
     await loadPaperAccounts();
     await loadSpyHistory();
   } catch (e) {
-    alert("Failed to create account: " + e);
+    alert("Failed to save account: " + e);
   }
 }
 
@@ -720,7 +762,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // New account form inside modal
   const createBtn = $("btn-create-account");
-  if (createBtn) createBtn.addEventListener("click", createPaperAccount);
+  if (createBtn) createBtn.addEventListener("click", savePaperAccount);
 
   // New account aggressiveness slider live label
   const newAggSlider = $("new-acct-agg");

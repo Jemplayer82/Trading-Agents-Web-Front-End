@@ -102,18 +102,21 @@ services:
       - tradingagents-api
       - tradingagents-portfolio
 
-  # Agent message bus — internal only; the dashboard streams it via /api/bus.
+  # Agent message bus — the dashboard streams it via /api/bus, AND it's exposed
+  # on host port 3109 so an external Claude CLI (or other off-stack agent) can
+  # reach it at http://<host>:3109/mcp. The SWITCHBOARD_MCP_TOKEN bearer is the
+  # ONLY gate on that port — keep it strong; do not public-proxy without TLS.
   switchboard:
     image: ghcr.io/jemplayer82/mcp-switchboard:latest
     environment:
       PORT: "3107"
       SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN:?SWITCHBOARD_MCP_TOKEN required}
       SWITCHBOARD_DB_PATH: /data/switchboard.db
+    ports:
+      - "3109:3107"   # external bus access (3109 host-side: 3107/3108 used by mcp-shared)
     volumes:
       - switchboard_data:/data
     restart: unless-stopped
-    # ports:
-    #   - "3109:3107"   # ops debugging only (3109 host-side: 3107/3108 taken by mcp-shared elsewhere)
 
   # LLM router — registers on the bus as the target agent and bridges
   # llm_request DMs to Ollama / OpenAI-compatible backends. Same image,
