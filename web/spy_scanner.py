@@ -160,7 +160,7 @@ _CONV_RE = re.compile(r"CONVICTION\s*:\s*([1-9]|10)", re.IGNORECASE)
 _REASON_RE = re.compile(r"REASONING\s*:\s*(.+)", re.IGNORECASE)
 
 
-def _llm_quick(config: dict[str, Any]) -> ChatOpenAI:
+def _llm_quick(config: dict[str, Any]):
     return llm_for(config, deep=False, temperature=0.0)
 
 

@@ -144,7 +144,7 @@ PER_TICKER_TEMPLATE = (
 )
 
 
-def _llm(config: dict[str, Any]) -> ChatOpenAI:
+def _llm(config: dict[str, Any]):
     return llm_for(config, deep=True, temperature=0.1)
 
 

@@ -2,8 +2,8 @@
 
 Centralises the duplicated `_llm_for()` pattern previously copied across
 `web/portfolio/aggregator.py` and `web/spy_allocator.py`. Use this helper
-anywhere the web layer needs a quick ChatOpenAI client driven by the
-user's saved preferences (provider, deep_model, quick_model, backend_url).
+anywhere the web layer needs a quick LLM client driven by the user's saved
+preferences (provider, deep_model, quick_model, backend_url).
 
 API keys are resolved in this order:
   1. config["api_key"]            (explicit override from caller)
@@ -11,10 +11,9 @@ API keys are resolved in this order:
   3. process env var              (PROVIDER_API_KEY_ENV mapping)
   4. provider-specific fallback   (e.g. Ollama uses "ollama" as a dummy key)
 
-Gotcha: this always builds `langchain_openai.ChatOpenAI`, so it only works
-against OpenAI-compatible endpoints. The analysis graph itself uses the full
-per-provider factory in `tradingagents/llm_clients` instead; this helper is
-for the web layer's lightweight one-shot calls only.
+For OpenAI-compatible providers this builds `langchain_openai.ChatOpenAI`.
+For the "switchboard" provider it delegates to `create_llm_client` so the
+bus is used consistently with the main orchestrator pipeline.
 """
 from __future__ import annotations
 
@@ -72,8 +71,8 @@ def _resolve_base_url(provider: str, config: dict[str, Any]) -> str | None:
     return None
 
 
-def llm_for(config: dict[str, Any], *, deep: bool = True, temperature: float = 0.2) -> ChatOpenAI:
-    """Build a ChatOpenAI client from the user's prefs dict.
+def llm_for(config: dict[str, Any], *, deep: bool = True, temperature: float = 0.2):
+    """Build an LLM client from the user's prefs dict.
 
     Args:
         config: prefs dict (e.g. from `db.get_preferences()`). Recognised keys:
@@ -82,13 +81,18 @@ def llm_for(config: dict[str, Any], *, deep: bool = True, temperature: float = 0
         temperature: model temperature; callers override per use-case.
 
     Returns:
-        A configured `langchain_openai.ChatOpenAI` instance.
+        A LangChain BaseChatModel instance (ChatOpenAI for OpenAI-compatible
+        providers, SwitchboardChatModel when provider is "switchboard").
     """
     provider = (config.get("llm_provider") or "ollama").lower()
     if deep:
         model = config.get("deep_think_llm") or "gpt-oss:120b-cloud"
     else:
         model = config.get("quick_think_llm") or "gpt-oss:20b-cloud"
+
+    if provider == "switchboard":
+        from tradingagents.llm_clients import create_llm_client
+        return create_llm_client(provider="switchboard", model=model).get_llm()
 
     kwargs: dict[str, Any] = {"model": model, "temperature": temperature}
     base_url = _resolve_base_url(provider, config)
