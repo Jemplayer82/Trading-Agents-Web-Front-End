@@ -1,18 +1,19 @@
-"""Out-of-band ops script: redeploy the tradingagents stack via Portainer.
+"""Out-of-band ops script: render + redeploy the tradingagents stack (67).
 
-Unlike a plain re-pull, this PUTs the *local* docker-compose.yml as the stack
-file, so compose changes (new services like tradingagents-llm-router, new env
-vars) actually take effect. It preserves the stack's existing Env[] verbatim so
-secrets (SWITCHBOARD_MCP_TOKEN, OLLAMA_API_KEY, TOKEN_ENCRYPTION_KEY, ...) are
-not wiped — the Portainer GET-redacts / PUT-wipes gotcha.
+The repo `docker-compose.yml` is the source of truth. This script first RENDERS
+the deploy payload from it (scripts/render_stack_payload.py — substitutes secrets
+from the gitignored `.env`), then PUTs that payload to Portainer. So compose
+changes (new services, new env vars) take effect, and secrets are never wiped
+(they're inline literals in the rendered StackFileContent; Portainer Env[] stays
+empty).
 
 Flow:
+  0. Render payload from docker-compose.yml + .env  -> STACK_PAYLOAD_OUT.
   1. Pull both :latest images on the endpoint (anonymous; images are public).
-  2. GET the stack (Env[]) — keep its secrets.
-  3. PUT the stack with the LOCAL compose file + preserved Env[], prune=True.
-  4. Recreate any container still on an older image id (a PUT alone often won't
+  2. PUT the rendered payload to the stack.
+  3. Recreate any container still on an older image id (a PUT alone often won't
      recreate just because :latest moved).
-  5. Print container image ids so you can eyeball what actually rolled.
+  4. Print final container state.
 
 Credentials come from the environment — NEVER hardcode a Portainer token in a
 committed file. Run e.g.:
@@ -21,11 +22,12 @@ committed file. Run e.g.:
     PORTAINER_TOKEN=ptr_... python scripts/redeploy.py            # bash
 
 Optional overrides: PORTAINER_URL, PORTAINER_ENDPOINT_ID, TRADINGAGENTS_STACK,
-COMPOSE_FILE.
+STACK_PAYLOAD_OUT.
 """
 import json
 import os
 import ssl
+import subprocess
 import sys
 import time
 import urllib.request
@@ -35,9 +37,8 @@ BASE = os.environ.get("PORTAINER_URL", "https://192.168.7.50:9443").rstrip("/")
 TOKEN = os.environ.get("PORTAINER_TOKEN")  # pragma: allowlist secret
 ENDPOINT_ID = int(os.environ.get("PORTAINER_ENDPOINT_ID", "3"))
 STACK_NAME = os.environ.get("TRADINGAGENTS_STACK", "tradingagents")
-COMPOSE_FILE = os.environ.get(
-    "COMPOSE_FILE", str(Path(__file__).resolve().parent.parent / "docker-compose.yml")
-)
+PAYLOAD_OUT = os.environ.get("STACK_PAYLOAD_OUT", r"C:\tmp\stack67_payload.json")
+RENDER = Path(__file__).resolve().parent / "render_stack_payload.py"
 IMAGES = (
     "ghcr.io/jemplayer82/tradingagents",
     "ghcr.io/jemplayer82/tradingagents-web",
@@ -66,34 +67,26 @@ def req(method, path, body=None, timeout=180):
             return None
 
 
+# 0. render payload from the repo compose (+ .env secrets)
+print("rendering payload from docker-compose.yml ...")
+proc = subprocess.run([sys.executable, str(RENDER)], env={**os.environ, "STACK_PAYLOAD_OUT": PAYLOAD_OUT})
+if proc.returncode != 0:
+    sys.exit("render failed — aborting deploy.")
+payload = json.loads(Path(PAYLOAD_OUT).read_text(encoding="utf-8"))
+
 # 1. pull both images (public)
 for image in IMAGES:
     req("POST", f"/api/endpoints/{ENDPOINT_ID}/docker/images/create?fromImage={image}&tag=latest")
     print(f"pulled {image}:latest")
 
-# 2. locate stack + load LOCAL compose (so new services/env actually deploy)
+# 2. locate stack + PUT the rendered payload (secrets are inline literals)
 stacks = req("GET", "/api/stacks")
 stack_id = next(s["Id"] for s in stacks if s["Name"] == STACK_NAME)
 print(f"stack id: {stack_id}")
-compose_yaml = Path(COMPOSE_FILE).read_text(encoding="utf-8")
-stack = req("GET", f"/api/stacks/{stack_id}")
-env = stack.get("Env") or []
-print(f"preserving {len(env)} existing env vars")
-
-# 3. PUT the new compose, secrets preserved
-result = req(
-    "PUT",
-    f"/api/stacks/{stack_id}?endpointId={ENDPOINT_ID}",
-    {
-        "stackFileContent": compose_yaml,
-        "env": env,
-        "prune": True,
-        "pullImage": False,
-    },
-)
+result = req("PUT", f"/api/stacks/{stack_id}?endpointId={ENDPOINT_ID}", payload)
 print(f"redeployed: {result.get('Name')} status={result.get('Status')}")
 
-# 4. recreate any container still on an older image id
+# 3. recreate any container still on an older image id
 latest_ids = {}
 for image in IMAGES:
     info = req(
@@ -121,7 +114,7 @@ for c in containers:
     else:
         print(f"{name} up to date")
 
-# 5. show final container state
+# 4. show final container state
 time.sleep(4)
 containers = req(
     "GET",

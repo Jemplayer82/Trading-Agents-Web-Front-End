@@ -8,6 +8,7 @@ services:
       TRADINGAGENTS_LLM_PROVIDER: ollama
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY}
+      SCHWAB_MCP_URL: ${SCHWAB_MCP_URL:-http://192.168.7.50:3105/mcp}
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
     tty: true
@@ -26,12 +27,14 @@ services:
       SCHWAB_APP_KEY: ${SCHWAB_APP_KEY}
       SCHWAB_APP_SECRET: ${SCHWAB_APP_SECRET}
       SCHWAB_CALLBACK_URL: ${SCHWAB_CALLBACK_URL}
+      SCHWAB_MCP_URL: ${SCHWAB_MCP_URL:-http://192.168.7.50:3105/mcp}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
       SWITCHBOARD_URL: http://switchboard:3107
       SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN}
       SWITCHBOARD_TARGET_AGENT: ${SWITCHBOARD_TARGET_AGENT:-llm-router}
       SWITCHBOARD_PROVIDER: ${SWITCHBOARD_PROVIDER:-}
       BUS_MIRROR: ${BUS_MIRROR:-analysis}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN}
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
     restart: unless-stopped
@@ -50,11 +53,13 @@ services:
       OLLAMA_API_KEY: ${OLLAMA_API_KEY}
       SCHWAB_APP_KEY: ${SCHWAB_APP_KEY}
       SCHWAB_APP_SECRET: ${SCHWAB_APP_SECRET}
+      SCHWAB_MCP_URL: ${SCHWAB_MCP_URL:-http://192.168.7.50:3105/mcp}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
       SWITCHBOARD_URL: http://switchboard:3107
       SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN}
       SWITCHBOARD_TARGET_AGENT: ${SWITCHBOARD_TARGET_AGENT:-llm-router}
       SWITCHBOARD_PROVIDER: ${SWITCHBOARD_PROVIDER:-}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN}
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
     restart: unless-stopped
@@ -68,6 +73,7 @@ services:
     entrypoint: ["python", "-m", "web.scheduler"]
     environment:
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN}
       FRED_NOTIFY_URL: ${FRED_NOTIFY_URL}
       SMTP_HOST: ${SMTP_HOST}
       SMTP_PORT: ${SMTP_PORT:-587}
