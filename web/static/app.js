@@ -635,6 +635,7 @@ function handleFrame(frame) {
     case "status":
       setStatus("running", frame.message);
       if (frame.analysts) frame.analysts.forEach((a) => setAgentState(a, "pending"));
+      if (frame.agent) setAgentState(frame.agent, "in_progress");
       break;
     case "report_update":
       // Agent completion is inferred from WHICH report key arrived — there is no
@@ -648,6 +649,7 @@ function handleFrame(frame) {
         if (k === "final_trade_decision") {
           setAgentState("risk_debate", "completed");
           setAgentState("portfolio_manager", "completed");
+          activeReportKey = "final_trade_decision";
         }
       });
       refreshReportTabs();

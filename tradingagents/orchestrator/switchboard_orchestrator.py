@@ -254,14 +254,14 @@ class SwitchboardOrchestrator:
                 self._emit({"type": "report_update", "reports": {"investment_debate": transcript}})
 
         # ── Phase 3: Research Manager ────────────────────────────────────────────
-        self._emit({"type": "status", "message": "Research Manager synthesising debate…"})
+        self._emit({"type": "status", "message": "Research Manager synthesising debate…", "agent": "research_debate"})
         rm_node = create_research_manager(self._deep_llm)
         self._merge(state, rm_node(state))
         if state.get("investment_plan"):
             self._emit({"type": "report_update", "reports": {"investment_plan": state["investment_plan"]}})
 
         # ── Phase 4: Trader ──────────────────────────────────────────────────────
-        self._emit({"type": "status", "message": "Trader building transaction proposal…"})
+        self._emit({"type": "status", "message": "Trader building transaction proposal…", "agent": "trader"})
         trader_fn = create_trader(self._quick_llm)
         update = trader_fn(state)
         for key, val in update.items():
@@ -287,7 +287,7 @@ class SwitchboardOrchestrator:
                 self._emit({"type": "report_update", "reports": {"risk_debate": transcript}})
 
         # ── Phase 6: Portfolio Manager ───────────────────────────────────────────
-        self._emit({"type": "status", "message": "Portfolio Manager making final decision…"})
+        self._emit({"type": "status", "message": "Portfolio Manager making final decision…", "agent": "portfolio_manager"})
         pm_node = create_portfolio_manager(self._deep_llm)
         self._merge(state, pm_node(state))
         if state.get("final_trade_decision"):
