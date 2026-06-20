@@ -238,6 +238,7 @@ def _run_scan(scan_id: int, trade_date: str, aggressiveness: int = 5, bias: str 
     prefs = db.get_preferences() or {}
     rounds = aggressiveness_to_rounds(aggressiveness)
     config: dict[str, Any] = {
+        **DEFAULT_CONFIG,  # data_cache_dir / results_dir / data_vendors etc. — orchestrator needs these
         "llm_provider": prefs.get("provider") or "ollama",
         "deep_think_llm": prefs.get("deep_model") or "gpt-oss:120b-cloud",
         "quick_think_llm": prefs.get("quick_model") or "gpt-oss:20b-cloud",
@@ -748,6 +749,7 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
     log.info("[spy %s] starting for %s", scan_id, trade_date)
     prefs = db.get_preferences() or {}
     config: dict[str, Any] = {
+        **DEFAULT_CONFIG,  # data_cache_dir / results_dir / data_vendors etc. — orchestrator needs these
         "llm_provider": prefs.get("provider") or "ollama",
         "deep_think_llm": prefs.get("deep_model") or DEFAULT_CONFIG.get("deep_think_llm"),
         "quick_think_llm": prefs.get("quick_model") or DEFAULT_CONFIG.get("quick_think_llm"),
