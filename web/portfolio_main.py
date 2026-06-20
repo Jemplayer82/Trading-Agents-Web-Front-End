@@ -41,13 +41,12 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 
 from tradingagents.constants import SIGNALS
 from tradingagents.dataflows import schwab_mcp
-from tradingagents.default_config import DEFAULT_CONFIG
 
 from . import alerts, auth_app, brokerages, db, spy_allocator, spy_scanner
 from . import credentials as creds
 from ._logging import configure_logging
 from .portfolio import aggregator
-from .runner import aggressiveness_to_rounds, apply_indicator_vendor
+from .runner import build_config
 from .spy_tickers import get_sp500_tickers
 
 log = logging.getLogger(__name__)
@@ -236,17 +235,7 @@ def _run_scan(scan_id: int, trade_date: str, aggressiveness: int = 5, bias: str 
     # (from the Run Scan form) drives debate depth; bias flows to each ticker's
     # orchestrator just like the Run Analysis tab.
     prefs = db.get_preferences() or {}
-    rounds = aggressiveness_to_rounds(aggressiveness)
-    config: dict[str, Any] = {
-        **DEFAULT_CONFIG,  # data_cache_dir / results_dir / data_vendors etc. — orchestrator needs these
-        "llm_provider": prefs.get("provider") or "ollama",
-        "deep_think_llm": prefs.get("deep_model") or "gpt-oss:120b-cloud",
-        "quick_think_llm": prefs.get("quick_model") or "gpt-oss:20b-cloud",
-        "max_debate_rounds": rounds,
-        "max_risk_discuss_rounds": rounds,
-        "bias": bias,
-    }
-    apply_indicator_vendor(config)
+    config = build_config({**prefs, "aggressiveness": aggressiveness, "bias": bias})
     selected_analysts = prefs.get("analysts") or ["market", "social", "news", "fundamentals"]
 
     # Step 3: for each position, create an analyses row + run the graph
@@ -748,14 +737,6 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
     """
     log.info("[spy %s] starting for %s", scan_id, trade_date)
     prefs = db.get_preferences() or {}
-    config: dict[str, Any] = {
-        **DEFAULT_CONFIG,  # data_cache_dir / results_dir / data_vendors etc. — orchestrator needs these
-        "llm_provider": prefs.get("provider") or "ollama",
-        "deep_think_llm": prefs.get("deep_model") or DEFAULT_CONFIG.get("deep_think_llm"),
-        "quick_think_llm": prefs.get("quick_model") or DEFAULT_CONFIG.get("quick_think_llm"),
-        "max_debate_rounds": int(prefs.get("research_depth") or 1),
-        "output_language": prefs.get("language", "English"),
-    }
     selected_analysts = prefs.get("analysts") or ["market", "social", "news", "fundamentals"]
 
     # Read aggressiveness and bias from the scan row (set at creation from the account).
@@ -764,14 +745,7 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
     bias = scan_row.get("bias") or "neutral"
     paper_account_id = scan_row.get("paper_account_id")
 
-    # Derive debate depth from aggressiveness (1–3→1 round, 4–7→2, 8–10→3).
-    debate_rounds = aggressiveness_to_rounds(aggressiveness)
-    config["max_debate_rounds"] = debate_rounds
-    config["max_risk_discuss_rounds"] = debate_rounds
-    # Bias must reach the per-ticker orchestrator too (not just the allocator),
-    # so deep-dive decisions honor the chosen stance like the Run Analysis tab.
-    config["bias"] = bias
-    apply_indicator_vendor(config)
+    config = build_config({**prefs, "aggressiveness": aggressiveness, "bias": bias})
 
     # Look up the previous completed scan for the same account to enable rebalancing.
     prev_scan = db.get_latest_completed_spy_scan(
