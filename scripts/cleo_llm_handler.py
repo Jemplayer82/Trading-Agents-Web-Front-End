@@ -1,31 +1,25 @@
 #!/usr/bin/env python3
-"""Cleo LLM handler — Anthropic-backed bus daemon for TradingAgents.
+"""Cleo LLM handler — Claude CLI-backed bus daemon for TradingAgents.
 
-Registers on the mcp-switchboard bus, polls for llm_request DMs, calls the
-Anthropic API, and replies with streaming llm_stream_chunk DMs so tokens
-appear live in the dashboard as Claude generates them.
-
-Handles both request types transparently:
-  - stream: true  → streams llm_stream_chunk DMs (one per text delta) then a
-                    final chunk with {"done": true, "tool_calls": [...]}
-  - stream: false → sends one llm_response DM (legacy; not used by default)
+Registers on the mcp-switchboard bus, polls for llm_request DMs, calls
+``claude api messages create`` (uses the local Claude Code session auth —
+no separate ANTHROPIC_API_KEY needed), and replies with streaming
+llm_stream_chunk DMs so tokens appear live in the dashboard.
 
 Required env vars:
-  ANTHROPIC_API_KEY       Your Anthropic API key
-  SWITCHBOARD_URL         e.g. http://192.168.7.50:3109 or http://switchboard:3107
+  SWITCHBOARD_URL         e.g. http://172.21.0.3:3107 or http://192.168.7.50:3109
   SWITCHBOARD_MCP_TOKEN   Bearer token matching the stack's SWITCHBOARD_MCP_TOKEN
 
 Optional:
   SWITCHBOARD_AGENT_ID    Agent name to register as (default: cleo)
   DEFAULT_MODEL           Fallback model if the request doesn't specify one
                           (default: claude-sonnet-4-6)
+  CLAUDE_BIN              Path to claude CLI binary (default: claude)
 
 Usage:
-  pip install anthropic httpx
-  ANTHROPIC_API_KEY=sk-ant-... \\
-  SWITCHBOARD_URL=http://192.168.7.50:3109 \\
+  SWITCHBOARD_URL=http://172.21.0.3:3107 \\
   SWITCHBOARD_MCP_TOKEN=<token> \\
-  python scripts/cleo_llm_handler.py
+  python3 ~/cleo_llm_handler.py
 """
 
 from __future__ import annotations
@@ -33,17 +27,18 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
-import anthropic
 import httpx
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "claude-sonnet-4-6")
+CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
 
 
 # ---------------------------------------------------------------------------
@@ -89,28 +84,108 @@ def bus_call(url: str, token: str, tool: str, args: dict, timeout: float = 35.0)
 
 
 # ---------------------------------------------------------------------------
+# Claude CLI invocation
+# ---------------------------------------------------------------------------
+
+def call_claude_streaming(model: str, system: str, messages: list, tools: list, max_tokens: int):
+    """Invoke ``claude api messages create`` and yield text deltas + final tool_calls.
+
+    Yields either:
+      {"delta": "text"}           — partial text
+      {"done": True, "tool_calls": [...]}  — completion signal
+    """
+    api_payload = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": messages,
+        "stream": True,
+    }
+    if system:
+        api_payload["system"] = system
+    if tools:
+        api_payload["tools"] = tools
+
+    cmd = [CLAUDE_BIN, "api", "messages", "create", "--data", json.dumps(api_payload)]
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+
+    tool_calls: list = []
+    current_tool: dict | None = None
+    current_tool_input_json = ""
+
+    for raw_line in proc.stdout:
+        line = raw_line.strip()
+        if not line or not line.startswith("data:"):
+            continue
+        data_str = line[5:].strip()
+        if data_str == "[DONE]":
+            break
+        try:
+            event = json.loads(data_str)
+        except json.JSONDecodeError:
+            continue
+
+        etype = event.get("type", "")
+
+        if etype == "content_block_start":
+            block = event.get("content_block", {})
+            if block.get("type") == "tool_use":
+                current_tool = {"id": block.get("id"), "name": block.get("name"), "args": {}}
+                current_tool_input_json = ""
+
+        elif etype == "content_block_delta":
+            delta = event.get("delta", {})
+            dtype = delta.get("type", "")
+            if dtype == "text_delta":
+                text = delta.get("text", "")
+                if text:
+                    yield {"delta": text}
+            elif dtype == "input_json_delta" and current_tool is not None:
+                current_tool_input_json += delta.get("partial_json", "")
+
+        elif etype == "content_block_stop":
+            if current_tool is not None:
+                try:
+                    current_tool["args"] = json.loads(current_tool_input_json) if current_tool_input_json else {}
+                except json.JSONDecodeError:
+                    current_tool["args"] = {}
+                tool_calls.append(current_tool)
+                current_tool = None
+                current_tool_input_json = ""
+
+        elif etype == "message_stop":
+            break
+
+    proc.wait()
+    if proc.returncode != 0:
+        err = proc.stderr.read() if proc.stderr else "unknown error"
+        raise RuntimeError(f"claude api call failed (exit {proc.returncode}): {err.strip()}")
+
+    yield {"done": True, "tool_calls": tool_calls}
+
+
+# ---------------------------------------------------------------------------
 # Request handler
 # ---------------------------------------------------------------------------
 
-def handle_request(
-    msg: dict,
-    url: str,
-    token: str,
-    agent_id: str,
-    client: anthropic.Anthropic,
-) -> None:
+def handle_request(msg: dict, url: str, token: str, agent_id: str) -> None:
     req = json.loads(msg["content"])
     model = req.get("model") or DEFAULT_MODEL
     system = req.get("system") or ""
     messages = req.get("messages") or []
     tools = req.get("tools") or []
     max_tokens = int(req.get("max_tokens") or 8192)
-    do_stream = req.get("stream", True)
     sender = msg.get("from")
     msg_id = msg.get("id")
     thread_id = msg.get("thread_id") or str(uuid4())
 
-    log.info("llm_request from=%s model=%s stream=%s tools=%d", sender, model, do_stream, len(tools))
+    log.info("llm_request from=%s model=%s tools=%d", sender, model, len(tools))
 
     def send(msg_type: str, content: str) -> None:
         bus_call(url, token, "send_message", {
@@ -122,44 +197,15 @@ def handle_request(
             "content": content,
         })
 
-    api_kwargs: dict = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "messages": messages,
-    }
-    if system:
-        api_kwargs["system"] = system
-    if tools:
-        api_kwargs["tools"] = tools
+    tool_calls: list = []
+    for chunk in call_claude_streaming(model, system, messages, tools, max_tokens):
+        if "delta" in chunk:
+            send("llm_stream_chunk", json.dumps({"delta": chunk["delta"], "done": False}))
+        elif chunk.get("done"):
+            tool_calls = chunk.get("tool_calls", [])
 
-    if do_stream:
-        tool_calls: list = []
-        with client.messages.stream(**api_kwargs) as stream:
-            for text in stream.text_stream:
-                if text:
-                    send("llm_stream_chunk", json.dumps({"delta": text, "done": False}))
-            final = stream.get_final_message()
-            for block in final.content:
-                if block.type == "tool_use":
-                    tool_calls.append({
-                        "id": block.id,
-                        "name": block.name,
-                        "args": block.input,
-                    })
-        send("llm_stream_chunk", json.dumps({"delta": "", "done": True, "tool_calls": tool_calls}))
-        log.info("  → streamed reply to %s (%d tool_calls)", sender, len(tool_calls))
-
-    else:
-        resp = client.messages.create(**api_kwargs)
-        content_text = ""
-        tool_calls = []
-        for block in resp.content:
-            if hasattr(block, "text"):
-                content_text += block.text
-            elif block.type == "tool_use":
-                tool_calls.append({"id": block.id, "name": block.name, "args": block.input})
-        send("llm_response", json.dumps({"content": content_text, "tool_calls": tool_calls}))
-        log.info("  → response to %s (%d tool_calls)", sender, len(tool_calls))
+    send("llm_stream_chunk", json.dumps({"delta": "", "done": True, "tool_calls": tool_calls}))
+    log.info("  → streamed reply to %s (%d tool_calls)", sender, len(tool_calls))
 
 
 # ---------------------------------------------------------------------------
@@ -170,12 +216,6 @@ def main() -> None:
     url = os.environ["SWITCHBOARD_URL"]
     token = os.environ["SWITCHBOARD_MCP_TOKEN"]  # pragma: allowlist secret
     agent_id = os.environ.get("SWITCHBOARD_AGENT_ID", "cleo")
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-
-    if not api_key:
-        raise SystemExit("ANTHROPIC_API_KEY is required")
-
-    client = anthropic.Anthropic(api_key=api_key)
 
     def bus(tool: str, args: dict) -> dict:
         return bus_call(url, token, tool, args)
@@ -184,7 +224,6 @@ def main() -> None:
     bus("set_status", {"agent_id": agent_id, "activity": "ready"})
     log.info("cleo-llm-handler registered as '%s' — waiting for llm_request DMs", agent_id)
 
-    # Concurrent dispatch so multiple analysts in a scan don't block each other.
     executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="cleo")
 
     while True:
@@ -198,12 +237,12 @@ def main() -> None:
         for msg in result.get("messages", []):
             if msg.get("type") != "llm_request":
                 continue
-            executor.submit(_dispatch, msg, url, token, agent_id, client)
+            executor.submit(_dispatch, msg, url, token, agent_id)
 
 
-def _dispatch(msg: dict, url: str, token: str, agent_id: str, client: anthropic.Anthropic) -> None:
+def _dispatch(msg: dict, url: str, token: str, agent_id: str) -> None:
     try:
-        handle_request(msg, url, token, agent_id, client)
+        handle_request(msg, url, token, agent_id)
     except Exception as exc:
         log.exception("Error handling message %s", msg.get("id"))
         try:

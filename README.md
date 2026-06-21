@@ -300,11 +300,10 @@ With `LLM_PROVIDER=switchboard`, every LLM call goes as an `llm_request` DM on t
 #### Quick setup
 
 ```bash
-# 1. Install deps (anthropic is already present if you're in the project venv)
-pip install anthropic httpx
+# 1. Install deps (httpx is usually already present)
+pip install httpx
 
-# 2. Run the daemon — it registers as "cleo" and starts polling
-ANTHROPIC_API_KEY=sk-ant-...            \
+# 2. Run the daemon — uses your local Claude Code session auth, no API key needed
 SWITCHBOARD_URL=http://<host>:3109      \
 SWITCHBOARD_MCP_TOKEN=<your-token>      \
 python scripts/cleo_llm_handler.py
