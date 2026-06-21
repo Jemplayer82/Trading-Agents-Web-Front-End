@@ -91,8 +91,7 @@ latest_ids = {}
 for image in IMAGES:
     info = req(
         "GET",
-        "/api/endpoints/%d/docker/images/%s/json"
-        % (ENDPOINT_ID, urllib.request.quote(f"{image}:latest", safe="")),
+        f"/api/endpoints/{ENDPOINT_ID}/docker/images/{urllib.request.quote(f'{image}:latest', safe='')}/json",
     )
     latest_ids[image] = info["Id"]
 
