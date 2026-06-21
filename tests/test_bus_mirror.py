@@ -194,7 +194,7 @@ class TestKickoffSequence:
 
     def test_kickoff_instruction_from_orchestrator(self, monkeypatch):
         pub = self._create_and_get_pub(monkeypatch, ticker="AAPL")
-        msgs = pub.messages_from("langgraph-orchestrator")
+        msgs = pub.messages_from("switchboard-orchestrator")
         assert len(msgs) >= 1
         kickoff = msgs[0]
         assert kickoff["type"] == "instruction"
@@ -203,7 +203,7 @@ class TestKickoffSequence:
 
     def test_set_status_called_for_orchestrator(self, monkeypatch):
         pub = self._create_and_get_pub(monkeypatch, ticker="AAPL")
-        status_calls = [s for s in pub.statuses() if s["agent_id"] == "langgraph-orchestrator"]
+        status_calls = [s for s in pub.statuses() if s["agent_id"] == "switchboard-orchestrator"]
         assert len(status_calls) >= 1
         assert "AAPL" in status_calls[0]["activity"]
 
@@ -214,7 +214,7 @@ class TestKickoffSequence:
             ticker="AAPL",
             analysts=["market", "news"],
         )
-        msgs = pub.messages_from("langgraph-orchestrator")
+        msgs = pub.messages_from("switchboard-orchestrator")
         kickoff = msgs[0]["content"]
         # Selected analysts must appear by display name
         assert "Market Analyst" in kickoff
@@ -226,7 +226,7 @@ class TestKickoffSequence:
     def test_kickoff_default_analysts_lists_all_four(self, monkeypatch):
         """When analysts=None all four display names appear in the kickoff."""
         pub = self._create_and_get_pub(monkeypatch, ticker="AAPL", analysts=None)
-        msgs = pub.messages_from("langgraph-orchestrator")
+        msgs = pub.messages_from("switchboard-orchestrator")
         kickoff = msgs[0]["content"]
         for name in ("Market Analyst", "Sentiment Analyst", "News Analyst", "Fundamentals Analyst"):
             assert name in kickoff, f"{name!r} missing from default kickoff"
@@ -358,7 +358,7 @@ class TestInvestmentDebate:
         pub = FakePublisher()
         m = _make_mirror(pub)
         m.on_state(self._inv_state(1, "Bull Analyst: strong growth ahead"))
-        orchestrator_msgs = pub.messages_from("langgraph-orchestrator")
+        orchestrator_msgs = pub.messages_from("switchboard-orchestrator")
         instructions = [msg for msg in orchestrator_msgs if msg.get("type") == "instruction"]
         assert len(instructions) == 1
         assert "debate" in instructions[0]["content"].lower()
@@ -370,7 +370,7 @@ class TestInvestmentDebate:
         m.on_state(self._inv_state(1, "Bull Analyst: buy now"))
         m.on_state(self._inv_state(2, "Bear Analyst: overvalued"))
         orchestrator_instructions = [
-            msg for msg in pub.messages_from("langgraph-orchestrator")
+            msg for msg in pub.messages_from("switchboard-orchestrator")
             if msg.get("type") == "instruction"
         ]
         assert len(orchestrator_instructions) == 1
@@ -551,7 +551,7 @@ class TestRiskDebate:
             1, "Aggressive",
             agg="Aggressive Analyst: risk it",
         ))
-        status_calls = [s for s in pub.statuses() if s["agent_id"] == "langgraph-orchestrator"]
+        status_calls = [s for s in pub.statuses() if s["agent_id"] == "switchboard-orchestrator"]
         assert any("risk" in s["activity"].lower() for s in status_calls)
 
     def test_risk_content_capped_at_700(self):
@@ -614,7 +614,7 @@ class TestOnDone:
         pub = FakePublisher()
         m = _make_mirror(pub, analysis_id=7)
         m.on_done("BUY", "Strong fundamentals.")
-        status_calls = [s for s in pub.statuses() if s["agent_id"] == "langgraph-orchestrator"]
+        status_calls = [s for s in pub.statuses() if s["agent_id"] == "switchboard-orchestrator"]
         assert len(status_calls) == 1
         assert "idle" in status_calls[0]["activity"]
         assert "7" in status_calls[0]["activity"]
@@ -634,7 +634,7 @@ class TestOnError:
         m.on_error("Connection refused")
         msgs = pub.messages_sent()
         assert len(msgs) == 1
-        assert msgs[0]["from"] == "langgraph-orchestrator"
+        assert msgs[0]["from"] == "switchboard-orchestrator"
         assert msgs[0]["type"] == "chat"
 
     def test_error_content_format(self):
