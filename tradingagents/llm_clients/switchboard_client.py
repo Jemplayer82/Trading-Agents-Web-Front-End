@@ -183,13 +183,17 @@ class SwitchboardChatModel(BaseChatModel):
         from langchain_core.messages.tool import ToolCall
         normalized: list[ToolCall] = []
         for tc in tool_calls:
-            if isinstance(tc, ToolCall):
-                normalized.append(tc)
-            elif isinstance(tc, dict):
+            if isinstance(tc, dict):
                 normalized.append(ToolCall(
                     id=tc.get("id") or str(uuid4()),
                     name=tc["name"],
                     args=tc.get("args") or tc.get("input") or {},
+                ))
+            elif getattr(tc, "name", None):
+                normalized.append(ToolCall(
+                    id=getattr(tc, "id", None) or str(uuid4()),
+                    name=tc.name,
+                    args=getattr(tc, "args", None) or {},
                 ))
 
         ai_msg = AIMessage(content=full_content, tool_calls=normalized)
