@@ -399,10 +399,13 @@ def main() -> None:
     def bus(tool: str, args: dict) -> dict:
         return bus_call(url, token, tool, args)
 
-    # Split-brain guard: two handlers polling the same agent_id silently split
-    # the request stream (each wait_for_message drains the shared inbox), so one
-    # may stream while a stale peer answers in one shot — corrupting replies.
-    # Warn loudly if another instance is already online under this id.
+    # Split-brain heads-up: if a SECOND process polls the same agent_id, the two
+    # silently split the request stream (each wait_for_message drains the shared
+    # inbox) — one streams while the other answers in one shot, corrupting
+    # replies. Presence alone can't prove a duplicate (a just-restarted self
+    # lingers ~60s, and a heartbeat script keeps presence warm), so this is an
+    # advisory note, not a hard failure. The real tell is `llm_response` /
+    # reply_to:null messages from this agent on the bus while a handler streams.
     try:
         agents = bus("list_agents", {}).get("agents", [])
         peer = next(
@@ -410,11 +413,12 @@ def main() -> None:
             None,
         )
         if peer:
-            log.warning(
-                "⚠️  Another agent is ALREADY ONLINE as '%s' (%s). Two handlers "
-                "will SPLIT the request stream and corrupt replies. Kill the other "
-                "instance, or set a unique SWITCHBOARD_AGENT_ID.",
-                agent_id, peer.get("name", "?"),
+            log.info(
+                "Note: '%s' already shows online (likely this restart's lingering "
+                "presence or a heartbeat script). If replies look truncated, make "
+                "sure only ONE handler polls this agent_id (or use a unique "
+                "SWITCHBOARD_AGENT_ID).",
+                agent_id,
             )
     except Exception as exc:
         log.debug("dup-registration check skipped: %s", exc)
