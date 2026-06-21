@@ -90,17 +90,23 @@ class SwitchboardOrchestrator:
         os.makedirs(self.config["data_cache_dir"], exist_ok=True)
         os.makedirs(self.config["results_dir"], exist_ok=True)
 
+        # Tracks which agent is currently running so streaming token frames
+        # carry the right node name for the frontend progress grid.
+        self._current_node: str | None = None
+
         provider_kwargs = self._provider_kwargs()
         deep_client = create_llm_client(
             provider=self.config["llm_provider"],
             model=self.config["deep_think_llm"],
             base_url=self.config.get("backend_url"),
+            on_token=self._emit_token,
             **provider_kwargs,
         )
         quick_client = create_llm_client(
             provider=self.config["llm_provider"],
             model=self.config["quick_think_llm"],
             base_url=self.config.get("backend_url"),
+            on_token=self._emit_token,
             **provider_kwargs,
         )
         self._deep_llm = deep_client.get_llm()
@@ -127,6 +133,10 @@ class SwitchboardOrchestrator:
                 self.on_progress(frame)
             except Exception:
                 pass
+
+    def _emit_token(self, text: str) -> None:
+        if text and self._current_node:
+            self._emit({"type": "token", "node": self._current_node, "text": text, "channel": "content"})
 
     def _merge(self, state: dict, update: dict) -> None:
         """Apply a node's return dict onto state (append semantics for messages)."""
@@ -228,12 +238,20 @@ class SwitchboardOrchestrator:
             "fundamentals": "fundamentals_report",
         }
 
+        _analyst_node_names = {
+            "market": "market_analyst",
+            "social": "sentiment_analyst",
+            "news": "news_analyst",
+            "fundamentals": "fundamentals_analyst",
+        }
         for analyst_key in self.selected_analysts:
             if analyst_key not in analyst_factories:
                 continue
             self._emit({"type": "status", "message": f"Running {analyst_key} analyst…"})
+            self._current_node = _analyst_node_names.get(analyst_key, analyst_key)
             node = analyst_factories[analyst_key]()
             self._run_analyst(node, state)
+            self._current_node = None
             report = state.get(report_key_map.get(analyst_key, ""), "")
             if report:
                 self._emit({"type": "report_update", "reports": {report_key_map[analyst_key]: report}})
@@ -245,8 +263,11 @@ class SwitchboardOrchestrator:
         bear_node = create_bear_researcher(self._quick_llm)
 
         for rnd in range(max_debate):
+            self._current_node = "bull_researcher"
             self._merge(state, bull_node(state))
+            self._current_node = "bear_researcher"
             self._merge(state, bear_node(state))
+            self._current_node = None
             count = state["investment_debate_state"]["count"]
             transcript = state["investment_debate_state"].get("history", "")
             self._emit({"type": "debate", "scope": "investment", "rounds": count, "judge": ""})
@@ -256,14 +277,18 @@ class SwitchboardOrchestrator:
         # ── Phase 3: Research Manager ────────────────────────────────────────────
         self._emit({"type": "status", "message": "Research Manager synthesising debate…", "agent": "research_debate"})
         rm_node = create_research_manager(self._deep_llm)
+        self._current_node = "research_manager"
         self._merge(state, rm_node(state))
+        self._current_node = None
         if state.get("investment_plan"):
             self._emit({"type": "report_update", "reports": {"investment_plan": state["investment_plan"]}})
 
         # ── Phase 4: Trader ──────────────────────────────────────────────────────
         self._emit({"type": "status", "message": "Trader building transaction proposal…", "agent": "trader"})
         trader_fn = create_trader(self._quick_llm)
+        self._current_node = "trader"
         update = trader_fn(state)
+        self._current_node = None
         for key, val in update.items():
             if key != "messages":
                 state[key] = val
@@ -277,9 +302,13 @@ class SwitchboardOrchestrator:
         neut_node = create_neutral_debator(self._quick_llm)
 
         for rnd in range(max_risk):
+            self._current_node = "aggressive_debator"
             self._merge(state, agg_node(state))
+            self._current_node = "conservative_debator"
             self._merge(state, cons_node(state))
+            self._current_node = "neutral_debator"
             self._merge(state, neut_node(state))
+            self._current_node = None
             count = state["risk_debate_state"]["count"]
             transcript = state["risk_debate_state"].get("history", "")
             self._emit({"type": "debate", "scope": "risk", "rounds": count, "judge": ""})
@@ -289,7 +318,9 @@ class SwitchboardOrchestrator:
         # ── Phase 6: Portfolio Manager ───────────────────────────────────────────
         self._emit({"type": "status", "message": "Portfolio Manager making final decision…", "agent": "portfolio_manager"})
         pm_node = create_portfolio_manager(self._deep_llm)
+        self._current_node = "portfolio_manager"
         self._merge(state, pm_node(state))
+        self._current_node = None
         if state.get("final_trade_decision"):
             self._emit({"type": "report_update", "reports": {"final_trade_decision": state["final_trade_decision"]}})
 

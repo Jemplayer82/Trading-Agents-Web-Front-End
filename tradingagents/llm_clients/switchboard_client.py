@@ -12,13 +12,13 @@ import json
 import logging
 import os
 import time
-from typing import Any, Iterator, List, Optional
+from typing import Any, Callable, Iterator, List, Optional
 from uuid import uuid4
 
 import httpx
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.tools import BaseTool
 from pydantic import Field
 
@@ -129,6 +129,9 @@ class SwitchboardChatModel(BaseChatModel):
     model_name: str = Field(default="claude-sonnet-4-6")
     provider: str = Field(default="")
     timeout_s: float = Field(default=180.0)
+    # Optional per-token callback set by the orchestrator. Called with each text
+    # delta as Claude generates it so the frontend can stream tokens live.
+    on_token: Optional[Any] = Field(default=None, exclude=True)
 
     def __init__(self, **data):
         if not data.get("bus_url"):
@@ -158,6 +161,56 @@ class SwitchboardChatModel(BaseChatModel):
         run_manager=None,
         **kwargs,
     ) -> ChatResult:
+        """Delegates to _stream() and assembles the full ChatResult."""
+        chunks: list[ChatGenerationChunk] = []
+        for chunk in self._stream(messages, stop=stop, run_manager=run_manager, **kwargs):
+            chunks.append(chunk)
+
+        # Assemble text content from all chunks
+        full_content = "".join(
+            c.message.content
+            for c in chunks
+            if isinstance(getattr(c.message, "content", None), str)
+        )
+        # Collect tool_calls from the last chunk that carries any
+        tool_calls: list = []
+        for c in reversed(chunks):
+            tcs = getattr(c.message, "tool_calls", None)
+            if tcs:
+                tool_calls = list(tcs)
+                break
+
+        from langchain_core.messages.tool import ToolCall
+        normalized: list[ToolCall] = []
+        for tc in tool_calls:
+            if isinstance(tc, ToolCall):
+                normalized.append(tc)
+            elif isinstance(tc, dict):
+                normalized.append(ToolCall(
+                    id=tc.get("id") or str(uuid4()),
+                    name=tc["name"],
+                    args=tc.get("args") or tc.get("input") or {},
+                ))
+
+        ai_msg = AIMessage(content=full_content, tool_calls=normalized)
+        return ChatResult(generations=[ChatGeneration(message=ai_msg)])
+
+    def _stream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager=None,
+        **kwargs,
+    ) -> Iterator[ChatGenerationChunk]:
+        """Send llm_request to the bus and yield chunks as they arrive.
+
+        Handles two response protocols:
+        - ``llm_stream_chunk``: Cleo streams deltas one DM at a time, signalling
+          completion with ``{"done": true}`` in the payload. The final chunk may
+          carry ``tool_calls``.
+        - ``llm_response`` (legacy / backward-compat): single complete response
+          treated as one chunk so older handlers continue to work unchanged.
+        """
         if not self.bus_url or not self.token:
             raise RuntimeError(
                 "SwitchboardChatModel: SWITCHBOARD_URL and SWITCHBOARD_MCP_TOKEN must be set"
@@ -166,12 +219,7 @@ class SwitchboardChatModel(BaseChatModel):
         system, anthro_msgs = _to_anthropic_format(messages)
         tools: list[dict] = kwargs.get("tools", [])
         thread_id = str(uuid4())
-        # Per-call private reply inbox. Concurrent _generate calls must NOT share
-        # an agent_id: the bus DRAINS an inbox on read, so one call's poll would
-        # consume (and discard) another call's reply, hanging it until timeout.
-        # A unique id per call gives each its own inbox. No registration needed —
-        # the bus delivers DMs by to_agent regardless, and an unregistered sender
-        # never pollutes the agent list (send only touches existing rows).
+        # Per-call private reply inbox (same reasoning as the previous _generate).
         reply_id = f"{self.self_agent_id}-{uuid4().hex[:12]}"
 
         payload = json.dumps({
@@ -181,6 +229,7 @@ class SwitchboardChatModel(BaseChatModel):
             "messages": anthro_msgs,
             "tools": tools,
             "max_tokens": 8192,
+            "stream": True,
         })
 
         send_result = self._bus_call("send_message", {
@@ -190,10 +239,8 @@ class SwitchboardChatModel(BaseChatModel):
             "thread_id": thread_id,
             "content": payload,
         })
-        # send_message returns {"ok": true, "message_id": N} — NOT "id".
         sent_id: int | None = send_result.get("message_id")
 
-        # Poll for response
         deadline = time.monotonic() + self.timeout_s
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
@@ -209,43 +256,94 @@ class SwitchboardChatModel(BaseChatModel):
                 continue
 
             for msg in result.get("messages", []):
-                if (sent_id and msg.get("reply_to") == sent_id) or (
-                    msg.get("thread_id") == thread_id
-                ):
-                    return self._parse_response(msg)
+                if not ((sent_id and msg.get("reply_to") == sent_id) or
+                        msg.get("thread_id") == thread_id):
+                    continue
+
+                msg_type = msg.get("type", "")
+
+                if msg_type == "llm_error":
+                    try:
+                        err = json.loads(msg["content"]).get("error", "unknown error")
+                    except Exception:
+                        err = str(msg.get("content", "unknown"))
+                    raise RuntimeError(f"LLM router error: {err}")
+
+                if msg_type == "llm_stream_chunk":
+                    # True streaming: Cleo sends one DM per delta
+                    try:
+                        data = json.loads(msg["content"])
+                    except Exception:
+                        data = {}
+                    delta = data.get("delta", "")
+                    done = data.get("done", False)
+
+                    if delta:
+                        if run_manager:
+                            run_manager.on_llm_new_token(delta)
+                        if self.on_token:
+                            try:
+                                self.on_token(delta)
+                            except Exception:
+                                pass
+                        yield ChatGenerationChunk(message=AIMessageChunk(content=delta))
+
+                    if done:
+                        # Final chunk may carry tool_calls
+                        raw_tcs = data.get("tool_calls", [])
+                        if raw_tcs:
+                            from langchain_core.messages.tool import ToolCall
+                            tcs = [
+                                ToolCall(
+                                    id=tc.get("id") or str(uuid4()),
+                                    name=tc["name"],
+                                    args=tc.get("args") or tc.get("input") or {},
+                                )
+                                for tc in raw_tcs
+                            ]
+                            yield ChatGenerationChunk(
+                                message=AIMessageChunk(content="", tool_calls=tcs)
+                            )
+                        return
+
+                else:
+                    # Legacy llm_response: treat full content as one chunk
+                    try:
+                        resp = json.loads(msg["content"])
+                    except (json.JSONDecodeError, KeyError) as exc:
+                        raise RuntimeError(f"Bad llm_response payload: {exc}") from exc
+
+                    content = resp.get("content") or ""
+                    if content:
+                        if run_manager:
+                            run_manager.on_llm_new_token(content)
+                        if self.on_token:
+                            try:
+                                self.on_token(content)
+                            except Exception:
+                                pass
+                        yield ChatGenerationChunk(message=AIMessageChunk(content=content))
+
+                    raw_tcs = resp.get("tool_calls", [])
+                    if raw_tcs:
+                        from langchain_core.messages.tool import ToolCall
+                        tcs = [
+                            ToolCall(
+                                id=tc.get("id") or str(uuid4()),
+                                name=tc["name"],
+                                args=tc.get("args") or tc.get("input") or {},
+                            )
+                            for tc in raw_tcs
+                        ]
+                        yield ChatGenerationChunk(
+                            message=AIMessageChunk(content="", tool_calls=tcs)
+                        )
+                    return
 
         raise TimeoutError(
             f"SwitchboardChatModel: no response from '{self.target_agent_id}' "
             f"after {self.timeout_s:.0f}s (thread_id={thread_id})"
         )
-
-    def _parse_response(self, msg: dict) -> ChatResult:
-        if msg.get("type") == "llm_error":
-            try:
-                err = json.loads(msg["content"]).get("error", "unknown error")
-            except Exception:
-                err = str(msg.get("content", "unknown"))
-            raise RuntimeError(f"LLM router error: {err}")
-
-        try:
-            resp = json.loads(msg["content"])
-        except (json.JSONDecodeError, KeyError) as exc:
-            raise RuntimeError(f"Bad llm_response payload: {exc}") from exc
-
-        content = resp.get("content") or ""
-        raw_tcs = resp.get("tool_calls", [])
-
-        from langchain_core.messages.tool import ToolCall
-        tool_calls = []
-        for tc in raw_tcs:
-            tool_calls.append(ToolCall(
-                id=tc.get("id") or str(uuid4()),
-                name=tc["name"],
-                args=tc.get("args") or tc.get("input") or {},
-            ))
-
-        ai_msg = AIMessage(content=content, tool_calls=tool_calls)
-        return ChatResult(generations=[ChatGeneration(message=ai_msg)])
 
     def _bus_call(self, tool: str, args: dict) -> dict:
         body = {
@@ -301,6 +399,7 @@ class SwitchboardLLMClient(BaseLLMClient):
             model_name=self.model,
             provider=os.environ.get("SWITCHBOARD_PROVIDER", ""),
             timeout_s=float(self.kwargs.get("timeout_s", 180)),
+            on_token=self.kwargs.get("on_token"),
         )
 
     def validate_model(self) -> bool:
