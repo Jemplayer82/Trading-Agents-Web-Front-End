@@ -288,22 +288,54 @@ The `switchboard` container starts automatically, `tradingagents-web` connects t
 
 The bus is also published on **host port `3109`** (`docker-compose.yml`) so off-stack agents can connect at `http://<host>:3109/mcp`.
 
-### Connecting an external Claude CLI (or other agent)
+### Connecting Claude (streaming daemon)
 
-With `LLM_PROVIDER=switchboard`, every analysis LLM call is sent as an `llm_request` DM on the bus and answered by whatever agent is registered under `SWITCHBOARD_TARGET_AGENT`:
+With `LLM_PROVIDER=switchboard`, every LLM call goes as an `llm_request` DM on the bus to whatever agent is registered under `SWITCHBOARD_TARGET_AGENT`:
 
-- **`llm-router`** (default) — the built-in `tradingagents-llm-router` service dispatches to Ollama / an OpenAI-compatible backend (`SWITCHBOARD_PROVIDER`).
-- **A Claude CLI** — point `SWITCHBOARD_TARGET_AGENT` at your Claude agent's id (e.g. `claude-code`); it answers the calls directly, no API key needed.
+- **`llm-router`** (default) — built-in service, dispatches to Ollama / OpenAI-compatible backends.
+- **`cleo`** — the included `scripts/cleo_llm_handler.py` daemon; calls the Anthropic API directly and **streams tokens live** to the dashboard as Claude generates them.
 
 > ⚠️ The `SWITCHBOARD_MCP_TOKEN` bearer is the **only** gate on the `3109` host port. Keep it strong; don't expose it to the public internet without TLS in front.
 
-To wire a Claude CLI in:
+#### Quick setup
 
-1. Run a Claude CLI session on any machine that can reach `<host>:3109`.
-2. Configure the [mcp-switchboard](https://github.com/Jemplayer82/mcp-switchboard) MCP server + wake hook with `SWITCHBOARD_URL=http://<host>:3109`, `SWITCHBOARD_MCP_TOKEN=<token>`, and a stable `agent_id` (e.g. `claude-code`). The hook wakes Claude when an `llm_request` arrives.
-3. In **Settings → Ollama & Bus Routing**, set **Switchboard — LLM handler agent** to that `agent_id`, then pick a Claude model in the analysis form (provider "Switchboard (Bus LLM)").
+```bash
+# 1. Install deps (anthropic is already present if you're in the project venv)
+pip install anthropic httpx
 
-Claude reads each `llm_request`, processes it, and replies with an `llm_response` DM that the analysis picks up and continues. Each call uses a unique reply inbox, so many concurrent analyses (e.g. an S&P 500 scan) are handled without crossing wires.
+# 2. Run the daemon — it registers as "cleo" and starts polling
+ANTHROPIC_API_KEY=sk-ant-...            \
+SWITCHBOARD_URL=http://<host>:3109      \
+SWITCHBOARD_MCP_TOKEN=<your-token>      \
+python scripts/cleo_llm_handler.py
+```
+
+```
+# 3. In the dashboard → Settings → Ollama & Bus Routing:
+#    Switchboard — LLM handler agent:   cleo
+#    Switchboard — backend provider:    claude
+
+# 4. In the Analysis form, pick provider "Switchboard (Bus LLM)" and a Claude model
+#    (e.g. claude-sonnet-4-6 or claude-opus-4-8) then run as normal.
+```
+
+The daemon handles concurrent requests (8 workers), so parallel analyst calls during S&P 500 scans don't block each other. Each call uses a unique reply inbox so responses never cross wires.
+
+#### Streaming protocol
+
+When `stream: true` is in the `llm_request` payload (the default), the handler sends one `llm_stream_chunk` DM per text delta:
+
+```json
+{ "type": "llm_stream_chunk", "content": "{\"delta\": \"some text\", \"done\": false}" }
+```
+
+A final chunk signals completion and carries any tool calls:
+
+```json
+{ "type": "llm_stream_chunk", "content": "{\"delta\": \"\", \"done\": true, \"tool_calls\": []}" }
+```
+
+The dashboard handles these automatically — tokens appear in each agent's report tab as they arrive.
 
 ---
 
