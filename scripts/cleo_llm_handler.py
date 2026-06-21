@@ -139,20 +139,40 @@ def _flatten_content(content) -> str:
 
 
 def _augment_system_with_tools(system: str, tools: list) -> str:
-    """Append inline tool-call instructions + tool schemas to the system prompt."""
+    """Wrap the system prompt with mandatory inline tool-call instructions.
+
+    The CLI can't accept Anthropic tool schemas, so we teach the model an inline
+    marker syntax. Analysts run with NO pre-loaded data — the model must call
+    tools to fetch it. A permissive "when you need to" framing led the model to
+    write reports from memory instead, so the directive is now imperative and
+    brackets the caller's prompt (first and last thing the model sees).
+    """
     if not tools:
         return system
-    instructions = (
-        "\n\n## Tool calling\n"
-        "When you need to call a tool, emit it on its own line in EXACTLY this form:\n"
+    tool_names = ", ".join(t.get("name", "?") for t in tools)
+    directive = (
+        "## CRITICAL — you have NO pre-loaded data\n"
+        "You have NO market, price, news, sentiment, or fundamentals data in "
+        "context. Any figures you recall from training are stale and MUST NOT be "
+        "used. You are REQUIRED to call the tools below to fetch live data BEFORE "
+        "writing any analysis.\n\n"
+        "To call a tool, emit it on its own line in EXACTLY this form:\n"
         f'{_TOOL_OPEN} name=\"TOOL_NAME\">{{\"arg\": \"value\"}}{_TOOL_CLOSE}\n'
-        "The content between the tags must be a single valid JSON object of arguments. "
-        "Emit one block per tool call. After emitting your tool call(s), STOP and wait "
-        "for the results — do not invent results yourself.\n\n"
-        "Available tools (JSON schema):\n"
+        "The content between the tags must be a single valid JSON object of "
+        "arguments. Emit one block per tool call. After emitting your tool "
+        "call(s), STOP immediately — write nothing else and do not invent "
+        "results; wait for the tool results to be returned to you.\n\n"
+        f"Available tools: {tool_names}\n\n"
+        "Tool JSON schemas:\n"
         f"{json.dumps(tools, indent=2)}"
     )
-    return (system + instructions) if system else instructions.lstrip()
+    if not system:
+        return directive
+    return (
+        f"{directive}\n\n---\n\n{system}\n\n---\n\n"
+        "REMINDER: Do not fabricate data. If you have not yet called the tools "
+        "above for the data you need, emit the tool call(s) now and write nothing else."
+    )
 
 
 def _parse_tool_calls(text: str) -> list[dict]:
@@ -378,6 +398,26 @@ def main() -> None:
 
     def bus(tool: str, args: dict) -> dict:
         return bus_call(url, token, tool, args)
+
+    # Split-brain guard: two handlers polling the same agent_id silently split
+    # the request stream (each wait_for_message drains the shared inbox), so one
+    # may stream while a stale peer answers in one shot — corrupting replies.
+    # Warn loudly if another instance is already online under this id.
+    try:
+        agents = bus("list_agents", {}).get("agents", [])
+        peer = next(
+            (a for a in agents if a.get("id") == agent_id and a.get("online")),
+            None,
+        )
+        if peer:
+            log.warning(
+                "⚠️  Another agent is ALREADY ONLINE as '%s' (%s). Two handlers "
+                "will SPLIT the request stream and corrupt replies. Kill the other "
+                "instance, or set a unique SWITCHBOARD_AGENT_ID.",
+                agent_id, peer.get("name", "?"),
+            )
+    except Exception as exc:
+        log.debug("dup-registration check skipped: %s", exc)
 
     bus("register_agent", {"agent_id": agent_id, "name": "Cleo (Claude daemon)"})
     bus("set_status", {"agent_id": agent_id, "activity": "ready"})
