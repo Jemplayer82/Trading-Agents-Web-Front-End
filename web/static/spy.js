@@ -28,6 +28,171 @@
 
 let activeSpyId = null;
 let spyPollTimer = null;
+let paperAccounts = [];
+let activePaperAccountId = null;
+let editingAccountId = null;
+
+// ===== Paper account management =====
+
+async function loadPaperAccounts() {
+  try {
+    const data = await apiFetch("/api/paper-accounts");
+    paperAccounts = data.accounts || [];
+  } catch (e) {
+    paperAccounts = [];
+  }
+  renderAccountSelector();
+  renderAccountsModal();
+}
+
+function renderAccountSelector() {
+  const sel = $("spy-account-sel");
+  if (!sel) return;
+  sel.innerHTML = "";
+
+  // "All accounts" option (no filter)
+  const allOpt = document.createElement("option");
+  allOpt.value = "";
+  allOpt.textContent = "All accounts";
+  sel.appendChild(allOpt);
+
+  paperAccounts.forEach((a) => {
+    const opt = document.createElement("option");
+    opt.value = a.id;
+    opt.textContent = a.name;
+    if (a.id === activePaperAccountId) opt.selected = true;
+    sel.appendChild(opt);
+  });
+
+  if (!activePaperAccountId && paperAccounts.length) {
+    // Default to first account
+    activePaperAccountId = paperAccounts[0].id;
+    sel.value = activePaperAccountId;
+  }
+
+  updateAccountMeta();
+}
+
+function updateAccountMeta() {
+  const meta = $("spy-account-meta");
+  if (!meta) return;
+  const acct = paperAccounts.find((a) => a.id === activePaperAccountId);
+  if (!acct) { meta.textContent = ""; return; }
+  const biasLabel = { bullish: "🟢 Bullish", neutral: "⬜ Neutral", bearish: "🔴 Bearish" }[acct.bias] || acct.bias;
+  meta.textContent = `$${(acct.starting_capital || 100000).toLocaleString()} · Aggressiveness ${acct.aggressiveness}/10 · ${biasLabel}`;
+}
+
+function renderAccountsModal() {
+  const list = $("paper-accounts-list");
+  if (!list) return;
+  if (!paperAccounts.length) {
+    list.innerHTML = "<p class=\"dim\" style=\"font-size:12px;\">No accounts yet. Create one below.</p>";
+    return;
+  }
+  list.innerHTML = paperAccounts.map((a) => {
+    const biasLabel = { bullish: "Bullish", neutral: "Neutral", bearish: "Bearish" }[a.bias] || a.bias;
+    return (
+      "<div style=\"display:flex;align-items:center;gap:10px;padding:8px;border:1px solid var(--panel-border);border-radius:3px;margin-bottom:6px;\">" +
+        "<div style=\"flex:1;\">" +
+          "<strong>" + escapeHtml(a.name) + "</strong>" +
+          "<span class=\"dim\" style=\"font-size:11px;margin-left:8px;\">" +
+            "$" + (a.starting_capital || 100000).toLocaleString() + " · " +
+            "Agg " + a.aggressiveness + "/10 · " + biasLabel +
+          "</span>" +
+        "</div>" +
+        "<button type=\"button\" class=\"ghost\" style=\"font-size:11px;padding:3px 8px;\" " +
+          "onclick=\"editPaperAccount(" + a.id + ")\">Edit</button>" +
+        "<button type=\"button\" class=\"ghost\" style=\"font-size:11px;padding:3px 8px;color:var(--accent-red);border-color:var(--accent-red);\" " +
+          "onclick=\"deletePaperAccount(" + a.id + ")\">Delete</button>" +
+      "</div>"
+    );
+  }).join("");
+}
+
+async function openManageAccounts() {
+  await loadPaperAccounts();
+  resetAccountForm();
+  const modal = $("paper-accounts-modal");
+  if (modal) { modal.hidden = false; modal.style.display = "flex"; }
+}
+
+function closeManageAccounts() {
+  const modal = $("paper-accounts-modal");
+  if (modal) { modal.hidden = true; modal.style.display = "none"; }
+}
+
+// Load an account's values into the New/Edit account form.
+function populateAccountForm(acct) {
+  if ($("new-acct-name")) $("new-acct-name").value = acct.name || "";
+  if ($("new-acct-capital")) $("new-acct-capital").value = acct.starting_capital || 100000;
+  if ($("new-acct-agg")) $("new-acct-agg").value = acct.aggressiveness || 5;
+  if ($("new-acct-agg-val")) $("new-acct-agg-val").textContent = acct.aggressiveness || 5;
+  const bias = acct.bias || "neutral";
+  document.querySelectorAll("#new-acct-bias .bias-btn").forEach((x) => {
+    x.classList.toggle("active", x.dataset.val === bias);
+  });
+}
+
+// Clear the form back to "create" defaults.
+function resetAccountForm() {
+  editingAccountId = null;
+  populateAccountForm({ name: "", starting_capital: 100000, aggressiveness: 5, bias: "neutral" });
+  const btn = $("btn-create-account");
+  if (btn) btn.textContent = "Create Account";
+}
+
+// Load an existing account into the form for editing (PUT on save).
+function editPaperAccount(id) {
+  const acct = paperAccounts.find((a) => a.id === id);
+  if (!acct) return;
+  editingAccountId = id;
+  populateAccountForm(acct);
+  const btn = $("btn-create-account");
+  if (btn) btn.textContent = "Save Changes";
+  const name = $("new-acct-name");
+  if (name) name.focus();
+}
+
+// Create (POST) or update (PUT) a paper account from the form.
+async function savePaperAccount() {
+  const name = ($("new-acct-name") || {}).value?.trim();
+  if (!name) { alert("Enter an account name."); return; }
+  const capital = parseFloat(($("new-acct-capital") || {}).value || "100000");
+  const agg = parseInt(($("new-acct-agg") || {}).value || "5", 10);
+  const activeBiasBtn = document.querySelector("#new-acct-bias .bias-btn.active");
+  const bias = activeBiasBtn?.dataset?.val || "neutral";
+  const body = JSON.stringify({ name, starting_capital: capital, aggressiveness: agg, bias });
+
+  try {
+    if (editingAccountId) {
+      await apiFetch("/api/paper-accounts/" + editingAccountId, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body,
+      });
+    } else {
+      await apiFetch("/api/paper-accounts", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body,
+      });
+    }
+    resetAccountForm();        // back to create mode; list refresh shows the change
+    await loadPaperAccounts();
+    await loadSpyHistory();
+  } catch (e) {
+    alert("Failed to save account: " + e);
+  }
+}
+
+async function deletePaperAccount(id) {
+  const acct = paperAccounts.find((a) => a.id === id);
+  if (!confirm("Delete account \"" + (acct?.name || id) + "\"?\n\nExisting scans are kept but lose their account association.")) return;
+  try {
+    await apiFetch("/api/paper-accounts/" + id, { method: "DELETE" });
+    if (activePaperAccountId === id) activePaperAccountId = null;
+    await loadPaperAccounts();
+    await loadSpyHistory();
+  } catch (e) {
+    alert("Failed to delete: " + e);
+  }
+}
 
 // ===== Formatting helpers =====
 
@@ -63,7 +228,8 @@ async function loadSpyHistory() {
   if (!ul) return;
   ul.innerHTML = "<li class=\"dim empty\">loading…</li>";
   try {
-    const data = await apiFetch("/api/spy-scans");
+    const url = activePaperAccountId ? "/api/spy-scans?account_id=" + activePaperAccountId : "/api/spy-scans";
+    const data = await apiFetch(url);
     const scans = data.scans || [];
     ul.innerHTML = "";
     if (!scans.length) {
@@ -498,7 +664,12 @@ async function triggerSpyScan() {
   if (btn) btn.disabled = true;
   if (status) status.textContent = "Starting scan…";
   try {
-    const r = await fetch("/api/spy-scan", { method: "POST" });
+    const body = activePaperAccountId ? { account_id: activePaperAccountId } : {};
+    const r = await fetch("/api/spy-scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
     const data = await r.json();
     if (data.error) throw new Error(data.error);
     const msg = data.new ? "Scan #" + data.scan_id + " started" : "Scan #" + data.scan_id + " already running";
@@ -526,7 +697,7 @@ async function refreshSpyPrices(scanId) {
 // Leaving this tab stops the 5s poll so a running scan isn't polled invisibly.
 document.addEventListener("tab-shown", (ev) => {
   if (ev.detail === "spy") {
-    loadSpyHistory();
+    loadPaperAccounts().then(() => loadSpyHistory());
   } else {
     stopSpyPoll();
   }
@@ -570,6 +741,48 @@ document.addEventListener("DOMContentLoaded", () => {
   if (stopBtn) stopBtn.addEventListener("click", triggerSpyStop);
   const acctBtn = $("btn-spy-account");
   if (acctBtn) acctBtn.addEventListener("click", refreshActiveSpy);
+
+  // Account selector
+  const sel = $("spy-account-sel");
+  if (sel) {
+    sel.addEventListener("change", () => {
+      activePaperAccountId = sel.value ? parseInt(sel.value, 10) : null;
+      updateAccountMeta();
+      loadSpyHistory();
+    });
+  }
+
+  // Manage accounts modal
+  const manageBtn = $("btn-manage-accounts");
+  if (manageBtn) manageBtn.addEventListener("click", openManageAccounts);
+  const closeBtn = $("btn-close-accounts");
+  if (closeBtn) closeBtn.addEventListener("click", closeManageAccounts);
+  const modal = $("paper-accounts-modal");
+  if (modal) modal.addEventListener("click", (e) => { if (e.target === modal) closeManageAccounts(); });
+
+  // New account form inside modal
+  const createBtn = $("btn-create-account");
+  if (createBtn) createBtn.addEventListener("click", savePaperAccount);
+
+  // New account aggressiveness slider live label
+  const newAggSlider = $("new-acct-agg");
+  if (newAggSlider) {
+    newAggSlider.addEventListener("input", () => {
+      const v = $("new-acct-agg-val");
+      if (v) v.textContent = newAggSlider.value;
+    });
+  }
+
+  // New account bias toggle
+  document.querySelectorAll("#new-acct-bias .bias-btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      document.querySelectorAll("#new-acct-bias .bias-btn").forEach((x) => x.classList.remove("active"));
+      b.classList.add("active");
+    });
+  });
+
+  // Load accounts on boot
+  loadPaperAccounts();
 });
 
 // Auto-refresh history every 15s while tab is visible

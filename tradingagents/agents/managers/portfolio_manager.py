@@ -38,8 +38,10 @@ def create_portfolio_manager(llm):
             if past_context
             else ""
         )
+        bias_line = state.get("bias_context", "")
 
         prompt = f"""As the Portfolio Manager, synthesize the risk analysts' debate and deliver the final trading decision.
+{bias_line}
 
 {instrument_context}
 

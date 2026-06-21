@@ -111,7 +111,7 @@ a { color: var(--accent-cyan); }
   margin: 0 auto;
 }
 
-.sidebar { overflow-y: auto; max-height: calc(100vh - 65px); position: sticky; top: 53px; }
+.sidebar { position: sticky; top: 53px; overflow: visible; }
 
 .main { display: flex; flex-direction: column; gap: 12px; }
 
@@ -179,6 +179,37 @@ a { color: var(--accent-cyan); }
   filter: invert(0.9);
 }
 .form-grid input[type="date"]::-webkit-calendar-picker-indicator:hover { opacity: 1; }
+
+/* ----- Aggressiveness slider ----- */
+.slider-row { display: flex; align-items: center; gap: 8px; }
+.slider-row input[type="range"] {
+  flex: 1;
+  accent-color: var(--accent-cyan);
+  height: 4px;
+  cursor: pointer;
+}
+.slider-val { font-size: 13px; color: var(--text); min-width: 18px; text-align: right; }
+
+/* ----- Decision bias toggle ----- */
+.bias-toggle { display: flex; gap: 4px; }
+.bias-btn {
+  flex: 1;
+  padding: 5px 0;
+  font-size: 11px;
+  font-family: inherit;
+  border: 1px solid var(--panel-border);
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.bias-btn.active[data-val="bearish"] { background: var(--sell); color: #2e0a0a; border-color: var(--sell); }
+.bias-btn.active[data-val="neutral"] { background: var(--hold); color: #2e2204; border-color: var(--hold); }
+.bias-btn.active[data-val="bullish"] { background: var(--buy);  color: #042714; border-color: var(--buy); }
+.bias-btn:hover:not(.active) { border-color: var(--accent-cyan); color: var(--text); }
 
 /* ----- Ticker type-ahead (company name -> symbol) ----- */
 .ticker-field { position: relative; width: 100%; }
@@ -273,7 +304,7 @@ button.ghost:hover:not([disabled])    { border-color: var(--accent-yellow); colo
 button[disabled] { opacity: 0.4; cursor: not-allowed; }
 
 /* ----- History sidebars (shared by all three scan/run history lists) ----- */
-.history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; max-height: calc(100vh - 100px); }
 .history li {
   padding: 0;
   border: 1px solid transparent;
@@ -866,7 +897,7 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .bus-msg[data-agent="risk-neutral"]         .bus-badge { background: #141c24; color: var(--dim); }
 
 /* Orchestrator — dim */
-.bus-msg[data-agent="langgraph-orchestrator"] .bus-badge { background: #0d1219; color: var(--dim); }
+.bus-msg[data-agent="switchboard-orchestrator"] .bus-badge { background: #0d1219; color: var(--dim); }
 
 /* msg_type chips */
 .bus-chip {

@@ -8,6 +8,7 @@ services:
       TRADINGAGENTS_LLM_PROVIDER: ollama
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY}
+      SCHWAB_MCP_URL: ${SCHWAB_MCP_URL:-http://192.168.7.50:3105/mcp}
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
     tty: true
@@ -26,10 +27,14 @@ services:
       SCHWAB_APP_KEY: ${SCHWAB_APP_KEY}
       SCHWAB_APP_SECRET: ${SCHWAB_APP_SECRET}
       SCHWAB_CALLBACK_URL: ${SCHWAB_CALLBACK_URL}
+      SCHWAB_MCP_URL: ${SCHWAB_MCP_URL:-http://192.168.7.50:3105/mcp}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
       SWITCHBOARD_URL: http://switchboard:3107
       SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN}
+      SWITCHBOARD_TARGET_AGENT: ${SWITCHBOARD_TARGET_AGENT:-llm-router}
+      SWITCHBOARD_PROVIDER: ${SWITCHBOARD_PROVIDER:-}
       BUS_MIRROR: ${BUS_MIRROR:-analysis}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN}
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
     restart: unless-stopped
@@ -48,7 +53,13 @@ services:
       OLLAMA_API_KEY: ${OLLAMA_API_KEY}
       SCHWAB_APP_KEY: ${SCHWAB_APP_KEY}
       SCHWAB_APP_SECRET: ${SCHWAB_APP_SECRET}
+      SCHWAB_MCP_URL: ${SCHWAB_MCP_URL:-http://192.168.7.50:3105/mcp}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
+      SWITCHBOARD_URL: http://switchboard:3107
+      SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN}
+      SWITCHBOARD_TARGET_AGENT: ${SWITCHBOARD_TARGET_AGENT:-llm-router}
+      SWITCHBOARD_PROVIDER: ${SWITCHBOARD_PROVIDER:-}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN}
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
     restart: unless-stopped
@@ -62,6 +73,7 @@ services:
     entrypoint: ["python", "-m", "web.scheduler"]
     environment:
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN}
       FRED_NOTIFY_URL: ${FRED_NOTIFY_URL}
       SMTP_HOST: ${SMTP_HOST}
       SMTP_PORT: ${SMTP_PORT:-587}
@@ -90,18 +102,43 @@ services:
       - tradingagents-api
       - tradingagents-portfolio
 
-  # Agent message bus — internal only; the dashboard streams it via /api/bus.
+  # Agent message bus — the dashboard streams it via /api/bus, AND it's exposed
+  # on host port 3109 so an external Claude CLI (or other off-stack agent) can
+  # reach it at http://<host>:3109/mcp. The SWITCHBOARD_MCP_TOKEN bearer is the
+  # ONLY gate on that port — keep it strong; do not public-proxy without TLS.
   switchboard:
     image: ghcr.io/jemplayer82/mcp-switchboard:latest
     environment:
       PORT: "3107"
       SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN:?SWITCHBOARD_MCP_TOKEN required}
       SWITCHBOARD_DB_PATH: /data/switchboard.db
+    ports:
+      - "3109:3107"   # external bus access (3109 host-side: 3107/3108 used by mcp-shared)
     volumes:
       - switchboard_data:/data
     restart: unless-stopped
-    # ports:
-    #   - "3109:3107"   # ops debugging only (3109 host-side: 3107/3108 taken by mcp-shared elsewhere)
+
+  # LLM router — registers on the bus as the target agent and bridges
+  # llm_request DMs to Ollama / OpenAI-compatible backends. Same image,
+  # different entrypoint. Required for LLM_PROVIDER=switchboard with a
+  # non-Claude backend (Claude is handled by an external CLI + hook instead).
+  tradingagents-llm-router:
+    image: ghcr.io/jemplayer82/tradingagents:latest
+    pull_policy: always
+    entrypoint: ["python", "-m", "tradingagents.llm_router"]
+    environment:
+      SWITCHBOARD_URL: http://switchboard:3107
+      SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN}
+      SWITCHBOARD_AGENT_ID: llm-router
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      CLAUDE_AGENT_ID: ${CLAUDE_AGENT_ID:-claude-code}
+      LLM_ROUTER_CONCURRENCY: ${LLM_ROUTER_CONCURRENCY:-8}
+    restart: unless-stopped
+    depends_on:
+      - switchboard
 
 volumes:
   tradingagents_data:

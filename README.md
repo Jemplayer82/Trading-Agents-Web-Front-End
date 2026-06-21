@@ -185,12 +185,14 @@ The nginx `tradingagents-web` tier is only needed in Docker; in local dev hit th
 
 Single-ticker deep analysis with real-time streaming:
 
-1. **Input Form** — Ticker, date, language, LLM provider, deep/quick models, research depth, analyst selection
+1. **Input Form** — Ticker, date, language, LLM provider, deep/quick models, research depth, **aggressiveness**, **decision bias**, analyst selection
 2. **Progress Panel** — Live status of each agent via WebSocket
 3. **Reports** — Market, sentiment, news, fundamentals, research plan, trader plan, final decision
 4. **Technical Chart** — Price candles + RSI + MACD with interactive overlays
 5. **Q&A Thread** — Multi-turn follow-up questions without re-running the full analysis
 6. **Live Reasoning** — each agent's streamed train-of-thought (tool calls included), shown beneath the reports
+
+> **Aggressiveness vs. bias.** *Aggressiveness* (1–10) controls how much risk the run takes — it sets debate depth (1–3 → 1 round, 4–7 → 2, 8–10 → 3) and, in the portfolio builders, position sizing (≤3: max 7% per position / 20% cash · 4–7: 12% / 10% · 8–10: 20% / 5%). *Decision bias* (bullish / neutral / bearish) nudges the stance the agents lean toward on borderline calls — a suggestion, not a hard limit. The two are **independent**: aggressiveness = *how much*, bias = *which way*. Both are available on the Run Analysis, Portfolio Scan, and S&P 500 (per paper-account) tabs.
 
 ### Schwab Tab
 
@@ -205,8 +207,9 @@ When the MCP server is enabled, account positions and market data come directly 
 
 ### Portfolio Scan Tab
 
-View results from automated Schwab portfolio scans:
+Run and review scans of your real Schwab holdings:
 
+- **Run Scan Now** — kick off an on-demand scan with its own **aggressiveness** + **decision bias** (the nightly cron at 22:00 ET runs with defaults)
 - Aggregated portfolio briefing
 - Per-ticker analysis cards with signals and rationales
 - Links to full detailed analyses
@@ -223,7 +226,12 @@ The scan re-runs automatically every Saturday, and the AI agent rebalances the p
 
 ### Credentials Tab
 
-API keys are managed directly from the Credentials tab — no `.env` editing required. Supports all major providers. Keys are masked in the UI (last 4 characters visible).
+Two distinct things live here — they are **not** duplicates:
+
+- **LLM provider API keys** (OpenAI, Anthropic, Google, xAI, …) — your model-provider secrets, masked in the UI (last 4 visible).
+- **Settings groups** (Ollama & Bus Routing, Market Data, Brokerage, Email, …) — non-key configuration. *Ollama & Bus Routing* holds the Ollama base URL + key (Ollama has no entry in the provider-keys list, so this is its only home) and the switchboard routing hints — **not** provider keys.
+
+No `.env` editing required; saved values apply immediately and override the `.env`/compose fallback.
 
 ---
 
@@ -275,6 +283,60 @@ The `switchboard` container starts automatically, `tradingagents-web` connects t
 | `SWITCHBOARD_MCP_TOKEN` | Yes | — | Bearer token for the in-stack switchboard. Generate: `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
 | `BUS_MIRROR` | No | `analysis` | Set to `off` to disable all bus publishing without stopping the switchboard container |
 | `SWITCHBOARD_URL` | Auto | `http://switchboard:3107` | Resolved by compose — only override if running the switchboard outside the stack |
+| `SWITCHBOARD_TARGET_AGENT` | No | `llm-router` | Bus agent that answers LLM requests when `LLM_PROVIDER=switchboard` — the built-in router, or an external Claude CLI's id |
+| `SWITCHBOARD_PROVIDER` | No | `ollama` | Which backend `llm-router` dispatches to (`ollama`, `openai`, `xai`, `grok`, `deepseek`, `claude`) |
+
+The bus is also published on **host port `3109`** (`docker-compose.yml`) so off-stack agents can connect at `http://<host>:3109/mcp`.
+
+### Connecting Claude (streaming daemon)
+
+With `LLM_PROVIDER=switchboard`, every LLM call goes as an `llm_request` DM on the bus to whatever agent is registered under `SWITCHBOARD_TARGET_AGENT`:
+
+- **`llm-router`** (default) — built-in service, dispatches to Ollama / OpenAI-compatible backends.
+- **`cleo`** — the included `scripts/cleo_llm_handler.py` daemon; drives your **local `claude` CLI in headless streaming mode** and **streams tokens live** to the dashboard as Claude generates them. Uses your Claude Code subscription session — **no Anthropic API key, no per-token billing.**
+
+> ⚠️ The `SWITCHBOARD_MCP_TOKEN` bearer is the **only** gate on the `3109` host port. Keep it strong; don't expose it to the public internet without TLS in front.
+
+#### Quick setup
+
+> **Prerequisite:** run this on a machine where `claude -p "hi"` already works — i.e. Claude Code is installed and logged in (`claude` on PATH, or set `CLAUDE_BIN`). The daemon reaches the switchboard over HTTP, so it can run anywhere that can hit `SWITCHBOARD_URL`.
+
+```bash
+# 1. Install deps (httpx is usually already present)
+pip install httpx
+
+# 2. Run the daemon — shells out to `claude -p`, using your Claude Code session (free, no API key)
+SWITCHBOARD_URL=http://<host>:3109      \
+SWITCHBOARD_MCP_TOKEN=<your-token>      \
+python scripts/cleo_llm_handler.py
+```
+
+```
+# 3. In the dashboard → Settings → Ollama & Bus Routing:
+#    Switchboard — LLM handler agent:   cleo
+#    Switchboard — backend provider:    claude
+
+# 4. In the Analysis form, pick provider "Switchboard (Bus LLM)" and a Claude model
+#    (e.g. claude-sonnet-4-6 or claude-opus-4-8) then run as normal.
+```
+
+The daemon handles concurrent requests (8 workers), so parallel analyst calls during S&P 500 scans don't block each other. Each call uses a unique reply inbox so responses never cross wires.
+
+#### Streaming protocol
+
+When `stream: true` is in the `llm_request` payload (the default), the handler sends one `llm_stream_chunk` DM per text delta:
+
+```json
+{ "type": "llm_stream_chunk", "content": "{\"delta\": \"some text\", \"done\": false}" }
+```
+
+A final chunk signals completion and carries any tool calls:
+
+```json
+{ "type": "llm_stream_chunk", "content": "{\"delta\": \"\", \"done\": true, \"tool_calls\": []}" }
+```
+
+The dashboard handles these automatically — tokens appear in each agent's report tab as they arrive.
 
 ---
 
@@ -301,6 +363,26 @@ $ docker run -p 3000:3000 \
 ```
 
 See [Jemplayer82/schwab-mcp](https://github.com/Jemplayer82/schwab-mcp) for full setup and MCP client configuration.
+
+---
+
+## `[ data sources & brokerages ]`
+
+Where market, indicator, and account data come from:
+
+| Source | Used for | Status |
+|---|---|---|
+| **yfinance** | Default price/OHLCV + locally-computed technical indicators (via `stockstats`); S&P 500 quick scan | ✅ Built-in, free, no key |
+| **Schwab MCP** | Live holdings/positions + OHLCV quotes (feeds the local indicator calc when **Use Schwab for market data** is on) | ✅ Wired — OAuth + [schwab-mcp](https://github.com/Jemplayer82/schwab-mcp) |
+| **Alpha Vantage** | *Optional* pre-calculated technical indicators (SMA/EMA/MACD/RSI/Bollinger/ATR) | ✅ Optional — set **Technical indicators source** to `alpha_vantage` + add `ALPHA_VANTAGE_API_KEY` |
+| **Alpaca** | — | ⚠️ **Not implemented.** Credential fields exist in Settings (Brokerage → Alpaca), but there is **no** Alpaca holdings/quote/trade integration in the codebase yet — saving keys does nothing functional. Schwab is the only wired brokerage. |
+
+**Technical indicators source** (Settings → Market Data) picks the indicator vendor:
+
+- `yfinance` *(default)* — indicators computed locally with `stockstats`. The underlying OHLCV is yfinance, **or Schwab** when *Use Schwab for market data* is on. No key needed.
+- `alpha_vantage` — indicators come pre-calculated from Alpha Vantage (requires `ALPHA_VANTAGE_API_KEY`).
+
+> Schwab is an **OHLCV source**, not a pre-calculated-indicator source — it feeds the local `stockstats` calculation rather than returning ready-made indicators.
 
 ---
 

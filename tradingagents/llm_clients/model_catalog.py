@@ -175,6 +175,19 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("Custom model ID", "custom"),
         ],
     },
+    "switchboard": {
+        "quick": [
+            ("Claude Sonnet 4.6 (via bus)", "claude-sonnet-4-6"),
+            ("Claude Haiku 4.5 (via bus)", "claude-haiku-4-5-20251001"),
+            ("Llama 3 (via bus)", "llama3"),
+            ("Custom model ID", "custom"),
+        ],
+        "deep": [
+            ("Claude Opus 4.8 (via bus)", "claude-opus-4-8"),
+            ("Claude Sonnet 4.6 (via bus)", "claude-sonnet-4-6"),
+            ("Custom model ID", "custom"),
+        ],
+    },
 }
 
 

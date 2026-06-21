@@ -1,8 +1,6 @@
-"""Mirror the LangGraph trading pipeline's inter-agent handoffs onto the switchboard bus.
+"""Mirror the SwitchboardOrchestrator pipeline's inter-agent handoffs onto the switchboard bus.
 
-RunMirror taps the existing run_analysis_sync stream loop via four hook methods:
-    on_state(chunk)       — called on every full-state values chunk
-    on_report_delta(delta) — called after each non-empty report delta
+RunMirror taps the existing run_analysis_sync stream loop via hook methods:
     on_done(signal, decision)
     on_error(message)
     close()
@@ -61,7 +59,7 @@ _AGENTS: list[tuple[str, str]] = [
     ("risk-conservative",    "Conservative Risk Analyst"),
     ("risk-neutral",         "Neutral Risk Analyst"),
     ("portfolio-manager",    "Portfolio Manager"),
-    ("langgraph-orchestrator", "LangGraph Orchestrator"),
+    ("switchboard-orchestrator", "Switchboard Orchestrator"),
 ]
 
 # report key → sender agent-id
@@ -153,7 +151,7 @@ class RunMirror:
                 f"Analysts on deck: {on_deck}."
             )
             publisher.publish("send_message", {
-                "from": "langgraph-orchestrator",
+                "from": "switchboard-orchestrator",
                 "content": kickoff_msg,
                 "channel_id": channel_id,
                 "type": "instruction",
@@ -161,7 +159,7 @@ class RunMirror:
 
             # Set orchestrator status
             publisher.publish("set_status", {
-                "agent_id": "langgraph-orchestrator",
+                "agent_id": "switchboard-orchestrator",
                 "activity": f"analyzing {ticker}",
             })
 
@@ -249,14 +247,14 @@ class RunMirror:
         # On the first turn, publish orchestrator instruction + status change
         if self._inv_count == 0:
             self._pub.publish("send_message", {
-                "from": "langgraph-orchestrator",
+                "from": "switchboard-orchestrator",
                 "content": "Reports are in — Bull and Bear: debate the investment case.",
                 "channel_id": self._channel_id,
                 "thread_id": "investment-debate",
                 "type": "instruction",
             })
             self._pub.publish("set_status", {
-                "agent_id": "langgraph-orchestrator",
+                "agent_id": "switchboard-orchestrator",
                 "activity": "investment debate in progress",
             })
 
@@ -327,7 +325,7 @@ class RunMirror:
         # On the first turn, set orchestrator status
         if self._risk_count == 0:
             self._pub.publish("set_status", {
-                "agent_id": "langgraph-orchestrator",
+                "agent_id": "switchboard-orchestrator",
                 "activity": "risk debate in progress",
             })
 
@@ -363,7 +361,7 @@ class RunMirror:
                 "type": "result",
             })
             self._pub.publish("set_status", {
-                "agent_id": "langgraph-orchestrator",
+                "agent_id": "switchboard-orchestrator",
                 "activity": f"idle — analysis #{self._analysis_id} complete",
             })
         except Exception:
@@ -373,7 +371,7 @@ class RunMirror:
         """Publish an error notification from the orchestrator."""
         try:
             self._pub.publish("send_message", {
-                "from": "langgraph-orchestrator",
+                "from": "switchboard-orchestrator",
                 "content": f"Analysis failed: {message[:_DECISION_CHARS]}",
                 "channel_id": self._channel_id,
                 "type": "chat",

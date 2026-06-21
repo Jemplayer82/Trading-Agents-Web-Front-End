@@ -151,7 +151,10 @@ CREATE TABLE IF NOT EXISTS spy_scans (
     previous_scan_id INTEGER,
     starting_value REAL,
     error TEXT,
-    updated_at TEXT
+    updated_at TEXT,
+    paper_account_id INTEGER,
+    aggressiveness INTEGER DEFAULT 5,
+    bias TEXT DEFAULT 'neutral'
 );
 
 CREATE INDEX IF NOT EXISTS idx_spy_scans_created_at ON spy_scans (created_at DESC);
@@ -200,6 +203,16 @@ CREATE TABLE IF NOT EXISTS ticker_info (
     website TEXT,
     fetched_at TEXT NOT NULL
 );
+
+-- Named paper trading accounts for S&P 500 scans.
+CREATE TABLE IF NOT EXISTS paper_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    starting_capital REAL NOT NULL DEFAULT 100000,
+    aggressiveness INTEGER NOT NULL DEFAULT 5,
+    bias TEXT NOT NULL DEFAULT 'neutral',
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -219,6 +232,9 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     # Liveness stamp for the stuck-run reaper (touched on every progress write).
     ("portfolio_scans", "updated_at", "TEXT"),
     ("spy_scans", "updated_at", "TEXT"),
+    ("spy_scans", "paper_account_id", "INTEGER"),
+    ("spy_scans", "aggressiveness", "INTEGER DEFAULT 5"),
+    ("spy_scans", "bias", "TEXT DEFAULT 'neutral'"),
 ]
 
 
@@ -743,11 +759,18 @@ def latest_portfolio_scan() -> dict[str, Any] | None:
 
 # ---------- S&P 500 scanner ----------
 
-def create_spy_scan(trade_date: str) -> int:
+def create_spy_scan(
+    trade_date: str,
+    paper_account_id: int | None = None,
+    aggressiveness: int = 5,
+    bias: str = "neutral",
+) -> int:
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO spy_scans (created_at, trade_date, status, cancel_requested) VALUES (?, ?, 'pending', 0)",
-            (datetime.utcnow().isoformat(timespec="seconds") + "Z", trade_date),
+            "INSERT INTO spy_scans (created_at, trade_date, status, cancel_requested, paper_account_id, aggressiveness, bias) "
+            "VALUES (?, ?, 'pending', 0, ?, ?, ?)",
+            (datetime.utcnow().isoformat(timespec="seconds") + "Z", trade_date,
+             paper_account_id, aggressiveness, bias),
         )
         return int(cur.lastrowid)
 
@@ -773,6 +796,7 @@ def is_spy_scan_cancelled(scan_id: int) -> bool:
 _SPY_SCAN_UPDATABLE = {
     "status", "quick_count", "quick_total", "deep_count", "deep_total",
     "current_value", "last_price_check", "rebalance_notes", "error",
+    "paper_account_id", "aggressiveness", "bias",
 }
 
 
@@ -828,18 +852,25 @@ def complete_spy_scan(
         )
 
 
-def get_latest_completed_spy_scan(exclude_id: int | None = None) -> dict[str, Any] | None:
-    """Return the most recent completed scan, optionally excluding one scan ID."""
+def get_latest_completed_spy_scan(
+    exclude_id: int | None = None,
+    paper_account_id: int | None = None,
+) -> dict[str, Any] | None:
+    """Return the most recent completed scan, optionally filtered by account or excluding one ID."""
+    conditions = ["status = 'completed'"]
+    params: list[Any] = []
+    if exclude_id is not None:
+        conditions.append("id != ?")
+        params.append(exclude_id)
+    if paper_account_id is not None:
+        conditions.append("paper_account_id = ?")
+        params.append(paper_account_id)
+    where = " AND ".join(conditions)
     with connect() as conn:
-        if exclude_id is not None:
-            row = conn.execute(
-                "SELECT id FROM spy_scans WHERE status = 'completed' AND id != ? ORDER BY id DESC LIMIT 1",
-                (exclude_id,),
-            ).fetchone()
-        else:
-            row = conn.execute(
-                "SELECT id FROM spy_scans WHERE status = 'completed' ORDER BY id DESC LIMIT 1"
-            ).fetchone()
+        row = conn.execute(
+            f"SELECT id FROM spy_scans WHERE {where} ORDER BY id DESC LIMIT 1",
+            params,
+        ).fetchone()
     if not row:
         return None
     return get_spy_scan(int(row["id"]))
@@ -940,16 +971,28 @@ def upsert_spy_quick_result(
         )
 
 
-def list_spy_scans(limit: int = 50) -> list[dict[str, Any]]:
+def list_spy_scans(limit: int = 50, paper_account_id: int | None = None) -> list[dict[str, Any]]:
     with connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT id, created_at, trade_date, status, quick_count, quick_total,
-                   deep_count, deep_total, current_value, last_price_check
-            FROM spy_scans ORDER BY id DESC LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        if paper_account_id is not None:
+            rows = conn.execute(
+                """
+                SELECT id, created_at, trade_date, status, quick_count, quick_total,
+                       deep_count, deep_total, current_value, last_price_check,
+                       paper_account_id, aggressiveness, bias
+                FROM spy_scans WHERE paper_account_id = ? ORDER BY id DESC LIMIT ?
+                """,
+                (paper_account_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, created_at, trade_date, status, quick_count, quick_total,
+                       deep_count, deep_total, current_value, last_price_check,
+                       paper_account_id, aggressiveness, bias
+                FROM spy_scans ORDER BY id DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -1079,6 +1122,75 @@ def set_ticker_info(ticker: str, name: str | None, website: str | None) -> None:
             """,
             (ticker, name, website, now),
         )
+
+
+# ---------- paper trading accounts ----------
+
+def create_paper_account(
+    name: str,
+    starting_capital: float = 100_000.0,
+    aggressiveness: int = 5,
+    bias: str = "neutral",
+) -> int:
+    """Create a named paper account. Raises sqlite3.IntegrityError if name exists."""
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO paper_accounts (name, starting_capital, aggressiveness, bias, created_at) VALUES (?, ?, ?, ?, ?)",
+            (name, starting_capital, aggressiveness, bias,
+             datetime.utcnow().isoformat(timespec="seconds") + "Z"),
+        )
+        return int(cur.lastrowid)
+
+
+def list_paper_accounts() -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT id, name, starting_capital, aggressiveness, bias, created_at "
+            "FROM paper_accounts ORDER BY id"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_paper_account(account_id: int) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT id, name, starting_capital, aggressiveness, bias, created_at "
+            "FROM paper_accounts WHERE id = ?",
+            (account_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def update_paper_account(
+    account_id: int,
+    name: str | None = None,
+    starting_capital: float | None = None,
+    aggressiveness: int | None = None,
+    bias: str | None = None,
+) -> bool:
+    sets, vals = [], []
+    if name is not None:
+        sets.append("name = ?"); vals.append(name)
+    if starting_capital is not None:
+        sets.append("starting_capital = ?"); vals.append(starting_capital)
+    if aggressiveness is not None:
+        sets.append("aggressiveness = ?"); vals.append(aggressiveness)
+    if bias is not None:
+        sets.append("bias = ?"); vals.append(bias)
+    if not sets:
+        return True
+    vals.append(account_id)
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE paper_accounts SET " + ", ".join(sets) + " WHERE id = ?", vals
+        )
+    return cur.rowcount > 0
+
+
+def delete_paper_account(account_id: int) -> bool:
+    with connect() as conn:
+        cur = conn.execute("DELETE FROM paper_accounts WHERE id = ?", (account_id,))
+    return cur.rowcount > 0
 
 
 def _serialize(obj: Any) -> Any:

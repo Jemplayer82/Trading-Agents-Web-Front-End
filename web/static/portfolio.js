@@ -237,8 +237,14 @@ async function runScanNow() {
   const out = $("scan-now-result");
   if (btn) btn.disabled = true;
   if (out) out.textContent = "starting…";
+  const aggressiveness = parseInt($("pf-aggressiveness")?.value || "5", 10);
+  const bias = document.querySelector("#pf-bias .bias-btn.active")?.dataset?.val || "neutral";
   try {
-    const r = await fetch("/api/portfolio-scan", { method: "POST" });
+    const r = await fetch("/api/portfolio-scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ aggressiveness, bias }),
+    });
     const data = await r.json();
     if (!r.ok) {
       out.innerHTML = `<span style="color: var(--accent-red);">${data.detail || JSON.stringify(data)}</span>`;
@@ -443,6 +449,22 @@ function setupTabs() {
 document.addEventListener("DOMContentLoaded", () => {
   setupTabs();
   $("btn-scan-now")?.addEventListener("click", runScanNow);
+
+  // Aggressiveness slider live label
+  const aggSlider = $("pf-aggressiveness");
+  if (aggSlider) {
+    aggSlider.addEventListener("input", () => {
+      const v = $("pf-aggressiveness-val");
+      if (v) v.textContent = aggSlider.value;
+    });
+  }
+  // Bias toggle
+  document.querySelectorAll("#pf-bias .bias-btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      document.querySelectorAll("#pf-bias .bias-btn").forEach((x) => x.classList.remove("active"));
+      b.classList.add("active");
+    });
+  });
 });
 
 document.addEventListener("tab-shown", (ev) => {

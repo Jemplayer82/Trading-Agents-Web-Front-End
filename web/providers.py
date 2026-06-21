@@ -56,6 +56,7 @@ PROVIDERS = [
     {"key": "minimax", "label": "MiniMax (Global)", "base_url": "https://api.minimax.io/v1"},
     {"key": "minimax-cn", "label": "MiniMax (China)", "base_url": "https://api.minimaxi.com/v1"},
     {"key": "ollama", "label": "Ollama", "base_url": None},
+    {"key": "switchboard", "label": "Switchboard (Bus LLM)", "base_url": None},
 ]
 
 

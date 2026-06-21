@@ -17,7 +17,7 @@
     "risk-conservative":     "Risk:Consv",
     "risk-neutral":          "Risk:Neutral",
     "portfolio-manager":     "Portfolio Mgr",
-    "langgraph-orchestrator":"Orchestrator",
+    "switchboard-orchestrator":"Orchestrator",
   };
 
   // ===== State =====

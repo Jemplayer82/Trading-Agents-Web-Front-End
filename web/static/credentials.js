@@ -35,6 +35,7 @@
       "minimax-cn": "MiniMax (China)",
       openrouter: "OpenRouter",
       ollama: "Ollama",
+      switchboard: "Switchboard (Bus LLM)",
     };
     return map[key] || key;
   }
@@ -238,6 +239,18 @@
         lbl.appendChild(cb);
         lbl.appendChild(txt);
         tdNew.appendChild(lbl);
+      } else if (s.type === "select") {
+        inp = document.createElement("select");
+        (s.options || []).forEach((o) => {
+          const val = typeof o === "string" ? o : o.value;
+          const lab = typeof o === "string" ? o : (o.label || o.value);
+          const opt = document.createElement("option");
+          opt.value = val; opt.textContent = lab;
+          inp.appendChild(opt);
+        });
+        if (s.has_value && s.masked) inp.value = String(s.masked).trim();
+        if (s.placeholder) inp.title = s.placeholder;
+        tdNew.appendChild(inp);
       } else {
         inp = document.createElement("input");
         inp.type = s.secret ? "password" : "text";

@@ -73,6 +73,20 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("btn-run").addEventListener("click", startRun);
   $("btn-stop").addEventListener("click", stopRun);
   $("f-provider").addEventListener("change", onProviderChange);
+
+  // Aggressiveness slider live label
+  const aggSlider = $("f-aggressiveness");
+  if (aggSlider) {
+    aggSlider.addEventListener("input", () => { $("f-aggressiveness-val").textContent = aggSlider.value; });
+  }
+
+  // Bias toggle
+  document.querySelectorAll(".bias-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".bias-btn").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+    });
+  });
   // Open the native calendar on a click/focus anywhere in the date field, not
   // just on its icon. showPicker() is recent — guard it for older browsers.
   const fdate = $("f-date");
@@ -265,6 +279,16 @@ async function loadPreferences() {
   if (prefs.deep_model) restoreModelPref("f-deep-model", "f-deep-model-custom", prefs.deep_model);
   if (prefs.quick_model) restoreModelPref("f-quick-model", "f-quick-model-custom", prefs.quick_model);
   $("f-depth").value = prefs.research_depth || 1;
+
+  if ($("f-aggressiveness")) {
+    $("f-aggressiveness").value = prefs.aggressiveness || 5;
+    $("f-aggressiveness-val").textContent = $("f-aggressiveness").value;
+  }
+  if (prefs.bias) {
+    document.querySelectorAll(".bias-btn").forEach((b) => {
+      b.classList.toggle("active", b.dataset.val === prefs.bias);
+    });
+  }
 
   const wanted = new Set(prefs.analysts || ["market", "social", "news", "fundamentals"]);
   document.querySelectorAll("#f-analysts input[type=checkbox]").forEach((cb) => {
@@ -542,6 +566,7 @@ function collectParams() {
   document.querySelectorAll("#f-analysts input[type=checkbox]:checked").forEach((cb) =>
     analysts.push(cb.value)
   );
+  const activeBiasBtn = document.querySelector(".bias-btn.active");
   return {
     ticker: $("f-ticker").value.trim(),
     trade_date: $("f-date").value,
@@ -550,6 +575,8 @@ function collectParams() {
     deep_model: getModelValue("f-deep-model", "f-deep-model-custom"),
     quick_model: getModelValue("f-quick-model", "f-quick-model-custom"),
     research_depth: parseInt($("f-depth").value, 10),
+    aggressiveness: parseInt($("f-aggressiveness")?.value || "5", 10),
+    bias: activeBiasBtn?.dataset?.val || "neutral",
     analysts,
   };
 }
@@ -608,6 +635,7 @@ function handleFrame(frame) {
     case "status":
       setStatus("running", frame.message);
       if (frame.analysts) frame.analysts.forEach((a) => setAgentState(a, "pending"));
+      if (frame.agent) setAgentState(frame.agent, "in_progress");
       break;
     case "report_update":
       // Agent completion is inferred from WHICH report key arrived — there is no
@@ -621,6 +649,7 @@ function handleFrame(frame) {
         if (k === "final_trade_decision") {
           setAgentState("risk_debate", "completed");
           setAgentState("portfolio_manager", "completed");
+          activeReportKey = "final_trade_decision";
         }
       });
       refreshReportTabs();

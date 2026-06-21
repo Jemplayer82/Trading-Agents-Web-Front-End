@@ -108,10 +108,13 @@ SETTINGS_REGISTRY: list[dict[str, Any]] = [
     {"key": "SCHWAB_MCP_URL", "label": "Schwab MCP URL", "group": "Brokerage (Schwab)", "secret": False, "placeholder": "http://100.112.40.124:3105/mcp"},
     {"key": "SCHWAB_MARKET_DATA", "label": "Use Schwab for market data (off = free yfinance)", "group": "Brokerage (Schwab)", "secret": False, "type": "toggle", "on_label": "On — Schwab quotes", "off_label": "Off — yfinance", "placeholder": ""},
     # Market data
-    {"key": "ALPHA_VANTAGE_API_KEY", "label": "Alpha Vantage API Key", "group": "Market Data", "secret": True, "placeholder": "Used for technical indicators"},
+    {"key": "TECHNICAL_INDICATOR_VENDOR", "label": "Technical indicators source", "group": "Market Data", "secret": False, "type": "select", "options": ["yfinance", "alpha_vantage"], "placeholder": "yfinance = free local calc (Schwab OHLCV feeds it when 'Use Schwab for market data' is on); alpha_vantage = pre-calculated (needs the key below)"},  # pragma: allowlist secret
+    {"key": "ALPHA_VANTAGE_API_KEY", "label": "Alpha Vantage API Key", "group": "Market Data", "secret": True, "placeholder": "Only needed when the indicators source is alpha_vantage"},
     # Ollama / LLM infra
-    {"key": "OLLAMA_BASE_URL", "label": "Ollama Base URL", "group": "LLM Infra", "secret": False, "placeholder": "https://ollama.com/v1 or http://host:11434/v1"},
-    {"key": "OLLAMA_API_KEY", "label": "Ollama API Key", "group": "LLM Infra", "secret": True, "placeholder": "Ollama Cloud auth token"},
+    {"key": "OLLAMA_BASE_URL", "label": "Ollama Base URL", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "https://ollama.com/v1 or http://host:11434/v1"},  # pragma: allowlist secret
+    {"key": "OLLAMA_API_KEY", "label": "Ollama API Key", "group": "Ollama & Bus Routing", "secret": True, "placeholder": "Ollama Cloud auth token"},
+    {"key": "SWITCHBOARD_TARGET_AGENT", "label": "Switchboard — LLM handler agent", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "Bus agent that answers LLM requests: 'llm-router' (built-in → Ollama/OpenAI) or your Claude CLI's id (e.g. claude-code)"},  # pragma: allowlist secret
+    {"key": "SWITCHBOARD_PROVIDER", "label": "Switchboard — backend provider", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "Which backend llm-router uses: blank/ollama (default), openai, xai, grok, deepseek, or claude"},  # pragma: allowlist secret
     # Email / newsletter
     {"key": "SMTP_HOST", "label": "SMTP Host", "group": "Email / Newsletter", "secret": False, "placeholder": "smtp.gmail.com"},
     {"key": "SMTP_PORT", "label": "SMTP Port", "group": "Email / Newsletter", "secret": False, "placeholder": "587"},
@@ -179,6 +182,7 @@ def list_settings_meta() -> dict[str, Any]:
             "type": spec.get("type", "text"),
             "on_label": spec.get("on_label", "On"),
             "off_label": spec.get("off_label", "Off"),
+            "options": spec.get("options", []),
             "placeholder": spec.get("placeholder", ""),
             "has_value": bool(effective),
             "masked": mask_setting(key, effective),

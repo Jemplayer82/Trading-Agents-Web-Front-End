@@ -34,7 +34,7 @@ import yfinance as yf
 from langchain_openai import ChatOpenAI
 
 from tradingagents.dataflows import schwab_mcp
-from tradingagents.graph.portfolio_graph import run_single_ticker
+from tradingagents.orchestrator import SwitchboardOrchestrator
 
 from . import db
 from .llm_helpers import llm_for
@@ -160,7 +160,7 @@ _CONV_RE = re.compile(r"CONVICTION\s*:\s*([1-9]|10)", re.IGNORECASE)
 _REASON_RE = re.compile(r"REASONING\s*:\s*(.+)", re.IGNORECASE)
 
 
-def _llm_quick(config: dict[str, Any]) -> ChatOpenAI:
+def _llm_quick(config: dict[str, Any]):
     return llm_for(config, deep=False, temperature=0.0)
 
 
@@ -376,9 +376,9 @@ def run_deep_dives(
             "language": config.get("output_language", "English"),
         })
         try:
-            result = run_single_ticker(ticker, trade_date, config, selected_analysts)
-            final_state = result["final_state"]
-            signal = result.get("signal") or c.get("signal") or "HOLD"
+            orch = SwitchboardOrchestrator(config=config, selected_analysts=selected_analysts)
+            final_state, signal = orch.run(ticker, trade_date)
+            signal = signal or c.get("signal") or "HOLD"
             db.complete_analysis(analysis_id, final_state, signal)
             db.upsert_spy_quick_result(
                 scan_id=scan_id, ticker=ticker, signal=signal,

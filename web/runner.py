@@ -1,14 +1,10 @@
-"""Bridge between TradingAgentsGraph (synchronous LangGraph stream) and the
-WebSocket async sender.
+"""Bridge between SwitchboardOrchestrator and the WebSocket async sender.
 
 The producer runs in a worker thread (asyncio.to_thread) and pushes frames
 to a queue. The WebSocket coroutine (web/main.py /api/analyze) drains the
 queue and sends frames to the browser.
 
-The graph is streamed with stream_mode=["values", "messages"]: "values"
-chunks carry the full LangGraph state (reports, debate state), "messages"
-chunks carry per-token LLM output. Frames put on the queue are dicts keyed
-by "type":
+Frame types emitted on the queue:
 
     status         human-readable progress line
     token          per-token delta {node, text, channel: content|reasoning}
@@ -16,13 +12,11 @@ by "type":
     messages       tail of new agent/tool messages (truncated summaries)
     debate         live round counter for the bull/bear and risk debates
     done / error   final signal + decision, or message + traceback
-    None           sentinel — end of stream; always queued last (see finally)
+    None           sentinel — end of stream; always queued last
 
-Two synthetic report keys — "investment_debate" and "risk_debate" — are
-markdown transcripts rendered HERE from the LangGraph debate state; the
-graph never writes them itself. To add a frame type or report key, change
-this module and the frontend consumer together: web/static/app.js
-(REPORT_KEYS and the WebSocket dispatcher).
+To add a frame type or report key, change this module and the frontend
+consumer together: web/static/app.js (REPORT_KEYS and the WebSocket
+dispatcher).
 """
 
 from __future__ import annotations
@@ -36,7 +30,7 @@ from typing import Any
 from cli.models import AssetType
 from cli.utils import detect_asset_type
 from tradingagents.default_config import DEFAULT_CONFIG
-from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.orchestrator import SwitchboardOrchestrator
 
 from . import alerts, db
 
@@ -58,13 +52,40 @@ REPORT_KEYS = (
     "final_trade_decision",
 )
 
-# Analyst keys (the AnalystType enum values), in pipeline order. UI labels
-# for these live in web/providers.py ANALYSTS.
 ALL_ANALYSTS = ["market", "social", "news", "fundamentals"]
 
 
+def aggressiveness_to_rounds(aggressiveness: int) -> int:
+    """Map an aggressiveness level (1–10) to debate/risk-discussion rounds (1–3).
+
+    Shared by the single-ticker config (build_config), the Portfolio Scan, and
+    the S&P 500 deep dive so the mapping can't drift between them.
+    """
+    if aggressiveness <= 3:
+        return 1
+    if aggressiveness <= 7:
+        return 2
+    return 3
+
+
+def apply_indicator_vendor(cfg: dict[str, Any]) -> None:
+    """Override cfg['data_vendors']['technical_indicators'] from the user setting.
+
+    The Settings UI writes TECHNICAL_INDICATOR_VENDOR to app_settings → os.environ.
+    Read it call-time and set it on a COPY of data_vendors (never mutate the shared
+    DEFAULT_CONFIG dict). No-op for an unset/unknown value (keeps the yfinance
+    default). Shared by all tabs so the choice applies everywhere.
+    """
+    vendor = (os.environ.get("TECHNICAL_INDICATOR_VENDOR") or "").strip().lower()
+    if vendor not in ("yfinance", "alpha_vantage"):
+        return
+    dv = dict(cfg.get("data_vendors") or DEFAULT_CONFIG.get("data_vendors") or {})
+    dv["technical_indicators"] = vendor
+    cfg["data_vendors"] = dv
+
+
 def build_config(params: dict[str, Any]) -> dict[str, Any]:
-    """Merge user params with DEFAULT_CONFIG to build the graph config."""
+    """Merge user params with DEFAULT_CONFIG to build the orchestrator config."""
     cfg = dict(DEFAULT_CONFIG)
 
     provider = (params.get("provider") or "ollama").lower()
@@ -73,10 +94,22 @@ def build_config(params: dict[str, Any]) -> dict[str, Any]:
     cfg["quick_think_llm"] = params.get("quick_model") or cfg["quick_think_llm"]
     cfg["output_language"] = params.get("language") or cfg.get("output_language", "English")
 
-    # Research depth → debate / risk-discussion rounds.
-    depth = int(params.get("research_depth") or 1)
-    cfg["max_debate_rounds"] = depth
-    cfg["max_risk_discuss_rounds"] = depth
+    # Aggressiveness (1–10) → debate rounds. Overrides research_depth when set.
+    aggressiveness = int(params.get("aggressiveness") or 0)
+    if aggressiveness:
+        rounds = aggressiveness_to_rounds(aggressiveness)
+        cfg["max_debate_rounds"] = rounds
+        cfg["max_risk_discuss_rounds"] = rounds
+    else:
+        depth = int(params.get("research_depth") or 1)
+        cfg["max_debate_rounds"] = depth
+        cfg["max_risk_discuss_rounds"] = depth
+
+    # Decision bias (bullish / neutral / bearish) → Portfolio Manager prompt modifier.
+    cfg["bias"] = params.get("bias") or "neutral"
+
+    # Technical-indicator vendor (yfinance / alpha_vantage) from Settings.
+    apply_indicator_vendor(cfg)
 
     # Provider-specific thinking knobs (optional; ignored if provider doesn't use them).
     if params.get("openai_reasoning_effort"):
@@ -97,11 +130,7 @@ def build_config(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_analysts(requested: Iterable[str], asset_type: AssetType) -> list[str]:
-    """Keep only known analyst keys; an empty selection means all of them.
-
-    Crypto tickers drop the fundamentals analyst — there are no financial
-    statements to analyze.
-    """
+    """Keep only known analyst keys; an empty selection means all of them."""
     keys = [a for a in requested if a in ALL_ANALYSTS]
     if not keys:
         keys = list(ALL_ANALYSTS)
@@ -110,114 +139,13 @@ def _normalize_analysts(requested: Iterable[str], asset_type: AssetType) -> list
     return keys
 
 
-def _diff_reports(prev: dict[str, str], new_state: dict[str, Any]) -> dict[str, str]:
-    """Return only the report fields whose content changed since `prev`."""
-    out: dict[str, str] = {}
-    for key in REPORT_KEYS:
-        val = new_state.get(key, "")
-        if not isinstance(val, str):
-            continue
-        if val and val != prev.get(key, ""):
-            out[key] = val
-    return out
-
-
-def _debate_markdown(state: Any) -> str:
-    """Render an InvestDebateState / RiskDebateState into a readable transcript."""
-    if not isinstance(state, dict):
-        return ""
-    parts: list[str] = []
-    history = (state.get("history") or "").strip()
-    if history:
-        parts.append(history)
-    else:
-        # Fall back to the per-side trails if the combined transcript is empty.
-        for key in (
-            "bull_history", "bear_history",
-            "aggressive_history", "conservative_history", "neutral_history",
-        ):
-            v = (state.get(key) or "").strip()
-            if v:
-                parts.append(v)
-    judge = (state.get("judge_decision") or "").strip()
-    if judge:
-        parts.append("---\n\n### Judge Decision\n\n" + judge)
-    return "\n\n".join(p for p in parts if p).strip()
-
-
-# Synthetic report keys → the LangGraph state key holding the debate.
-DEBATE_REPORTS = {
-    "investment_debate": "investment_debate_state",
-    "risk_debate": "risk_debate_state",
-}
-
-
-def _token_text(msg: Any) -> tuple[str, str]:
-    """Extract (content, reasoning) deltas from a streamed message chunk."""
-    content = getattr(msg, "content", None)
-    if isinstance(content, list):
-        text = "".join(
-            (c.get("text", "") if isinstance(c, dict) else str(c)) for c in content
-        )
-    else:
-        text = content or ""
-    extra = getattr(msg, "additional_kwargs", None) or {}
-    reasoning = extra.get("reasoning_content") or extra.get("reasoning") or ""
-    return text, (reasoning if isinstance(reasoning, str) else "")
-
-
-def _unwrap_stream_item(item: Any) -> tuple[str, Any]:
-    """Normalise a multi-mode stream item to (mode, payload)."""
-    if (
-        isinstance(item, tuple)
-        and len(item) == 2
-        and isinstance(item[0], str)
-        and item[0] in ("values", "messages", "updates")
-    ):
-        return item[0], item[1]
-    return "values", item
-
-
-def _message_summary(msg: Any) -> dict[str, Any] | None:
-    """Reduce a LangChain message to a small dict the frontend can render."""
-    if msg is None:
-        return None
-    msg_type = getattr(msg, "type", None) or msg.__class__.__name__.lower()
-    content = getattr(msg, "content", None)
-    if isinstance(content, list):
-        # Anthropic-style content blocks
-        text = " ".join(
-            (c.get("text", "") if isinstance(c, dict) else str(c)) for c in content
-        ).strip()
-    else:
-        text = str(content) if content else ""
-
-    name = getattr(msg, "name", None)
-    tool_calls = getattr(msg, "tool_calls", None) or []
-    tool_summaries = []
-    for tc in tool_calls:
-        if isinstance(tc, dict):
-            tool_summaries.append({
-                "name": tc.get("name") or tc.get("function", {}).get("name"),
-                "args": tc.get("args") or tc.get("function", {}).get("arguments"),
-            })
-
-    return {
-        "type": msg_type,
-        "name": name,
-        "text": text[:500],  # cap to keep WS frames small
-        "tool_calls": tool_summaries,
-    }
-
-
 def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Queue) -> None:
-    """Run the graph and emit frames. Synchronous — call via asyncio.to_thread.
+    """Run the orchestrator and emit frames. Synchronous — call via asyncio.to_thread.
 
-    Outcomes always land in two places: frames on the queue for the live
-    browser, and the analyses row in SQLite (db.complete_analysis /
-    db.fail_analysis) for history. The None sentinel is queued in `finally`
-    no matter what happens, so the WebSocket drain loop always terminates.
-    Bus mirroring (RunMirror) is best-effort and must never break the run.
+    Outcomes land in two places: frames on the queue for the live browser,
+    and the analyses row in SQLite (db.complete_analysis / db.fail_analysis)
+    for history. The None sentinel is queued in `finally` so the WebSocket
+    drain loop always terminates.
     """
 
     def emit(frame: dict[str, Any]) -> None:
@@ -238,113 +166,27 @@ def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Qu
         mirror = RunMirror.maybe_create(params, analysis_id, analysts=analysts) if RunMirror else None
 
         cfg = build_config(params)
-        graph = TradingAgentsGraph(
-            selected_analysts=analysts,
-            debug=False,
+        orch = SwitchboardOrchestrator(
             config=cfg,
+            selected_analysts=analysts,
+            on_progress=emit,
         )
 
-        emit({"type": "status", "message": "Graph compiled. Streaming chunks..."})
+        final_state, signal = orch.run(ticker, trade_date, asset_type=asset_type.value)
 
-        init_state = graph.propagator.create_initial_state(
-            ticker,
-            trade_date,
-            asset_type=asset_type.value,
-            past_context=graph.memory_log.get_past_context(ticker),
-        )
-        args = graph.propagator.get_graph_args()
-        # Stream full-state values (existing behaviour) AND per-token message
-        # chunks so the UI can show each agent's train of thought live.
-        args["stream_mode"] = ["values", "messages"]
-
-        seen_reports: dict[str, str] = {}
-        last_message_idx = 0
-        final_state: dict[str, Any] = {}
-
-        for item in graph.graph.stream(init_state, **args):
-            mode, chunk = _unwrap_stream_item(item)
-
-            # ---- token stream (train of thought) ----
-            if mode == "messages":
-                msg_chunk = chunk[0] if isinstance(chunk, tuple) else chunk
-                meta = chunk[1] if isinstance(chunk, tuple) and len(chunk) > 1 else {}
-                node = (meta or {}).get("langgraph_node")
-                text, reasoning = _token_text(msg_chunk)
-                if reasoning:
-                    emit({"type": "token", "node": node, "text": reasoning, "channel": "reasoning"})
-                if text:
-                    emit({"type": "token", "node": node, "text": text, "channel": "content"})
-                continue
-
-            # ---- full-state values ----
-            final_state = chunk
-            if mirror:
-                mirror.on_state(chunk)
-
-            # Report deltas (+ synthesised bull/bear & risk debate transcripts)
-            delta = _diff_reports(seen_reports, chunk)
-            for rep_key, state_key in DEBATE_REPORTS.items():
-                md = _debate_markdown(chunk.get(state_key))
-                if md and md != seen_reports.get(rep_key, ""):
-                    delta[rep_key] = md
-            if delta:
-                for key, val in delta.items():
-                    seen_reports[key] = val
-                emit({"type": "report_update", "reports": delta})
-                if mirror:
-                    mirror.on_report_delta(delta)
-
-            # Messages tail
-            messages = chunk.get("messages") or []
-            if len(messages) > last_message_idx:
-                new_msgs = messages[last_message_idx:]
-                last_message_idx = len(messages)
-                summaries = [m for m in (_message_summary(m) for m in new_msgs) if m]
-                if summaries:
-                    emit({"type": "messages", "messages": summaries})
-
-            # Debate state — only emit while the debate is still ongoing.
-            # investment_debate_state / risk_debate_state persist in the
-            # LangGraph state after they finish, so gating on the completion
-            # report prevents the UI from being reset to "in_progress" on
-            # every subsequent chunk after the debate has already completed.
-            inv = chunk.get("investment_debate_state") or {}
-            risk = chunk.get("risk_debate_state") or {}
-            if isinstance(inv, dict) and inv.get("count") and "investment_plan" not in seen_reports:
-                emit({
-                    "type": "debate",
-                    "scope": "investment",
-                    "rounds": inv.get("count"),
-                    "judge": inv.get("judge_decision", ""),
-                })
-            if isinstance(risk, dict) and risk.get("count") and "final_trade_decision" not in seen_reports:
-                emit({
-                    "type": "debate",
-                    "scope": "risk",
-                    "rounds": risk.get("count"),
-                    "judge": risk.get("judge_decision", ""),
-                })
-
-        # Final signal processing
         emit({"type": "status", "message": "Processing final signal..."})
-        signal = graph.process_signal(final_state.get("final_trade_decision", ""))
 
         # Persist to DB
         db.complete_analysis(analysis_id, final_state, signal)
 
-        # Also let the graph's own disk-logging fire (mirrors CLI behavior so the
-        # `~/.tradingagents/logs/{ticker}/{date}/` tree stays consistent across services).
+        # Disk logging (best-effort — never block on it)
         try:
-            graph.curr_state = final_state
-            graph.ticker = ticker
-            graph._log_state(trade_date, final_state)
-            graph.memory_log.store_decision(
+            orch.memory_log.store_decision(
                 ticker=ticker,
                 trade_date=trade_date,
                 final_trade_decision=final_state.get("final_trade_decision", ""),
             )
         except Exception:
-            # disk logging is best-effort — never block on it
             pass
 
         emit({
@@ -362,9 +204,6 @@ def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Qu
         except Exception:
             pass
         emit({"type": "error", "message": str(exc), "traceback": tb})
-        # Push an out-of-band alert too — the live "error" frame above is only
-        # seen if the browser is still attached. Label from params, since the
-        # local `ticker` may be unbound if the failure happened before it was set.
         alerts.notify_run_failed(
             kind="Analysis", run_id=analysis_id,
             label=str(params.get("ticker") or "?"), error=str(exc),
@@ -372,6 +211,6 @@ def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Qu
         if mirror:
             mirror.on_error(str(exc))
     finally:
-        frames.put(None)  # sentinel — must run before mirror.close() to avoid WS delay
+        frames.put(None)  # sentinel — WebSocket drain loop terminates on this
         if mirror:
             mirror.close()

@@ -120,6 +120,20 @@
           <label>Research depth
             <select id="f-depth"></select>
           </label>
+          <label>Aggressiveness
+            <div class="slider-row">
+              <input type="range" id="f-aggressiveness" min="1" max="10" value="5" step="1">
+              <span id="f-aggressiveness-val" class="slider-val">5</span>
+            </div>
+          </label>
+          <label>Decision bias
+            <div class="bias-toggle" id="f-bias">
+              <button type="button" data-val="bearish" class="bias-btn">Bearish</button>
+              <button type="button" data-val="neutral"  class="bias-btn active">Neutral</button>
+              <button type="button" data-val="bullish"  class="bias-btn">Bullish</button>
+            </div>
+          </label>
+          <p class="dim" style="font-size:11px;margin:-2px 0 2px;">Aggressiveness = how much risk (debate depth + position sizing). Bias = which way to lean (bull/bear). They're independent.</p>
           <fieldset class="analysts">
             <legend>Analysts</legend>
             <div id="f-analysts" class="analyst-list"></div>
@@ -208,6 +222,21 @@
         <div class="panel-title">[ Run Scan Now ]</div>
         <div id="schwab-mcp-status" class="dim" style="margin-bottom: 10px;">Checking Schwab…</div>
         <p class="dim" style="margin: 0 0 10px;">Pulls your real Schwab holdings (via the Schwab MCP) and runs each through the agents. Idempotent for today; the nightly cron also fires at 22:00 ET.</p>
+        <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
+          <label>Aggressiveness
+            <div class="slider-row">
+              <input type="range" id="pf-aggressiveness" min="1" max="10" value="5" step="1">
+              <span id="pf-aggressiveness-val" class="slider-val">5</span>
+            </div>
+          </label>
+          <label>Decision bias
+            <div class="bias-toggle" id="pf-bias">
+              <button type="button" data-val="bearish" class="bias-btn">Bearish</button>
+              <button type="button" data-val="neutral"  class="bias-btn active">Neutral</button>
+              <button type="button" data-val="bullish"  class="bias-btn">Bullish</button>
+            </div>
+          </label>
+        </div>
         <div class="actions" style="justify-content: flex-start;">
           <button id="btn-scan-now" type="button" class="primary">Run scan now</button>
           <span id="scan-now-result" class="dim" style="margin-left: 12px;"></span>
@@ -245,12 +274,53 @@
     <section class="main">
       <div class="panel">
         <div class="panel-title">[ S&amp;P 500 Scanner ]</div>
-        <p class="dim" style="margin: 0 0 10px;">Scans all ~500 S&amp;P 500 tickers, deep-dives the top 50 by conviction, and builds a $100k paper portfolio. Runs automatically every Saturday midnight ET.</p>
+        <p class="dim" style="margin: 0 0 10px;">Scans all ~500 S&amp;P 500 tickers, deep-dives the top 50 by conviction, and builds a paper portfolio. Runs automatically every Saturday midnight ET.</p>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
+          <label class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap;">Account</label>
+          <select id="spy-account-sel" style="flex:1;min-width:160px;max-width:300px;background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:5px 8px;font-family:inherit;font-size:13px;border-radius:3px;"></select>
+          <button id="btn-manage-accounts" type="button" class="ghost" style="font-size:11px;padding:5px 10px;">⚙ Accounts</button>
+          <span style="flex:1;"></span>
+          <span id="spy-account-meta" class="dim" style="font-size:11px;"></span>
+        </div>
         <div class="actions" style="justify-content: flex-start; gap: 10px;">
           <button id="btn-spy-scan" type="button" class="primary">Run S&amp;P 500 Scan</button>
           <button id="btn-spy-stop" type="button" class="ghost" hidden>Stop Scan</button>
           <button id="btn-spy-account" type="button" class="ghost">Refresh</button>
           <span id="spy-scan-status" class="dim" style="margin-left: 4px;"></span>
+        </div>
+      </div>
+
+      <!-- Paper accounts management modal -->
+      <div id="paper-accounts-modal" hidden style="position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;display:none;align-items:center;justify-content:center;">
+        <div style="background:var(--panel);border:1px solid var(--panel-border);border-radius:6px;padding:24px;width:480px;max-width:90vw;max-height:80vh;overflow-y:auto;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+            <span style="font-size:14px;font-weight:700;color:var(--text);">Paper Accounts</span>
+            <button type="button" id="btn-close-accounts" class="ghost" style="padding:4px 10px;">×</button>
+          </div>
+          <div id="paper-accounts-list" style="margin-bottom:16px;"></div>
+          <hr style="border-color:var(--panel-border);margin:12px 0;">
+          <div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);margin-bottom:10px;">New Account</div>
+          <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:8px;">
+            <label>Name<input type="text" id="new-acct-name" placeholder="e.g. Aggressive Growth" style="margin-top:4px;"></label>
+            <label>Capital ($)<input type="number" id="new-acct-capital" value="100000" min="1000" step="1000" style="margin-top:4px;"></label>
+            <label>Aggressiveness
+              <div class="slider-row" style="margin-top:4px;">
+                <input type="range" id="new-acct-agg" min="1" max="10" value="5" step="1">
+                <span id="new-acct-agg-val" class="slider-val">5</span>
+              </div>
+            </label>
+            <label>Bias
+              <div class="bias-toggle" id="new-acct-bias" style="margin-top:4px;">
+                <button type="button" data-val="bearish" class="bias-btn">Bearish</button>
+                <button type="button" data-val="neutral" class="bias-btn active">Neutral</button>
+                <button type="button" data-val="bullish" class="bias-btn">Bullish</button>
+              </div>
+            </label>
+          </div>
+          <p class="dim" style="font-size:11px;margin:8px 0 0;">Aggressiveness sets position sizing + debate depth; bias nudges the stance. Independent knobs.</p>
+          <div style="margin-top:12px;display:flex;justify-content:flex-end;gap:8px;">
+            <button type="button" id="btn-create-account" class="primary">Create Account</button>
+          </div>
         </div>
       </div>
 
