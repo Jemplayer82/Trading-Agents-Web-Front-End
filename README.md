@@ -293,17 +293,19 @@ The bus is also published on **host port `3109`** (`docker-compose.yml`) so off-
 With `LLM_PROVIDER=switchboard`, every LLM call goes as an `llm_request` DM on the bus to whatever agent is registered under `SWITCHBOARD_TARGET_AGENT`:
 
 - **`llm-router`** (default) — built-in service, dispatches to Ollama / OpenAI-compatible backends.
-- **`cleo`** — the included `scripts/cleo_llm_handler.py` daemon; calls the Anthropic API directly and **streams tokens live** to the dashboard as Claude generates them.
+- **`cleo`** — the included `scripts/cleo_llm_handler.py` daemon; drives your **local `claude` CLI in headless streaming mode** and **streams tokens live** to the dashboard as Claude generates them. Uses your Claude Code subscription session — **no Anthropic API key, no per-token billing.**
 
 > ⚠️ The `SWITCHBOARD_MCP_TOKEN` bearer is the **only** gate on the `3109` host port. Keep it strong; don't expose it to the public internet without TLS in front.
 
 #### Quick setup
 
+> **Prerequisite:** run this on a machine where `claude -p "hi"` already works — i.e. Claude Code is installed and logged in (`claude` on PATH, or set `CLAUDE_BIN`). The daemon reaches the switchboard over HTTP, so it can run anywhere that can hit `SWITCHBOARD_URL`.
+
 ```bash
 # 1. Install deps (httpx is usually already present)
 pip install httpx
 
-# 2. Run the daemon — uses your local Claude Code session auth, no API key needed
+# 2. Run the daemon — shells out to `claude -p`, using your Claude Code session (free, no API key)
 SWITCHBOARD_URL=http://<host>:3109      \
 SWITCHBOARD_MCP_TOKEN=<your-token>      \
 python scripts/cleo_llm_handler.py

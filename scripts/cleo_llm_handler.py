@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
 """Cleo LLM handler — Claude CLI-backed bus daemon for TradingAgents.
 
-Registers on the mcp-switchboard bus, polls for llm_request DMs, calls
-``claude api messages create`` (uses the local Claude Code session auth —
-no separate ANTHROPIC_API_KEY needed), and replies with streaming
-llm_stream_chunk DMs so tokens appear live in the dashboard.
+Registers on the mcp-switchboard bus, polls for llm_request DMs, drives the
+local ``claude`` CLI in headless streaming mode
+
+    claude -p --input-format stream-json --output-format stream-json \\
+           --verbose --include-partial-messages
+
+which uses the machine's Claude Code subscription session — NO Anthropic API
+key, NO per-token billing. Replies are streamed back as ``llm_stream_chunk``
+DMs so tokens appear live in the dashboard.
+
+Run this on a machine where ``claude -p "hi"`` already works (i.e. Claude Code
+is logged in). It reaches the switchboard purely over HTTP, so it can run
+anywhere that can hit SWITCHBOARD_URL.
 
 Required env vars:
   SWITCHBOARD_URL         e.g. http://172.21.0.3:3107 or http://192.168.7.50:3109
@@ -19,7 +28,7 @@ Optional:
 Usage:
   SWITCHBOARD_URL=http://172.21.0.3:3107 \\
   SWITCHBOARD_MCP_TOKEN=<token> \\
-  python3 ~/cleo_llm_handler.py
+  python3 scripts/cleo_llm_handler.py
 """
 
 from __future__ import annotations
@@ -27,7 +36,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
@@ -39,6 +50,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "claude-sonnet-4-6")
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
+
+# Text protocol for tool calling. The CLI can't accept Anthropic tool schemas
+# (that's an API-only feature), so we teach the model an inline marker syntax in
+# the system prompt and parse it back out of the generated text.
+_TOOL_OPEN = "<tool_call"
+_TOOL_CLOSE = "</tool_call>"
+_TOOL_RE = re.compile(r'<tool_call\s+name="([^"]+)"\s*>([\s\S]*?)</tool_call>')
 
 
 # ---------------------------------------------------------------------------
@@ -84,90 +102,231 @@ def bus_call(url: str, token: str, tool: str, args: dict, timeout: float = 35.0)
 
 
 # ---------------------------------------------------------------------------
+# Message / tool conversion helpers
+# ---------------------------------------------------------------------------
+
+def _flatten_content(content) -> str:
+    """Collapse an Anthropic content value (str or block list) to plain text.
+
+    tool_use / tool_result blocks are rendered as the inline text protocol so
+    the CLI (which has no API tool awareness) still sees the full history.
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content)
+
+    parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            parts.append(str(block))
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            parts.append(block.get("text", ""))
+        elif btype == "tool_use":
+            args = block.get("input", {})
+            parts.append(f'{_TOOL_OPEN} name="{block.get("name", "")}">'
+                         f'{json.dumps(args)}{_TOOL_CLOSE}')
+        elif btype == "tool_result":
+            inner = block.get("content", "")
+            if isinstance(inner, list):
+                inner = "".join(
+                    b.get("text", "") if isinstance(b, dict) else str(b) for b in inner
+                )
+            parts.append(f"[Tool result]\n{inner}")
+    return "\n".join(p for p in parts if p)
+
+
+def _augment_system_with_tools(system: str, tools: list) -> str:
+    """Append inline tool-call instructions + tool schemas to the system prompt."""
+    if not tools:
+        return system
+    instructions = (
+        "\n\n## Tool calling\n"
+        "When you need to call a tool, emit it on its own line in EXACTLY this form:\n"
+        f'{_TOOL_OPEN} name=\"TOOL_NAME\">{{\"arg\": \"value\"}}{_TOOL_CLOSE}\n'
+        "The content between the tags must be a single valid JSON object of arguments. "
+        "Emit one block per tool call. After emitting your tool call(s), STOP and wait "
+        "for the results — do not invent results yourself.\n\n"
+        "Available tools (JSON schema):\n"
+        f"{json.dumps(tools, indent=2)}"
+    )
+    return (system + instructions) if system else instructions.lstrip()
+
+
+def _parse_tool_calls(text: str) -> list[dict]:
+    """Extract inline <tool_call> markers from generated text → bus tool_calls."""
+    calls: list[dict] = []
+    for name, raw_args in _TOOL_RE.findall(text):
+        try:
+            args = json.loads(raw_args.strip()) if raw_args.strip() else {}
+        except json.JSONDecodeError:
+            args = {}
+        calls.append({"id": f"toolu_{uuid4().hex[:16]}", "name": name, "args": args})
+    return calls
+
+
+class _ToolMarkerFilter:
+    """Streams text but withholds anything between <tool_call> and </tool_call>.
+
+    Markers can be split across deltas, so a small holdback buffer prevents a
+    partial ``<tool_call`` prefix from leaking to the dashboard before we know
+    whether it's really the start of a tool block.
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._in_tool = False
+        self._raw: list[str] = []
+
+    def feed(self, text: str) -> str:
+        self._raw.append(text)
+        self._buf += text
+        out: list[str] = []
+        while self._buf:
+            if not self._in_tool:
+                idx = self._buf.find(_TOOL_OPEN)
+                if idx == -1:
+                    safe = self._safe_len(self._buf, _TOOL_OPEN)
+                    if safe:
+                        out.append(self._buf[:safe])
+                        self._buf = self._buf[safe:]
+                    break
+                if idx > 0:
+                    out.append(self._buf[:idx])
+                self._buf = self._buf[idx:]
+                self._in_tool = True
+            else:
+                idx = self._buf.find(_TOOL_CLOSE)
+                if idx == -1:
+                    break  # still inside a tool block; hold everything back
+                self._buf = self._buf[idx + len(_TOOL_CLOSE):]
+                self._in_tool = False
+        return "".join(out)
+
+    @staticmethod
+    def _safe_len(s: str, marker: str) -> int:
+        """How much of s is safe to emit (not a partial-marker suffix)."""
+        for k in range(min(len(marker) - 1, len(s)), 0, -1):
+            if marker.startswith(s[-k:]):
+                return len(s) - k
+        return len(s)
+
+    def flush(self) -> str:
+        if not self._in_tool and self._buf:
+            out, self._buf = self._buf, ""
+            return out
+        return ""
+
+    @property
+    def full_text(self) -> str:
+        return "".join(self._raw)
+
+
+# ---------------------------------------------------------------------------
 # Claude CLI invocation
 # ---------------------------------------------------------------------------
 
 def call_claude_streaming(model: str, system: str, messages: list, tools: list, max_tokens: int):
-    """Invoke ``claude api messages create`` and yield text deltas + final tool_calls.
+    """Drive ``claude -p`` in stream-json mode and yield text deltas + tool_calls.
 
-    Yields either:
-      {"delta": "text"}           — partial text
+    Uses the local Claude Code subscription session (free — no API key). Yields:
+      {"delta": "text"}                    — streamed text (tool markers stripped)
       {"done": True, "tool_calls": [...]}  — completion signal
     """
-    api_payload = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "messages": messages,
-        "stream": True,
-    }
-    if system:
-        api_payload["system"] = system
-    if tools:
-        api_payload["tools"] = tools
+    system = _augment_system_with_tools(system, tools)
 
-    cmd = [CLAUDE_BIN, "api", "messages", "create", "--data", json.dumps(api_payload)]
+    cmd = [
+        CLAUDE_BIN, "-p",
+        "--input-format", "stream-json",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--no-session-persistence",
+        "--tools", "",            # disable built-in Claude Code tools
+        "--model", model,
+    ]
+    if system:
+        cmd += ["--system-prompt", system]
 
     proc = subprocess.Popen(
         cmd,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
     )
 
-    tool_calls: list = []
-    current_tool: dict | None = None
-    current_tool_input_json = ""
+    # Feed the conversation on a thread so a large history can't deadlock against
+    # a full stdout pipe.
+    def _write_stdin() -> None:
+        try:
+            for m in messages:
+                role = m.get("role", "user")
+                evt_type = "assistant" if role == "assistant" else "user"
+                event = {
+                    "type": evt_type,
+                    "message": {
+                        "role": role,
+                        "content": [{"type": "text", "text": _flatten_content(m.get("content", ""))}],
+                    },
+                }
+                proc.stdin.write(json.dumps(event) + "\n")
+            proc.stdin.flush()
+        except (BrokenPipeError, ValueError):
+            pass
+        finally:
+            try:
+                proc.stdin.close()
+            except Exception:
+                pass
+
+    writer = threading.Thread(target=_write_stdin, daemon=True)
+    writer.start()
+
+    flt = _ToolMarkerFilter()
+    error_result: str | None = None
 
     for raw_line in proc.stdout:
         line = raw_line.strip()
-        if not line or not line.startswith("data:"):
+        if not line:
             continue
-        data_str = line[5:].strip()
-        if data_str == "[DONE]":
-            break
         try:
-            event = json.loads(data_str)
+            obj = json.loads(line)
         except json.JSONDecodeError:
             continue
 
-        etype = event.get("type", "")
+        otype = obj.get("type", "")
 
-        if etype == "content_block_start":
-            block = event.get("content_block", {})
-            if block.get("type") == "tool_use":
-                current_tool = {"id": block.get("id"), "name": block.get("name"), "args": {}}
-                current_tool_input_json = ""
+        if otype == "stream_event":
+            event = obj.get("event", {})
+            if event.get("type") == "content_block_delta":
+                delta = event.get("delta", {})
+                if delta.get("type") == "text_delta":
+                    visible = flt.feed(delta.get("text", ""))
+                    if visible:
+                        yield {"delta": visible}
 
-        elif etype == "content_block_delta":
-            delta = event.get("delta", {})
-            dtype = delta.get("type", "")
-            if dtype == "text_delta":
-                text = delta.get("text", "")
-                if text:
-                    yield {"delta": text}
-            elif dtype == "input_json_delta" and current_tool is not None:
-                current_tool_input_json += delta.get("partial_json", "")
-
-        elif etype == "content_block_stop":
-            if current_tool is not None:
-                try:
-                    current_tool["args"] = json.loads(current_tool_input_json) if current_tool_input_json else {}
-                except json.JSONDecodeError:
-                    current_tool["args"] = {}
-                tool_calls.append(current_tool)
-                current_tool = None
-                current_tool_input_json = ""
-
-        elif etype == "message_stop":
+        elif otype == "result":
+            if obj.get("is_error"):
+                error_result = obj.get("result") or "claude CLI returned an error"
             break
 
-    proc.wait()
-    if proc.returncode != 0:
-        err = proc.stderr.read() if proc.stderr else "unknown error"
-        raise RuntimeError(f"claude api call failed (exit {proc.returncode}): {err.strip()}")
+    tail = flt.flush()
+    if tail:
+        yield {"delta": tail}
 
-    yield {"done": True, "tool_calls": tool_calls}
+    proc.wait()
+
+    if error_result is not None:
+        raise RuntimeError(f"claude CLI error: {error_result}")
+    if proc.returncode != 0:
+        err = proc.stderr.read() if proc.stderr else ""
+        raise RuntimeError(f"claude CLI failed (exit {proc.returncode}): {err.strip()}")
+
+    yield {"done": True, "tool_calls": _parse_tool_calls(flt.full_text)}
 
 
 # ---------------------------------------------------------------------------
