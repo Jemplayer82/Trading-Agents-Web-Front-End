@@ -150,6 +150,15 @@ def run_analysis_sync(params: dict[str, Any], analysis_id: int, frames: queue.Qu
 
     def emit(frame: dict[str, Any]) -> None:
         frames.put(frame)
+        if mirror:
+            try:
+                ft = frame.get("type")
+                if ft == "report_update":
+                    mirror.on_report_delta(frame.get("reports") or {})
+                elif ft == "debate" and frame.get("debate_state"):
+                    mirror.on_state(frame["debate_state"])
+            except Exception:
+                pass
 
     mirror = None
     try:

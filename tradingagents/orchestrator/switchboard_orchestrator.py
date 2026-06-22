@@ -270,7 +270,8 @@ class SwitchboardOrchestrator:
             self._current_node = None
             count = state["investment_debate_state"]["count"]
             transcript = state["investment_debate_state"].get("history", "")
-            self._emit({"type": "debate", "scope": "investment", "rounds": count, "judge": ""})
+            self._emit({"type": "debate", "scope": "investment", "rounds": count, "judge": "",
+                        "debate_state": {"investment_debate_state": state["investment_debate_state"]}})
             if transcript:
                 self._emit({"type": "report_update", "reports": {"investment_debate": transcript}})
 
@@ -311,7 +312,8 @@ class SwitchboardOrchestrator:
             self._current_node = None
             count = state["risk_debate_state"]["count"]
             transcript = state["risk_debate_state"].get("history", "")
-            self._emit({"type": "debate", "scope": "risk", "rounds": count, "judge": ""})
+            self._emit({"type": "debate", "scope": "risk", "rounds": count, "judge": "",
+                        "debate_state": {"risk_debate_state": state["risk_debate_state"]}})
             if transcript:
                 self._emit({"type": "report_update", "reports": {"risk_debate": transcript}})
 
