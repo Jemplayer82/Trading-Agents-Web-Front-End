@@ -259,6 +259,7 @@ def call_claude_streaming(model: str, system: str, messages: list, tools: list, 
 
     cmd = [
         CLAUDE_BIN, "-p",
+        "--strict-mcp-config",  # no MCP servers; stops leaked docker MCP containers
         "--input-format", "stream-json",
         "--output-format", "stream-json",
         "--verbose",
