@@ -40,6 +40,7 @@ import re
 import subprocess
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
@@ -50,6 +51,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "claude-sonnet-4-6")
 CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
+
+# Hard ceiling on a single claude -p call. The watchdog kills the subprocess past
+# this, so a stuck CLI (auth wedge, no output, etc.) can never hang a worker
+# forever. Keep it STRICTLY below the client-side timeout (switchboard_client
+# defaults to 180s) so Cleo fails itself and emits an error before the requester
+# gives up waiting.
+CLAUDE_CALL_TIMEOUT_S = float(os.environ.get("CLEO_CALL_TIMEOUT_S", "150"))
 
 # Text protocol for tool calling. The CLI can't accept Anthropic tool schemas
 # (that's an API-only feature), so we teach the model an inline marker syntax in
@@ -304,50 +312,99 @@ def call_claude_streaming(model: str, system: str, messages: list, tools: list, 
             except Exception:
                 pass
 
-    writer = threading.Thread(target=_write_stdin, daemon=True)
-    writer.start()
+    # Drain stderr on a thread too. ``claude -p --verbose`` is chatty on stderr;
+    # if nobody reads it, its ~64KB OS pipe buffer fills, the CLI blocks writing,
+    # stops producing stdout, and the read loop below hangs forever (the original
+    # "works once, fails the next" bug). Keep only the tail for error reporting.
+    stderr_tail: deque[str] = deque(maxlen=50)
+
+    def _drain_stderr() -> None:
+        try:
+            for line in proc.stderr:
+                stderr_tail.append(line)
+        except (BrokenPipeError, ValueError):
+            pass
+
+    # Watchdog: hard-kill the subprocess if it blows past the per-call deadline,
+    # so a stuck claude (no output at all, auth wedge, network stall) can't hang
+    # the worker indefinitely. Killing closes stdout, which ends the read loop.
+    done_evt = threading.Event()
+    timed_out = threading.Event()
+
+    def _watchdog() -> None:
+        if not done_evt.wait(CLAUDE_CALL_TIMEOUT_S):
+            timed_out.set()
+            log.warning("claude CLI exceeded %.0fs deadline — killing", CLAUDE_CALL_TIMEOUT_S)
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    threading.Thread(target=_write_stdin, daemon=True).start()
+    threading.Thread(target=_drain_stderr, daemon=True).start()
+    threading.Thread(target=_watchdog, daemon=True).start()
 
     flt = _ToolMarkerFilter()
     error_result: str | None = None
+    got_result = False
 
-    for raw_line in proc.stdout:
-        line = raw_line.strip()
-        if not line:
-            continue
+    try:
+        for raw_line in proc.stdout:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            otype = obj.get("type", "")
+
+            if otype == "stream_event":
+                event = obj.get("event", {})
+                if event.get("type") == "content_block_delta":
+                    delta = event.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        visible = flt.feed(delta.get("text", ""))
+                        if visible:
+                            yield {"delta": visible}
+
+            elif otype == "result":
+                got_result = True
+                if obj.get("is_error"):
+                    error_result = obj.get("result") or "claude CLI returned an error"
+                break
+
+        tail = flt.flush()
+        if tail:
+            yield {"delta": tail}
+    finally:
+        # Always stop the watchdog and reap the child — covers normal completion,
+        # an exception, and an abandoned generator (requester went away). Safe to
+        # kill even on success: we've already parsed the result event by here.
+        done_evt.set()
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
         try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        otype = obj.get("type", "")
-
-        if otype == "stream_event":
-            event = obj.get("event", {})
-            if event.get("type") == "content_block_delta":
-                delta = event.get("delta", {})
-                if delta.get("type") == "text_delta":
-                    visible = flt.feed(delta.get("text", ""))
-                    if visible:
-                        yield {"delta": visible}
-
-        elif otype == "result":
-            if obj.get("is_error"):
-                error_result = obj.get("result") or "claude CLI returned an error"
-            break
-
-    tail = flt.flush()
-    if tail:
-        yield {"delta": tail}
-
-    proc.wait()
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
 
     if error_result is not None:
         raise RuntimeError(f"claude CLI error: {error_result}")
-    if proc.returncode != 0:
-        err = proc.stderr.read() if proc.stderr else ""
-        raise RuntimeError(f"claude CLI failed (exit {proc.returncode}): {err.strip()}")
-
-    yield {"done": True, "tool_calls": _parse_tool_calls(flt.full_text)}
+    if got_result:
+        # A clean result event means the call succeeded — don't misread the
+        # post-result kill above as a failure via returncode.
+        yield {"done": True, "tool_calls": _parse_tool_calls(flt.full_text)}
+        return
+    # No result event ⇒ the CLI died early. Explain why: deadline first, then exit.
+    if timed_out.is_set():
+        raise RuntimeError(f"claude CLI timed out after {CLAUDE_CALL_TIMEOUT_S:.0f}s")
+    err = "".join(stderr_tail).strip()
+    raise RuntimeError(f"claude CLI failed (exit {proc.returncode}): {err}")
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +417,10 @@ def handle_request(msg: dict, url: str, token: str, agent_id: str) -> None:
     system = req.get("system") or ""
     messages = req.get("messages") or []
     tools = req.get("tools") or []
-    max_tokens = int(req.get("max_tokens") or 8192)
+    try:
+        max_tokens = int(req.get("max_tokens") or 8192)
+    except (TypeError, ValueError):
+        max_tokens = 8192
     sender = msg.get("from")
     msg_id = msg.get("id")
     thread_id = msg.get("thread_id") or str(uuid4())
@@ -380,7 +440,12 @@ def handle_request(msg: dict, url: str, token: str, agent_id: str) -> None:
     tool_calls: list = []
     for chunk in call_claude_streaming(model, system, messages, tools, max_tokens):
         if "delta" in chunk:
-            send("llm_stream_chunk", json.dumps({"delta": chunk["delta"], "done": False}))
+            # Best-effort: a transient bus hiccup on one delta must not tear down
+            # an otherwise-healthy stream (and orphan the live claude subprocess).
+            try:
+                send("llm_stream_chunk", json.dumps({"delta": chunk["delta"], "done": False}))
+            except Exception as exc:
+                log.warning("delta send failed (continuing stream): %s", exc)
         elif chunk.get("done"):
             tool_calls = chunk.get("tool_calls", [])
 
