@@ -114,7 +114,6 @@ SETTINGS_REGISTRY: list[dict[str, Any]] = [
     {"key": "OLLAMA_BASE_URL", "label": "Ollama Base URL", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "https://ollama.com/v1 or http://host:11434/v1"},  # pragma: allowlist secret
     {"key": "OLLAMA_API_KEY", "label": "Ollama API Key", "group": "Ollama & Bus Routing", "secret": True, "placeholder": "Ollama Cloud auth token"},
     {"key": "SWITCHBOARD_TARGET_AGENT", "label": "Switchboard — LLM handler agent", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "Bus agent that answers LLM requests: 'llm-router' (built-in → Ollama/OpenAI) or 'cleo' (your local free claude -p session)"},  # pragma: allowlist secret
-    {"key": "SWITCHBOARD_PROVIDER", "label": "Switchboard — backend provider", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "Only used when the handler is llm-router: blank/ollama (default), openai, xai, grok, or deepseek. Leave blank for the cleo (Claude) handler — it ignores this."},  # pragma: allowlist secret
     # Email / newsletter
     {"key": "SMTP_HOST", "label": "SMTP Host", "group": "Email / Newsletter", "secret": False, "placeholder": "smtp.gmail.com"},
     {"key": "SMTP_PORT", "label": "SMTP Port", "group": "Email / Newsletter", "secret": False, "placeholder": "587"},
