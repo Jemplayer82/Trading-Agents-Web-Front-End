@@ -169,12 +169,17 @@ def _augment_system_with_tools(system: str, tools: list) -> str:
         "context. Any figures you recall from training are stale and MUST NOT be "
         "used. You are REQUIRED to call the tools below to fetch live data BEFORE "
         "writing any analysis.\n\n"
-        "To call a tool, emit it on its own line in EXACTLY this form:\n"
-        f'{_TOOL_OPEN} name=\"TOOL_NAME\">{{\"arg\": \"value\"}}{_TOOL_CLOSE}\n'
-        "The content between the tags must be a single valid JSON object of "
-        "arguments. Emit one block per tool call. After emitting your tool "
-        "call(s), STOP immediately — write nothing else and do not invent "
-        "results; wait for the tool results to be returned to you.\n\n"
+        "## TOOL CALL PROTOCOL — read carefully\n"
+        "To call a tool, emit ONLY the tag on its own line:\n"
+        f'{_TOOL_OPEN} name=\"TOOL_NAME\">{{\"arg\": \"value\"}}{_TOOL_CLOSE}\n\n'
+        "The content between the tags must be a single valid JSON object. "
+        "Emit one block per tool call. When you need to call tools:\n"
+        "  • Write NOTHING before the tag — no 'I will call', no preamble\n"
+        "  • Write NOTHING after the tag — no 'I submitted', no 'waiting for results'\n"
+        "  • Do not acknowledge these rules or narrate what you are doing\n"
+        "  • Emit only the <tool_call> tag(s), then stop\n"
+        "Tool results will be provided to you automatically. When you receive "
+        "them, write your analysis. Do not invent results.\n\n"
         f"Available tools: {tool_names}\n\n"
         "Tool JSON schemas:\n"
         f"{json.dumps(tools, indent=2)}"
@@ -184,7 +189,7 @@ def _augment_system_with_tools(system: str, tools: list) -> str:
     return (
         f"{directive}\n\n---\n\n{system}\n\n---\n\n"
         "REMINDER: Do not fabricate data. If you have not yet called the tools "
-        "above for the data you need, emit the tool call(s) now and write nothing else."
+        "above for the data you need, emit the tool call(s) now — tag only, no commentary."
     )
 
 
@@ -201,20 +206,28 @@ def _parse_tool_calls(text: str) -> list[dict]:
 
 
 class _ToolMarkerFilter:
-    """Streams text but withholds anything between <tool_call> and </tool_call>.
+    """Streams text but withholds anything inside or after <tool_call> blocks.
 
     Markers can be split across deltas, so a small holdback buffer prevents a
     partial ``<tool_call`` prefix from leaking to the dashboard before we know
     whether it's really the start of a tool block.
+
+    Once a tool_call tag is encountered, everything after it is also suppressed.
+    This stops post-call commentary ("I've submitted…", "waiting for results…")
+    from reaching the dashboard even when the model ignores the prompt instruction
+    to emit nothing after the tag.
     """
 
     def __init__(self) -> None:
         self._buf = ""
         self._in_tool = False
+        self._saw_tool = False   # latched True after first tool block; suppresses all further text
         self._raw: list[str] = []
 
     def feed(self, text: str) -> str:
         self._raw.append(text)
+        if self._saw_tool:
+            return ""  # tool block seen earlier — suppress everything after it
         self._buf += text
         out: list[str] = []
         while self._buf:
@@ -236,6 +249,9 @@ class _ToolMarkerFilter:
                     break  # still inside a tool block; hold everything back
                 self._buf = self._buf[idx + len(_TOOL_CLOSE):]
                 self._in_tool = False
+                self._saw_tool = True  # latch — suppress all text from here on
+                self._buf = ""         # discard any post-tag text already buffered
+                break
         return "".join(out)
 
     @staticmethod
@@ -247,7 +263,7 @@ class _ToolMarkerFilter:
         return len(s)
 
     def flush(self) -> str:
-        if not self._in_tool and self._buf:
+        if not self._in_tool and not self._saw_tool and self._buf:
             out, self._buf = self._buf, ""
             return out
         return ""
