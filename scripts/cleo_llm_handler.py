@@ -38,6 +38,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -58,6 +59,10 @@ CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
 # defaults to 180s) so Cleo fails itself and emits an error before the requester
 # gives up waiting.
 CLAUDE_CALL_TIMEOUT_S = float(os.environ.get("CLEO_CALL_TIMEOUT_S", "150"))
+
+# Holds the single-instance file lock for the life of the process. Kept at module
+# scope so the fd is never garbage-collected (which would release the lock).
+_INSTANCE_LOCK = None
 
 # Text protocol for tool calling. The CLI can't accept Anthropic tool schemas
 # (that's an API-only feature), so we teach the model an inline marker syntax in
@@ -457,10 +462,46 @@ def handle_request(msg: dict, url: str, token: str, agent_id: str) -> None:
 # Main loop
 # ---------------------------------------------------------------------------
 
+def _acquire_single_instance_lock(agent_id: str) -> None:
+    """Hard single-instance guard: at most one Cleo poller per host.
+
+    Two processes polling the same agent_id silently split the request stream —
+    each wait_for_message drains the shared inbox, so one streams while the other
+    answers in one shot, corrupting replies. systemd already runs a single managed
+    instance; this stops a SECOND manual start from racing it. We use an exclusive,
+    non-blocking OS file lock: the kernel releases it the instant the holding
+    process dies, so a systemd restart re-acquires cleanly with no crash loop.
+
+    No-op where file locking isn't available (e.g. a Windows dev box).
+    """
+    global _INSTANCE_LOCK
+    try:
+        import fcntl
+    except ImportError:
+        return  # non-POSIX — skip the guard
+    lock_path = os.environ.get("CLEO_LOCK_FILE", f"/tmp/cleo-{agent_id}.lock")
+    lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log.error(
+            "Another Cleo instance already holds %s — refusing to start a second "
+            "poller for agent_id '%s' (a second poller would split the request "
+            "stream and corrupt replies). Exiting.",
+            lock_path, agent_id,
+        )
+        sys.exit(1)
+    lock_file.write(str(os.getpid()))
+    lock_file.flush()
+    _INSTANCE_LOCK = lock_file  # keep the fd alive for the process lifetime
+
+
 def main() -> None:
     url = os.environ["SWITCHBOARD_URL"]
     token = os.environ["SWITCHBOARD_MCP_TOKEN"]  # pragma: allowlist secret
     agent_id = os.environ.get("SWITCHBOARD_AGENT_ID", "cleo")
+
+    _acquire_single_instance_lock(agent_id)
 
     def bus(tool: str, args: dict) -> dict:
         return bus_call(url, token, tool, args)

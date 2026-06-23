@@ -1,0 +1,36 @@
+[Unit]
+Description=Cleo — Claude CLI LLM handler for TradingAgents (switchboard bus daemon)
+Documentation=https://github.com/Jemplayer82/TradingAgents/blob/master/deploy/cleo/README.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# --- EDIT THESE THREE for your host ------------------------------------------
+# User MUST be the account that ran `claude login` — Cleo drives that user's
+# ~/.claude subscription session (the free CLI, no API key).
+User=CHANGEME_USER
+# Absolute path to the repo checkout on the host.
+WorkingDirectory=/opt/TradingAgents
+# Interpreter that has httpx installed (project venv, or a system python3 after
+# `pip install httpx`). The script path is relative to WorkingDirectory.
+ExecStart=/opt/TradingAgents/.venv/bin/python scripts/cleo_llm_handler.py
+# -----------------------------------------------------------------------------
+
+# Secrets + config live here, NOT in this unit. See cleo.env.example.
+EnvironmentFile=/etc/cleo/cleo.env
+
+# Auto-restart on any exit (crash, OOM, killed deadlocked subprocess, etc.).
+Restart=always
+RestartSec=5
+# Graceful stop, then SIGKILL — gives the kernel a moment to release the
+# single-instance lock before the next start re-acquires it.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# Light hardening (optional; relax if it interferes with the claude CLI).
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
