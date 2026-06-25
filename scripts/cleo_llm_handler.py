@@ -546,17 +546,30 @@ def main() -> None:
     except Exception as exc:
         log.debug("dup-registration check skipped: %s", exc)
 
-    bus("register_agent", {"agent_id": agent_id, "name": "Cleo (Claude daemon)"})
-    bus("set_status", {"agent_id": agent_id, "activity": "ready"})
-    log.info("cleo-llm-handler registered as '%s' — waiting for llm_request DMs", agent_id)
-
     executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="cleo")
 
+    # Registration is retried inside the loop so Cleo recovers automatically if the
+    # switchboard restarts (registration is lost on switchboard restart; the poll
+    # would keep failing until re-registration succeeds).
+    registered = False
+
     while True:
+        if not registered:
+            try:
+                bus("register_agent", {"agent_id": agent_id, "name": "Cleo (Claude daemon)"})
+                bus("set_status", {"agent_id": agent_id, "activity": "ready"})
+                log.info("registered as '%s' — waiting for llm_request DMs", agent_id)
+                registered = True
+            except Exception as exc:
+                log.warning("Registration failed: %s — retrying in 5s", exc)
+                time.sleep(5)
+                continue
+
         try:
             result = bus("wait_for_message", {"agent_id": agent_id, "timeout_seconds": 25})
         except Exception as exc:
-            log.warning("Poll error: %s — retrying in 2s", exc)
+            log.warning("Poll error: %s — re-registering in 2s", exc)
+            registered = False  # switchboard may have restarted; force re-registration
             time.sleep(2)
             continue
 
