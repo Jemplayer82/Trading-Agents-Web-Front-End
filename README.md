@@ -283,8 +283,7 @@ The `switchboard` container starts automatically, `tradingagents-web` connects t
 | `SWITCHBOARD_MCP_TOKEN` | Yes | — | Bearer token for the in-stack switchboard. Generate: `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
 | `BUS_MIRROR` | No | `analysis` | Set to `off` to disable all bus publishing without stopping the switchboard container |
 | `SWITCHBOARD_URL` | Auto | `http://switchboard:3107` | Resolved by compose — only override if running the switchboard outside the stack |
-| `SWITCHBOARD_TARGET_AGENT` | No | `llm-router` | Bus agent that answers LLM requests when `LLM_PROVIDER=switchboard` — the built-in router, or an external Claude CLI's id |
-| `SWITCHBOARD_PROVIDER` | No | `ollama` | Which backend `llm-router` dispatches to (`ollama`, `openai`, `xai`, `grok`, `deepseek`, `claude`) |
+| `SWITCHBOARD_TARGET_AGENT` | No | `llm-router` | Bus agent that answers LLM requests when `LLM_PROVIDER=switchboard` — `llm-router` (built-in → Ollama/OpenAI) or `cleo` (external Claude CLI daemon) |
 
 The bus is also published on **host port `3109`** (`docker-compose.yml`) so off-stack agents can connect at `http://<host>:3109/mcp`.
 
@@ -302,25 +301,46 @@ With `LLM_PROVIDER=switchboard`, every LLM call goes as an `llm_request` DM on t
 > **Prerequisite:** run this on a machine where `claude -p "hi"` already works — i.e. Claude Code is installed and logged in (`claude` on PATH, or set `CLAUDE_BIN`). The daemon reaches the switchboard over HTTP, so it can run anywhere that can hit `SWITCHBOARD_URL`.
 
 ```bash
-# 1. Install deps (httpx is usually already present)
+# 1. Install the one runtime dep (httpx — usually already present with Claude Code)
 pip install httpx
 
-# 2. Run the daemon — shells out to `claude -p`, using your Claude Code session (free, no API key)
+# 2a. Quick/dev start — run inline, ctrl-c to stop
 SWITCHBOARD_URL=http://<host>:3109      \
 SWITCHBOARD_MCP_TOKEN=<your-token>      \
 python scripts/cleo_llm_handler.py
+
+# 2b. Production — run as a systemd service (auto-restart, log aggregation)
+#     See deploy/cleo/README.md for the full install walk-through.
+#     Short version:
+sudo install -D -m 600 deploy/cleo/cleo.env.example /etc/cleo/cleo.env
+sudo $EDITOR /etc/cleo/cleo.env          # set SWITCHBOARD_URL + SWITCHBOARD_MCP_TOKEN
+$EDITOR deploy/cleo/cleo.service         # fill User, WorkingDirectory, ExecStart
+sudo cp deploy/cleo/cleo.service /etc/systemd/system/cleo.service
+sudo systemctl daemon-reload && sudo systemctl enable --now cleo
+journalctl -u cleo -f                    # confirm "registered as 'cleo'"
 ```
 
 ```
 # 3. In the dashboard → Settings → Ollama & Bus Routing:
 #    Switchboard — LLM handler agent:   cleo
-#    Switchboard — backend provider:    claude
+#    (leave "backend provider" blank — Cleo ignores it)
 
 # 4. In the Analysis form, pick provider "Switchboard (Bus LLM)" and a Claude model
 #    (e.g. claude-sonnet-4-6 or claude-opus-4-8) then run as normal.
 ```
 
-The daemon handles concurrent requests (8 workers), so parallel analyst calls during S&P 500 scans don't block each other. Each call uses a unique reply inbox so responses never cross wires.
+> 📋 **Cleo env knobs** (set in `/etc/cleo/cleo.env` or as shell env vars):
+>
+> | Variable | Default | Purpose |
+> |---|---|---|
+> | `SWITCHBOARD_URL` | — | Switchboard base URL, no trailing `/mcp` (e.g. `http://host:3109`) |
+> | `SWITCHBOARD_MCP_TOKEN` | — | Bearer token — must match `SWITCHBOARD_MCP_TOKEN` in the stack |
+> | `SWITCHBOARD_AGENT_ID` | `cleo` | Bus agent name to register as |
+> | `DEFAULT_MODEL` | `claude-sonnet-4-6` | Fallback model when the request doesn't specify one |
+> | `CLEO_CALL_TIMEOUT_S` | `150` | Hard per-call deadline in seconds — keep below the client's 180s so Cleo fails itself first |
+> | `CLAUDE_BIN` | `claude` | Full path to the `claude` binary if it isn't on `PATH` for the service user |
+
+The daemon handles up to 8 concurrent requests so back-to-back analyst calls during a scan don't block each other. A single-instance flock guard prevents a second accidental copy from splitting the request stream. Updating Cleo is a pull + restart: `git pull && sudo systemctl restart cleo`.
 
 #### Streaming protocol
 
