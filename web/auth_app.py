@@ -37,6 +37,15 @@ COOKIE_NAME = "ta_session"
 SESSION_TTL_DAYS = 30
 _PBKDF2_ITERS = 600_000
 
+# Brute-force throttling for /api/auth/login. Failures are recorded per
+# username AND per client IP; crossing either threshold inside the sliding
+# window locks that key out with 429 until old attempts age past the window.
+# The per-IP limit is deliberately looser: it exists to slow username
+# spraying, not to lock out a whole NAT because one account was targeted.
+LOCKOUT_WINDOW_MINUTES = 15
+LOCKOUT_MAX_PER_USER = 5
+LOCKOUT_MAX_PER_IP = 20
+
 # Paths under /api that do NOT require a session cookie.
 PUBLIC_API_PATHS = {
     "/api/health",
@@ -110,6 +119,31 @@ def is_authorized(request: Request) -> bool:
     if not token:
         return False
     return db.get_session(token) is not None
+
+
+def client_ip(request: Request) -> str:
+    """Client address for login throttling.
+
+    X-Real-IP is written by our nginx from ``$remote_addr`` on every proxied
+    request, so a browser can't forge it (unlike the first hop of
+    X-Forwarded-For, which the client controls). Direct hits — tests, the
+    internal Docker network — fall back to the socket peer.
+    """
+    return request.headers.get("x-real-ip") or (
+        request.client.host if request.client else "unknown"
+    )
+
+
+def is_login_locked(username: str, ip: str) -> bool:
+    """True when this username or source address is inside a lockout.
+
+    Checked BEFORE password verification so a locked-out attacker gets a
+    cheap 429 instead of burning a PBKDF2 round per guess.
+    """
+    since = (datetime.utcnow() - timedelta(minutes=LOCKOUT_WINDOW_MINUTES)).isoformat()
+    if db.count_failed_logins_for_user(username, since) >= LOCKOUT_MAX_PER_USER:
+        return True
+    return db.count_failed_logins_for_ip(ip, since) >= LOCKOUT_MAX_PER_IP
 
 
 def _is_public(path: str) -> bool:
