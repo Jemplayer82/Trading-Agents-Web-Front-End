@@ -6,6 +6,84 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [1.2.1] — 2026-07-07
+
+### Added
+
+- **Login brute-force throttling.** Failed dashboard logins are recorded per
+  username and per client IP (`login_attempts` table); 5 failures per username
+  or 20 per IP within a 15-minute window answer 429 before any PBKDF2 work.
+  Closes the High-severity item deferred in `SECURITY_AUDIT.md`.
+
+### Removed
+
+- Orphaned root `test.py` scratch script and the completed
+  `tradingagents/llm_clients/TODO.md`.
+- Unused dependencies `redis`, `backtrader`, `parsel`, `pytz`; `setuptools`
+  demoted to `[build-system]` only. Slims the install and the Docker image.
+
+### Changed
+
+- Shipped refactor plans archived under `docs/history/`.
+
+## [1.2.0] — 2026-06-18
+
+Version jumped 1.0.0 → 1.2.0 with the switchboard-orchestrator line; there was
+no 1.1.x release.
+
+### Added
+
+- **Switchboard as universal LLM gateway.** Analysis LLM calls can route over
+  the Agent Bus (`llm_request`/`llm_response`) to a pluggable backend; the
+  `tradingagents-llm-router` compose service bridges to Ollama/OpenAI.
+- **Cleo daemon** (`scripts/cleo_llm_handler.py`): bare-host bus responder that
+  streams tokens from the `claude` CLI (no API key needed), with single-instance
+  flock guard, stderr-drain + watchdog against subprocess hangs, and a systemd
+  unit under `deploy/cleo/`.
+- **Live token streaming** to the dashboard via the bus mirror.
+- **Multi-account S&P 500 paper trading**, per-tab aggressiveness/bias
+  controls, and a technical-indicator selector.
+- **Portainer redeploy tooling** (`scripts/redeploy.py`,
+  `scripts/render_stack_payload.py`) — repo compose is the source of truth for
+  the deployed stack.
+- `OLLAMA_MAX_CONCURRENCY` setting exposed in the UI registry.
+
+### Changed
+
+- **`SwitchboardOrchestrator` replaces the langgraph path for all web runs**
+  (single-ticker, portfolio, S&P scans). The CLI still uses
+  `TradingAgentsGraph`; langgraph removal is deferred until the CLI's
+  streaming migration.
+- Bus agent id renamed `langgraph-orchestrator` → `switchboard-orchestrator`.
+
+## [1.0.0] — 2026-06-14
+
+First release of the web-dashboard era (the repo's front-end line; core
+framework changes continue to be listed per-feature below).
+
+### Added
+
+- **FastAPI + nginx dashboard**: Run Analysis (streamed over WebSocket),
+  Portfolio Scan, S&P 500 Scanner, and Settings tabs; vanilla-JS SPA.
+- **Dashboard auth**: PBKDF2 password login with server-side sessions,
+  first-run setup flow, internal-token service auth.
+- **Schwab integration**: OAuth (CSRF-protected), encrypted token store,
+  live holdings with cost basis, optional MCP data source toggle.
+- **Scheduler container**: nightly portfolio scan (Mon–Fri), newsletter
+  email, token health checks, run-failure alerts (webhook + email).
+- **Agent Bus** (mcp-switchboard) with the Live Reasoning panel.
+- **Whole-share paper trading** for the S&P scanner with per-position P&L.
+- **Security hardening** (rounds 1–3 in `SECURITY_AUDIT.md`): Fernet
+  encryption at rest for credentials, XSS escapes at every render site,
+  DOMPurify for LLM markdown, timing-safe token comparisons, SQL allow-lists.
+- **CI gates**: ruff + pytest on every PR; README claims guarded by tests.
+
+### Changed
+
+- License corrected to **AGPL-3.0** (Fathom Consulting LLC).
+- Deploys standardized on prebuilt `ghcr.io/jemplayer82/*` images; six-service
+  docker-compose stack.
+
 ## [0.2.5] — 2026-05-11
 
 ### Added
