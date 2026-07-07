@@ -19,7 +19,7 @@ RIGHT = {"username": "alice", "password": "correct-horse"}
 
 @pytest.fixture()
 def client(monkeypatch, tmp_path):
-    monkeypatch.setenv("INTERNAL_API_TOKEN", "test-secret-token")
+    monkeypatch.setenv("INTERNAL_API_TOKEN", "test-secret-token")  # gitleaks:allow
     from web import auth_app, db
 
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
