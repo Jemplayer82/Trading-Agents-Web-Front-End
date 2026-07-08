@@ -72,7 +72,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   buildReportTabs();
   $("btn-run").addEventListener("click", startRun);
   $("btn-stop").addEventListener("click", stopRun);
-  $("f-provider").addEventListener("change", onProviderChange);
+  $("f-quick-provider").addEventListener("change", onQuickProviderChange);
+  $("f-deep-provider").addEventListener("change", onDeepProviderChange);
 
   // Aggressiveness slider live label
   const aggSlider = $("f-aggressiveness");
@@ -170,13 +171,19 @@ async function loadProviders() {
   const resp = await fetch("/api/providers");
   providersData = await resp.json();
 
-  const provSel = $("f-provider");
-  provSel.innerHTML = "";
+  const quickProvSel = $("f-quick-provider");
+  const deepProvSel = $("f-deep-provider");
+  quickProvSel.innerHTML = "";
+  deepProvSel.innerHTML = "";
   providersData.providers.forEach((p) => {
-    const opt = document.createElement("option");
-    opt.value = p.key;
-    opt.textContent = p.label;
-    provSel.appendChild(opt);
+    const optQ = document.createElement("option");
+    optQ.value = p.key;
+    optQ.textContent = p.label;
+    quickProvSel.appendChild(optQ);
+    const optD = document.createElement("option");
+    optD.value = p.key;
+    optD.textContent = p.label;
+    deepProvSel.appendChild(optD);
   });
 
   const langSel = $("f-language");
@@ -211,11 +218,14 @@ function findProvider(key) {
   return providersData.providers.find((p) => p.key === key);
 }
 
-function onProviderChange() {
-  const key = $("f-provider").value;
-  const prov = findProvider(key);
-  fillModelSelect("f-deep-model", "f-deep-model-custom", prov?.models?.deep || []);
+function onQuickProviderChange() {
+  const prov = findProvider($("f-quick-provider").value);
   fillModelSelect("f-quick-model", "f-quick-model-custom", prov?.models?.quick || []);
+}
+
+function onDeepProviderChange() {
+  const prov = findProvider($("f-deep-provider").value);
+  fillModelSelect("f-deep-model", "f-deep-model-custom", prov?.models?.deep || []);
 }
 
 function fillModelSelect(selectId, customInputId, options) {
@@ -274,8 +284,10 @@ async function loadPreferences() {
   $("f-ticker").value = prefs.ticker || "";
   $("f-date").value = prefs.trade_date || today;
   $("f-language").value = prefs.language || "English";
-  $("f-provider").value = prefs.provider || "ollama";
-  onProviderChange();
+  $("f-quick-provider").value = prefs.quick_provider || prefs.provider || "ollama";
+  onQuickProviderChange();
+  $("f-deep-provider").value = prefs.deep_provider || prefs.provider || "ollama";
+  onDeepProviderChange();
   if (prefs.deep_model) restoreModelPref("f-deep-model", "f-deep-model-custom", prefs.deep_model);
   if (prefs.quick_model) restoreModelPref("f-quick-model", "f-quick-model-custom", prefs.quick_model);
   $("f-depth").value = prefs.research_depth || 1;
@@ -571,7 +583,9 @@ function collectParams() {
     ticker: $("f-ticker").value.trim(),
     trade_date: $("f-date").value,
     language: $("f-language").value,
-    provider: $("f-provider").value,
+    quick_provider: $("f-quick-provider").value,
+    deep_provider: $("f-deep-provider").value,
+    provider: $("f-deep-provider").value, // legacy alias, kept for back-compat readers
     deep_model: getModelValue("f-deep-model", "f-deep-model-custom"),
     quick_model: getModelValue("f-quick-model", "f-quick-model-custom"),
     research_depth: parseInt($("f-depth").value, 10),
