@@ -482,6 +482,9 @@ async def ask_about_analysis(analysis_id: int, payload: dict[str, Any]) -> dict[
     prefs = db.get_preferences() or {}
     config: dict[str, Any] = {
         "llm_provider": prefs.get("provider") or "ollama",
+        # This call always passes deep=False (see llm_for below) — only the
+        # quick-role provider matters here.
+        "quick_llm_provider": prefs.get("quick_provider") or prefs.get("provider") or "ollama",
         "deep_think_llm": prefs.get("deep_model"),
         "quick_think_llm": prefs.get("quick_model"),
     }

@@ -88,8 +88,11 @@ def build_config(params: dict[str, Any]) -> dict[str, Any]:
     """Merge user params with DEFAULT_CONFIG to build the orchestrator config."""
     cfg = dict(DEFAULT_CONFIG)
 
-    provider = (params.get("provider") or "ollama").lower()
-    cfg["llm_provider"] = provider
+    quick_provider = (params.get("quick_provider") or params.get("provider") or "ollama").lower()
+    deep_provider = (params.get("deep_provider") or params.get("provider") or "ollama").lower()
+    cfg["quick_llm_provider"] = quick_provider
+    cfg["deep_llm_provider"] = deep_provider
+    cfg["llm_provider"] = deep_provider  # legacy alias — portfolio_main.py:256, spy_scanner.py:371 read this for display
     cfg["deep_think_llm"] = params.get("deep_model") or cfg["deep_think_llm"]
     cfg["quick_think_llm"] = params.get("quick_model") or cfg["quick_think_llm"]
     cfg["output_language"] = params.get("language") or cfg.get("output_language", "English")
@@ -119,12 +122,25 @@ def build_config(params: dict[str, Any]) -> dict[str, Any]:
     if params.get("google_thinking_level"):
         cfg["google_thinking_level"] = params["google_thinking_level"]
 
-    # Backend URL: Ollama uses the env var set in the container; other providers
-    # rely on their client's default endpoint unless explicitly overridden.
-    if provider == "ollama":
-        cfg["backend_url"] = os.environ.get("OLLAMA_BASE_URL") or cfg.get("backend_url")
-    elif params.get("backend_url"):
-        cfg["backend_url"] = params["backend_url"]
+    # Backend URL, resolved independently per role: Ollama uses the env var set
+    # in the container; other providers rely on their client's default endpoint
+    # unless explicitly overridden. Each role checks its OWN provider — this is
+    # what lets Quick=ollama + Deep=switchboard resolve OLLAMA_BASE_URL for Quick
+    # only, without leaking into Deep's client construction.
+    if quick_provider == "ollama":
+        cfg["quick_backend_url"] = os.environ.get("OLLAMA_BASE_URL") or cfg.get("backend_url")
+    else:
+        cfg["quick_backend_url"] = params.get("quick_backend_url") or params.get("backend_url")
+
+    if deep_provider == "ollama":
+        cfg["deep_backend_url"] = os.environ.get("OLLAMA_BASE_URL") or cfg.get("backend_url")
+    else:
+        cfg["deep_backend_url"] = params.get("deep_backend_url") or params.get("backend_url")
+
+    # Legacy alias some secondary call sites still read (web/llm_helpers.py
+    # fallback path) — mirror the deep role, same convention as
+    # cfg["llm_provider"] above.
+    cfg["backend_url"] = cfg.get("deep_backend_url") or cfg.get("backend_url")
 
     return cfg
 

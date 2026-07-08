@@ -94,28 +94,29 @@ class SwitchboardOrchestrator:
         # carry the right node name for the frontend progress grid.
         self._current_node: str | None = None
 
-        provider_kwargs = self._provider_kwargs()
+        deep_provider = self.config.get("deep_llm_provider") or self.config.get("llm_provider", "ollama")
+        quick_provider = self.config.get("quick_llm_provider") or self.config.get("llm_provider", "ollama")
         deep_client = create_llm_client(
-            provider=self.config["llm_provider"],
+            provider=deep_provider,
             model=self.config["deep_think_llm"],
-            base_url=self.config.get("backend_url"),
+            base_url=self.config.get("deep_backend_url") or self.config.get("backend_url"),
             on_token=self._emit_token,
-            **provider_kwargs,
+            **self._provider_kwargs(deep_provider),
         )
         quick_client = create_llm_client(
-            provider=self.config["llm_provider"],
+            provider=quick_provider,
             model=self.config["quick_think_llm"],
-            base_url=self.config.get("backend_url"),
+            base_url=self.config.get("quick_backend_url") or self.config.get("backend_url"),
             on_token=self._emit_token,
-            **provider_kwargs,
+            **self._provider_kwargs(quick_provider),
         )
         self._deep_llm = deep_client.get_llm()
         self._quick_llm = quick_client.get_llm()
         self.memory_log = TradingMemoryLog(self.config)
         self.signal_processor = SignalProcessor(self._quick_llm)
 
-    def _provider_kwargs(self) -> dict[str, Any]:
-        provider = self.config.get("llm_provider", "").lower()
+    def _provider_kwargs(self, provider: str) -> dict[str, Any]:
+        provider = provider.lower()
         if provider == "google":
             lvl = self.config.get("google_thinking_level")
             return {"thinking_level": lvl} if lvl else {}

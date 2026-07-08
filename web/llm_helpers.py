@@ -52,9 +52,10 @@ def _resolve_api_key(provider: str, config: dict[str, Any]) -> str | None:
     return None
 
 
-def _resolve_base_url(provider: str, config: dict[str, Any]) -> str | None:
-    """Find the best base URL for `provider`."""
-    explicit = config.get("backend_url") or config.get("base_url")
+def _resolve_base_url(provider: str, config: dict[str, Any], *, deep: bool = True) -> str | None:
+    """Find the best base URL for `provider`, preferring the role-specific override."""
+    role_key = "deep_backend_url" if deep else "quick_backend_url"
+    explicit = config.get(role_key) or config.get("backend_url") or config.get("base_url")
     if explicit:
         return str(explicit)
 
@@ -84,7 +85,8 @@ def llm_for(config: dict[str, Any], *, deep: bool = True, temperature: float = 0
         A LangChain BaseChatModel instance (ChatOpenAI for OpenAI-compatible
         providers, SwitchboardChatModel when provider is "switchboard").
     """
-    provider = (config.get("llm_provider") or "ollama").lower()
+    role_key = "deep_llm_provider" if deep else "quick_llm_provider"
+    provider = (config.get(role_key) or config.get("llm_provider") or "ollama").lower()
     if deep:
         model = config.get("deep_think_llm") or "gpt-oss:120b-cloud"
     else:
@@ -95,7 +97,7 @@ def llm_for(config: dict[str, Any], *, deep: bool = True, temperature: float = 0
         return create_llm_client(provider="switchboard", model=model).get_llm()
 
     kwargs: dict[str, Any] = {"model": model, "temperature": temperature}
-    base_url = _resolve_base_url(provider, config)
+    base_url = _resolve_base_url(provider, config, deep=deep)
     if base_url:
         kwargs["base_url"] = base_url
     api_key = _resolve_api_key(provider, config)
