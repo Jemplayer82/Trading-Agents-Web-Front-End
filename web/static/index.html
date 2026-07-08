@@ -79,6 +79,7 @@
   <main class="layout tab-pane active" data-pane="analyze">
     <aside class="sidebar panel">
       <div class="panel-title">[ History ]</div>
+      <button id="history-clear-btn" class="panel-action" title="Clear all history">clear</button>
       <ul id="history" class="history"></ul>
     </aside>
 
@@ -106,12 +107,15 @@
           <label>Language
             <select id="f-language"></select>
           </label>
-          <label>Provider
-            <select id="f-provider"></select>
+          <label>Deep provider
+            <select id="f-deep-provider"></select>
           </label>
           <label>Deep model
             <select id="f-deep-model"></select>
             <input id="f-deep-model-custom" type="text" autocomplete="off" placeholder="Enter custom model name" style="display:none; margin-top:4px;" />
+          </label>
+          <label>Quick provider
+            <select id="f-quick-provider"></select>
           </label>
           <label>Quick model
             <select id="f-quick-model"></select>
@@ -212,6 +216,7 @@
   <main class="layout tab-pane" data-pane="portfolio" hidden>
     <aside class="sidebar panel">
       <div class="panel-title">[ Scan History ]</div>
+      <button id="portfolio-history-clear-btn" class="panel-action" title="Clear all history">clear</button>
       <ul id="portfolio-history" class="history"></ul>
     </aside>
 
@@ -268,6 +273,7 @@
   <main class="layout tab-pane" data-pane="spy" hidden>
     <aside class="sidebar panel">
       <div class="panel-title">[ Scan History ]</div>
+      <button id="spy-history-clear-btn" class="panel-action" title="Clear all history">clear</button>
       <ul id="spy-history" class="history"></ul>
     </aside>
 

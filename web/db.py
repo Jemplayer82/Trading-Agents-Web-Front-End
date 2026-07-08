@@ -650,6 +650,12 @@ def delete_analysis(analysis_id: int) -> bool:
         return cur.rowcount > 0
 
 
+def delete_all_analyses() -> int:
+    with connect() as conn:
+        cur = conn.execute("DELETE FROM analyses")
+        return cur.rowcount
+
+
 def list_analyses(limit: int = 50) -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute(
@@ -1096,6 +1102,17 @@ def delete_spy_scan(scan_id: int) -> bool:
     with connect() as conn:
         cur = conn.execute("DELETE FROM spy_scans WHERE id = ?", (scan_id,))
         return cur.rowcount > 0
+
+
+def delete_all_spy_scans() -> int:
+    """Delete all scans and their quick results (FK ON DELETE CASCADE).
+
+    Deep-dive `analyses` rows the scans created are intentionally kept — they
+    remain accessible from the Run Analysis history.
+    """
+    with connect() as conn:
+        cur = conn.execute("DELETE FROM spy_scans")
+        return cur.rowcount
 
 
 # ---------- cross-container LLM concurrency registry ----------

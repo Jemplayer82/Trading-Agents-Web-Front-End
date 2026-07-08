@@ -232,6 +232,7 @@ async function loadSpyHistory() {
     const data = await apiFetch(url);
     const scans = data.scans || [];
     ul.innerHTML = "";
+    $("spy-history-clear-btn").disabled = !scans.length;
     if (!scans.length) {
       ul.innerHTML = "<li class=\"dim empty\">(no scans yet)</li>";
       return;
@@ -377,6 +378,28 @@ async function deleteSpyScan(id) {
     await loadSpyHistory();
   } catch (e) {
     alert("Delete failed: " + e);
+  }
+}
+
+async function clearSpyHistory() {
+  const data = await apiFetch("/api/spy-scans");
+  const scans = data.scans || [];
+  if (!scans.length) return;
+  if (!confirm(
+    "Clear all " + scans.length + " S&P 500 scans across all paper accounts?\n\n" +
+    "This removes every scan, its quick-scan results, and its portfolio. Deep-dive analyses stay in the Run Analysis history."
+  )) return;
+  try {
+    const r = await fetch("/api/spy-scans", { method: "DELETE" });
+    if (!r.ok) { alert("Clear failed (HTTP " + r.status + ")."); return; }
+    activeSpyId = null;
+    stopSpyPoll();
+    const main = $("spy-main");
+    if (main) main.innerHTML = "";
+    updateStopButton(null);
+    await loadSpyHistory();
+  } catch (e) {
+    alert("Clear failed: " + e);
   }
 }
 
@@ -741,6 +764,8 @@ document.addEventListener("DOMContentLoaded", () => {
   if (stopBtn) stopBtn.addEventListener("click", triggerSpyStop);
   const acctBtn = $("btn-spy-account");
   if (acctBtn) acctBtn.addEventListener("click", refreshActiveSpy);
+  const clearBtn = $("spy-history-clear-btn");
+  if (clearBtn) clearBtn.addEventListener("click", clearSpyHistory);
 
   // Account selector
   const sel = $("spy-account-sel");

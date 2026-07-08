@@ -1,0 +1,15 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "web-dev",
+      "runtimeExecutable": "powershell.exe",
+      "runtimeArgs": [
+        "-NoProfile",
+        "-Command",
+        "$env:TRADINGAGENTS_WEB_DB='C:\\Users\\Landon\\AppData\\Local\\Temp\\claude\\C--Users-Landon-Projects-TradingAgents--claude-worktrees-kind-noether-adf2f8\\85c0df65-7cfe-44c3-a034-8c00599f8ec7\\scratchpad\\web-dev.db'; uv run --extra web --python 3.12 uvicorn web.main:app --host 127.0.0.1 --port 8123"
+      ],
+      "port": 8123
+    }
+  ]
+}

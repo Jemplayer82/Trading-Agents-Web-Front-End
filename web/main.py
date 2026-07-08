@@ -315,6 +315,11 @@ def delete_analysis_endpoint(analysis_id: int) -> dict[str, Any]:
     return {"status": "deleted", "id": analysis_id}
 
 
+@app.delete("/api/analyses")
+def delete_all_analyses_endpoint() -> dict[str, Any]:
+    return {"status": "deleted", "count": db.delete_all_analyses()}
+
+
 # ---------- ticker company-info lookup (cached) ----------
 
 @app.get("/api/ticker-info/{ticker}")
@@ -482,6 +487,9 @@ async def ask_about_analysis(analysis_id: int, payload: dict[str, Any]) -> dict[
     prefs = db.get_preferences() or {}
     config: dict[str, Any] = {
         "llm_provider": prefs.get("provider") or "ollama",
+        # This call always passes deep=False (see llm_for below) — only the
+        # quick-role provider matters here.
+        "quick_llm_provider": prefs.get("quick_provider") or prefs.get("provider") or "ollama",
         "deep_think_llm": prefs.get("deep_model"),
         "quick_think_llm": prefs.get("quick_model"),
     }
