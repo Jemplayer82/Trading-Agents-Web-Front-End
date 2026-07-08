@@ -325,7 +325,7 @@ def create_paper_account(body: dict[str, Any]) -> dict[str, Any]:
         )
     except Exception as exc:
         if "UNIQUE" in str(exc):
-            raise HTTPException(status_code=409, detail=f"Account '{name}' already exists")
+            raise HTTPException(status_code=409, detail=f"Account '{name}' already exists") from exc
         raise
     account = db.get_paper_account(account_id)
     return {"account": account}

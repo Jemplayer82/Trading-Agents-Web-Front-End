@@ -4,9 +4,10 @@ Registers as an agent on the bus, receives llm_request DMs, dispatches to
 Ollama / OpenAI / xAI / Grok via the OpenAI-compatible API, and sends back
 llm_response DMs.
 
-Claude is NOT handled here — use a Claude CLI session with the switchboard
-hook configured. For claude provider requests this script forwards the DM to
-CLAUDE_AGENT_ID (default: "claude-code") and relays the reply back.
+Claude is NOT handled here. Claude requests go straight to the Cleo daemon
+(scripts/cleo_llm_handler.py, bus agent "cleo"), which drives a local
+``claude -p`` subscription session — point the analysis side at it with
+SWITCHBOARD_TARGET_AGENT=cleo.
 
 Usage:
     SWITCHBOARD_URL=http://host:3107 \
@@ -21,7 +22,6 @@ Env vars:
     OLLAMA_BASE_URL         Enables ollama provider (default: http://localhost:11434)
     OPENAI_API_KEY          Enables openai / grok / xai / deepseek providers
     OPENAI_BASE_URL         Override base URL for non-OpenAI OpenAI-compat APIs
-    CLAUDE_AGENT_ID         Bus agent to forward claude requests to (default: claude-code)
 """
 from __future__ import annotations
 
@@ -183,7 +183,6 @@ def main() -> None:
     ollama_key = os.environ.get("OLLAMA_API_KEY", "")  # pragma: allowlist secret
     openai_key = os.environ.get("OPENAI_API_KEY", "")  # pragma: allowlist secret
     openai_base = os.environ.get("OPENAI_BASE_URL", "")
-    claude_agent = os.environ.get("CLAUDE_AGENT_ID", "claude-code")
 
     def bus(tool: str, args: dict) -> dict:
         return _bus_call(url, token, tool, args)
@@ -232,10 +231,7 @@ def main() -> None:
                 msg=msg,
                 bus=bus,
                 agent_id=agent_id,
-                claude_agent=claude_agent,
                 get_openai_client=get_openai_client,
-                url=url,
-                token=token,  # pragma: allowlist secret
             )
         except Exception:
             log.exception("Error handling message %s", msg.get("id"))
@@ -253,9 +249,8 @@ def main() -> None:
 
     # Concurrent dispatch: analysts fan out in parallel, so requests must be
     # handled concurrently or later ones blow past the client's wall-clock
-    # timeout. The main loop is the SOLE poller of `agent_id`; workers either
-    # don't poll (openai path) or poll their own private inbox (claude path),
-    # so no worker can drain a request out from under the main loop.
+    # timeout. The main loop is the SOLE poller of `agent_id`; workers don't
+    # poll the bus at all, so no worker can drain a request out from under it.
     concurrency = max(1, int(os.environ.get("LLM_ROUTER_CONCURRENCY", "8")))
     executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="llm-router")
     log.info("llm-router dispatching with up to %d concurrent workers", concurrency)
@@ -274,7 +269,7 @@ def main() -> None:
             executor.submit(dispatch, msg)
 
 
-def _handle(msg, bus, agent_id, claude_agent, get_openai_client, url, token):
+def _handle(msg, bus, agent_id, get_openai_client):
     req = json.loads(msg["content"])
     provider = (req.get("provider") or "ollama").lower()
     model = req.get("model") or "llama3"
@@ -287,51 +282,6 @@ def _handle(msg, bus, agent_id, claude_agent, get_openai_client, url, token):
     msg_id = msg.get("id")
 
     log.info("llm_request from=%s provider=%s model=%s", sender, provider, model)
-
-    if provider == "claude":
-        # Forward to Claude CLI agent; relay the reply back to the original sender.
-        # Poll on a PRIVATE inbox (unique `from`), not the router's main agent_id —
-        # otherwise this blocking wait would drain (and discard) other analysts'
-        # incoming llm_requests while we sit here waiting on Claude.
-        fwd_inbox = f"{agent_id}-fwd-{uuid4().hex[:12]}"
-        fwd_thread = str(uuid4())
-        send_result = bus("send_message", {
-            "from": fwd_inbox,
-            "to": claude_agent,
-            "type": "llm_request",
-            "thread_id": fwd_thread,
-            "content": msg["content"],
-        })
-        fwd_id = send_result.get("message_id")  # send_message returns message_id, not id
-
-        # Wait for Claude's reply
-        deadline = time.monotonic() + 180
-        reply_content = None
-        reply_type = "llm_response"
-        while time.monotonic() < deadline:
-            res = _bus_call(url, token, "wait_for_message", {
-                "agent_id": fwd_inbox, "timeout_seconds": 25
-            })
-            for m in res.get("messages", []):
-                if (fwd_id and m.get("reply_to") == fwd_id) or m.get("thread_id") == fwd_thread:
-                    reply_content = m.get("content", "{}")
-                    reply_type = m.get("type", "llm_response")
-                    break
-            if reply_content is not None:
-                break
-
-        if reply_content is None:
-            raise TimeoutError("Claude agent did not respond in 180s")
-
-        bus("send_message", {
-            "from": agent_id,
-            "to": sender,
-            "type": reply_type,
-            "thread_id": thread_id,
-            "reply_to": msg_id,
-            "content": reply_content,
-        })
-        return
 
     # OpenAI-compatible dispatch (Ollama, OpenAI, xAI, Grok, DeepSeek)
     client = get_openai_client(provider, model)

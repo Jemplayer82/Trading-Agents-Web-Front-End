@@ -13,6 +13,7 @@ Tables:
                          (Schwab app key/secret/callback, Ollama base URL, etc.)
   users                - dashboard login accounts (username + pbkdf2 hash)
   sessions             - active login sessions (cookie token -> username)
+  login_attempts       - failed dashboard logins (brute-force throttling)
   analyses             - one row per single-ticker analysis
   portfolio_scans      - one row per nightly portfolio sweep (Schwab)
   portfolio_tickers    - join row connecting a scan to the analyses it generated
@@ -85,6 +86,16 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions (expires_at);
+
+CREATE TABLE IF NOT EXISTS login_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,
+    ip TEXT NOT NULL,
+    attempted_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_login_attempts_user ON login_attempts (username, attempted_at);
+CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts (ip, attempted_at);
 
 CREATE TABLE IF NOT EXISTS analyses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -507,6 +518,48 @@ def purge_expired_sessions() -> int:
     now = datetime.utcnow().isoformat()
     with connect() as conn:
         cur = conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
+    return cur.rowcount
+
+
+# ---------- login throttling (see web/auth_app.py for the policy) ----------
+
+def record_failed_login(username: str, ip: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO login_attempts (username, ip, attempted_at) VALUES (?, ?, ?)",
+            (username, ip, datetime.utcnow().isoformat()),
+        )
+
+
+def count_failed_logins_for_user(username: str, since: str) -> int:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM login_attempts WHERE username = ? AND attempted_at > ?",
+            (username, since),
+        ).fetchone()
+    return int(row["n"])
+
+
+def count_failed_logins_for_ip(ip: str, since: str) -> int:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM login_attempts WHERE ip = ? AND attempted_at > ?",
+            (ip, since),
+        ).fetchone()
+    return int(row["n"])
+
+
+def clear_failed_logins(username: str) -> None:
+    """A successful login wipes that username's failures (fresh window)."""
+    with connect() as conn:
+        conn.execute("DELETE FROM login_attempts WHERE username = ?", (username,))
+
+
+def purge_stale_login_attempts(window_minutes: int) -> int:
+    """Drop attempts older than the lockout window; they can't affect any count."""
+    cutoff = (datetime.utcnow() - timedelta(minutes=window_minutes)).isoformat()
+    with connect() as conn:
+        cur = conn.execute("DELETE FROM login_attempts WHERE attempted_at <= ?", (cutoff,))
     return cur.rowcount
 
 

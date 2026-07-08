@@ -311,13 +311,32 @@ class SwitchboardChatModel(BaseChatModel):
                         return
 
                 else:
-                    # Legacy llm_response: treat full content as one chunk
+                    # Non-streaming reply (legacy llm_response, or anything that
+                    # isn't a stream chunk). Be tolerant: a handler may send a
+                    # JSON envelope ({"content": …} / {"response": …}) OR raw text
+                    # (e.g. a markdown report). Never raise — a malformed reply
+                    # must not crash the analysis.
+                    raw = msg.get("content") or ""
+                    resp = None
                     try:
-                        resp = json.loads(msg["content"])
-                    except (json.JSONDecodeError, KeyError) as exc:
-                        raise RuntimeError(f"Bad llm_response payload: {exc}") from exc
+                        parsed = json.loads(raw)
+                        if isinstance(parsed, dict):
+                            resp = parsed
+                    except (json.JSONDecodeError, ValueError):
+                        resp = None  # raw non-JSON text payload
 
-                    content = resp.get("content") or ""
+                    if resp is not None:
+                        content = (
+                            resp.get("content")
+                            or resp.get("response")
+                            or resp.get("delta")
+                            or ""
+                        )
+                        raw_tcs = resp.get("tool_calls", []) or []
+                    else:
+                        content = raw  # treat the whole message as the answer text
+                        raw_tcs = []
+
                     if content:
                         if run_manager:
                             run_manager.on_llm_new_token(content)
@@ -328,7 +347,6 @@ class SwitchboardChatModel(BaseChatModel):
                                 pass
                         yield ChatGenerationChunk(message=AIMessageChunk(content=content))
 
-                    raw_tcs = resp.get("tool_calls", [])
                     if raw_tcs:
                         from langchain_core.messages.tool import ToolCall
                         tcs = [

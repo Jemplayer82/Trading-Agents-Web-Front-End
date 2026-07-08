@@ -113,8 +113,8 @@ SETTINGS_REGISTRY: list[dict[str, Any]] = [
     # Ollama / LLM infra
     {"key": "OLLAMA_BASE_URL", "label": "Ollama Base URL", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "https://ollama.com/v1 or http://host:11434/v1"},  # pragma: allowlist secret
     {"key": "OLLAMA_API_KEY", "label": "Ollama API Key", "group": "Ollama & Bus Routing", "secret": True, "placeholder": "Ollama Cloud auth token"},
-    {"key": "SWITCHBOARD_TARGET_AGENT", "label": "Switchboard — LLM handler agent", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "Bus agent that answers LLM requests: 'llm-router' (built-in → Ollama/OpenAI) or your Claude CLI's id (e.g. claude-code)"},  # pragma: allowlist secret
-    {"key": "SWITCHBOARD_PROVIDER", "label": "Switchboard — backend provider", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "Which backend llm-router uses: blank/ollama (default), openai, xai, grok, deepseek, or claude"},  # pragma: allowlist secret
+    {"key": "OLLAMA_MAX_CONCURRENCY", "label": "S&P scanner max concurrent tickers", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "Max parallel tickers in the S&P 500 scanner (default 3, floor 1). Does not affect portfolio or single-ticker runs."},
+    {"key": "SWITCHBOARD_TARGET_AGENT", "label": "Switchboard — LLM handler agent", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "Bus agent that answers LLM requests: 'llm-router' (built-in → Ollama/OpenAI) or 'cleo' (your local free claude -p session)"},  # pragma: allowlist secret
     # Email / newsletter
     {"key": "SMTP_HOST", "label": "SMTP Host", "group": "Email / Newsletter", "secret": False, "placeholder": "smtp.gmail.com"},
     {"key": "SMTP_PORT", "label": "SMTP Port", "group": "Email / Newsletter", "secret": False, "placeholder": "587"},

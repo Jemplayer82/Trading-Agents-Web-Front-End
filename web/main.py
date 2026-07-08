@@ -94,6 +94,10 @@ def _startup() -> None:
     except Exception:
         log.exception("session purge failed")
     try:
+        db.purge_stale_login_attempts(auth_app.LOCKOUT_WINDOW_MINUTES)
+    except Exception:
+        log.exception("login-attempt purge failed")
+    try:
         db.purge_stale_activity()
     except Exception:
         log.exception("activity purge failed")
@@ -160,12 +164,19 @@ def auth_setup(payload: dict[str, Any], response: Response) -> dict[str, Any]:
 
 
 @app.post("/api/auth/login")
-def auth_login(payload: dict[str, Any], response: Response) -> dict[str, Any]:
+def auth_login(payload: dict[str, Any], request: Request, response: Response) -> dict[str, Any]:
     username = ((payload or {}).get("username") or "").strip()
     password = (payload or {}).get("password") or ""
+    ip = auth_app.client_ip(request)
+    if auth_app.is_login_locked(username, ip):
+        # Same message whether the username exists or not — the lockout must
+        # not become a user-enumeration oracle.
+        raise HTTPException(status_code=429, detail="too many failed attempts; try again later")
     user = db.get_user(username)
     if not user or not auth_app.verify_password(password, user["password_hash"]):
+        db.record_failed_login(username, ip)
         raise HTTPException(status_code=401, detail="invalid username or password")
+    db.clear_failed_logins(username)
     token, _ = auth_app.new_session(username)
     auth_app.set_session_cookie(response, token)
     return {"status": "ok", "username": username}

@@ -84,14 +84,22 @@ real adjacent issue — the WS path using `==` — is fixed, item 9.)
 These were intentionally left out of a "consolidate + safe-hardening" change because they
 add dependencies or a schema/privilege model and need their own testing:
 
-- **Login rate-limiting / lockout** (High). `/api/auth/login` has no throttling; PBKDF2
-  slows but does not stop brute force. Recommend `slowapi` or a DB-backed attempt counter.
-- **Admin / RBAC** (Medium). User-management, settings-write and credential-read endpoints
+- ~~**Login rate-limiting / lockout** (High).~~ **Fixed 2026-07-07** — DB-backed attempt
+  counter (no new dependency): failed logins are recorded per username and per client IP
+  (`login_attempts` table); 5 failures per username or 20 per IP within a 15-minute
+  sliding window answer 429 before any PBKDF2 work, a successful login clears the
+  username's counter, and stale rows are purged at startup. Policy in `web/auth_app.py`
+  (`is_login_locked`, `client_ip` — trusts nginx's `X-Real-IP`, not client-controlled
+  `X-Forwarded-For`), wiring in `web/main.py::auth_login`, storage in `web/db.py`.
+  Tests: `tests/test_login_rate_limit.py` (lockout, window expiry, reset-on-success,
+  no user-enumeration oracle, IP spray backstop).
+- **Admin / RBAC** (Medium, still deferred as of 2026-07-07). User-management, settings-write and credential-read endpoints
   authenticate but do not check for an admin role. Recommend an `is_admin` column + a
   privilege check (requires a DB migration).
-- **`SCHWAB_MCP_URL` / `SCHWAB_CALLBACK_URL` validation** (Medium, SSRF/open-redirect).
-  Operator-controlled config today; recommend host-allowlisting `SCHWAB_MCP_URL` and
-  asserting the callback URL targets this app's own callback path.
+- **`SCHWAB_MCP_URL` / `SCHWAB_CALLBACK_URL` validation** (Medium, SSRF/open-redirect,
+  still deferred as of 2026-07-07). Operator-controlled config today; recommend
+  host-allowlisting `SCHWAB_MCP_URL` and asserting the callback URL targets this app's
+  own callback path.
 
 ## Round 2 — Agent Bus, brokerages, scan progress (2026-06-12)
 

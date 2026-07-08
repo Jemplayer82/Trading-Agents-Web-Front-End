@@ -26,8 +26,6 @@ import logging
 import re
 from typing import Any
 
-from langchain_openai import ChatOpenAI
-
 from tradingagents.default_config import DEFAULT_CONFIG
 
 from .llm_helpers import llm_for

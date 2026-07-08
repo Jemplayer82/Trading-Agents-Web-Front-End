@@ -121,7 +121,8 @@ services:
   # LLM router — registers on the bus as the target agent and bridges
   # llm_request DMs to Ollama / OpenAI-compatible backends. Same image,
   # different entrypoint. Required for LLM_PROVIDER=switchboard with a
-  # non-Claude backend (Claude is handled by an external CLI + hook instead).
+  # non-Claude backend. Claude requests go directly to the Cleo daemon
+  # (scripts/cleo_llm_handler.py, bus agent "cleo"), NOT through this router.
   tradingagents-llm-router:
     image: ghcr.io/jemplayer82/tradingagents:latest
     pull_policy: always
@@ -134,7 +135,6 @@ services:
       OLLAMA_API_KEY: ${OLLAMA_API_KEY}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
-      CLAUDE_AGENT_ID: ${CLAUDE_AGENT_ID:-claude-code}
       LLM_ROUTER_CONCURRENCY: ${LLM_ROUTER_CONCURRENCY:-8}
     restart: unless-stopped
     depends_on:
