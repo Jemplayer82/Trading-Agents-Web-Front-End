@@ -315,6 +315,11 @@ def delete_analysis_endpoint(analysis_id: int) -> dict[str, Any]:
     return {"status": "deleted", "id": analysis_id}
 
 
+@app.delete("/api/analyses")
+def delete_all_analyses_endpoint() -> dict[str, Any]:
+    return {"status": "deleted", "count": db.delete_all_analyses()}
+
+
 # ---------- ticker company-info lookup (cached) ----------
 
 @app.get("/api/ticker-info/{ticker}")

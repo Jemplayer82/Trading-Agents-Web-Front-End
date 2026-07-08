@@ -155,6 +155,13 @@ def delete_scan(scan_id: int) -> dict[str, Any]:
     return {"status": "deleted", "id": scan_id}
 
 
+@app.delete("/api/portfolio-scans")
+def delete_all_scans() -> dict[str, Any]:
+    with db.connect() as conn:
+        cur = conn.execute("DELETE FROM portfolio_scans")
+    return {"status": "deleted", "count": cur.rowcount}
+
+
 # ---------- background worker ----------
 
 def _refresh_creds_from_db() -> None:
@@ -419,6 +426,11 @@ def delete_spy_scan_endpoint(scan_id: int) -> dict[str, Any]:
     if not db.delete_spy_scan(scan_id):
         raise HTTPException(status_code=404, detail="not found")
     return {"status": "deleted", "id": scan_id}
+
+
+@app.delete("/api/spy-scans")
+def delete_all_spy_scans_endpoint() -> dict[str, Any]:
+    return {"status": "deleted", "count": db.delete_all_spy_scans()}
 
 
 @app.post("/api/spy-scans/{scan_id}/cancel")
