@@ -16,7 +16,15 @@ dependencies = [
     "langchain-openai>=0.3.23",
     "langgraph>=0.4.8",
     "langgraph-checkpoint-sqlite>=2.0.0",
-    "pandas>=2.3.0",
+    # pandas capped below 3.0: stockstats + our tz-aware indicator code break on
+    # pandas 3's stricter datetime comparisons. The Docker image installs via
+    # `pip install .[web]` (ignores uv.lock), so this ceiling must live here to
+    # bind the built image, not just CI.
+    "pandas>=2.3.0,<3",
+    # lxml is a direct runtime dep: web/spy_tickers.py fetches the S&P 500 list
+    # via pandas.read_html(). It used to arrive transitively through parsel;
+    # once parsel was dropped it must be declared explicitly.
+    "lxml>=5.0",
     "questionary>=2.1.0",
     "requests>=2.32.4",
     "rich>=14.0.0",
