@@ -13,6 +13,7 @@
 //   GET    /api/portfolio-scans          history list
 //   GET    /api/portfolio-scans/{id}     scan detail (polled at 5s while running)
 //   DELETE /api/portfolio-scans/{id}     delete a scan
+//   DELETE /api/portfolio-scans          delete ALL scans (Clear history)
 //   POST   /api/portfolio-scan           start a scan (idempotent for today)
 //   GET    /api/accounts                 live holdings, all brokerage accounts
 // GET /api/auth/schwab/status goes to the API app via the generic /api/ block.
@@ -86,6 +87,7 @@ async function loadPortfolioHistory() {
     const r = await fetch("/api/portfolio-scans");
     const { scans } = await r.json();
     ul.innerHTML = "";
+    $("portfolio-history-clear-btn").disabled = !scans.length;
     if (!scans.length) {
       ul.innerHTML = '<li class="dim empty">(no scans yet)</li>';
       return;
@@ -228,6 +230,23 @@ async function deletePortfolioScan(id) {
     $("portfolio-tickers").innerHTML = "";
     $("portfolio-meta").textContent = "";
   }
+  loadPortfolioHistory();
+}
+
+async function clearPortfolioHistory() {
+  const { scans } = await (await fetch("/api/portfolio-scans")).json();
+  if (!scans.length) return;
+  if (!confirm(`Clear all ${scans.length} portfolio scans? This cannot be undone.`)) return;
+  const r = await fetch("/api/portfolio-scans", { method: "DELETE" });
+  if (!r.ok) {
+    alert("Clear failed.");
+    return;
+  }
+  stopPortfolioPoll();
+  activePortfolioId = null;
+  $("portfolio-briefing").innerHTML = '<p class="dim">Select a scan from the sidebar.</p>';
+  $("portfolio-tickers").innerHTML = "";
+  $("portfolio-meta").textContent = "";
   loadPortfolioHistory();
 }
 
@@ -449,6 +468,7 @@ function setupTabs() {
 document.addEventListener("DOMContentLoaded", () => {
   setupTabs();
   $("btn-scan-now")?.addEventListener("click", runScanNow);
+  $("portfolio-history-clear-btn")?.addEventListener("click", clearPortfolioHistory);
 
   // Aggressiveness slider live label
   const aggSlider = $("pf-aggressiveness");

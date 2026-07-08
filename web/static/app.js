@@ -74,6 +74,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("btn-stop").addEventListener("click", stopRun);
   $("f-quick-provider").addEventListener("change", onQuickProviderChange);
   $("f-deep-provider").addEventListener("change", onDeepProviderChange);
+  $("history-clear-btn").addEventListener("click", clearHistory);
 
   // Aggressiveness slider live label
   const aggSlider = $("f-aggressiveness");
@@ -315,6 +316,7 @@ async function loadHistory() {
   const { analyses } = await resp.json();
   const ul = $("history");
   ul.innerHTML = "";
+  $("history-clear-btn").disabled = !analyses.length;
   if (!analyses.length) {
     const li = document.createElement("li");
     li.className = "dim empty";
@@ -395,6 +397,26 @@ async function deleteHistoryItem(id, ticker) {
     hideChartAndQa();
     setStatus("idle", "idle");
   }
+  await loadHistory();
+}
+
+async function clearHistory() {
+  const { analyses } = await (await fetch("/api/analyses")).json();
+  if (!analyses.length) return;
+  if (!confirm(`Clear all ${analyses.length} saved analyses? This cannot be undone.`)) return;
+  const resp = await fetch("/api/analyses", { method: "DELETE" });
+  if (!resp.ok) {
+    alert("Clear failed.");
+    return;
+  }
+  activeHistoryId = null;
+  currentReports = {};
+  activeReportKey = null;
+  refreshReportTabs();
+  renderActiveReport();
+  $("decision-panel").hidden = true;
+  hideChartAndQa();
+  setStatus("idle", "idle");
   await loadHistory();
 }
 
