@@ -13,6 +13,12 @@ services:
       - tradingagents_data:/home/appuser/.tradingagents
     tty: true
     stdin_open: true
+    # Interactive-only container (waits at the ticker-symbol prompt for a
+    # human via `docker attach`); with no restart policy it stays exited
+    # after the idle session is reaped, showing as permanently "down" in
+    # Portainer even though nothing crashed. unless-stopped brings it back
+    # to the idle prompt so it doesn't read as a dead service.
+    restart: unless-stopped
 
   # Single-ticker analysis backend + Schwab OAuth.
   tradingagents-api:
