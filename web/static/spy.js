@@ -221,14 +221,65 @@ function sharesOf(a) {
   return ep > 0 ? Math.floor((a.dollar_amount || 0) / ep) : 0;
 }
 
-// ===== Scan history sidebar =====
+// ===== Scan queue/history sidebar =====
+
+function _setupSpyStabs() {
+  document.querySelectorAll("[data-stab-target^=\"spy-\"]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const target = btn.dataset.stabTarget;
+      document.querySelectorAll("[data-stab-target^=\"spy-\"]").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      [$("spy-queue"), $("spy-history")].forEach((el) => {
+        if (el) el.hidden = el.id !== target;
+      });
+    });
+  });
+}
+
+async function loadSpyQueue() {
+  const ul = $("spy-queue");
+  if (!ul) return;
+  try {
+    const data = await apiFetch("/api/portfolio/status");
+    ul.innerHTML = "";
+    const running = data.running && data.running.scan_type === "spy" ? [data.running] : [];
+    const queuedSpy = (data.queued || []).filter((q) => q.scan_type === "spy");
+    const items = [...running, ...queuedSpy];
+    if (!items.length) {
+      ul.innerHTML = "<li class=\"dim empty\">(queue empty)</li>";
+      return;
+    }
+    items.forEach((item, idx) => {
+      const li = document.createElement("li");
+      li.dataset.id = item.id;
+      const isRunning = item === data.running;
+      const label = isRunning ? "RUNNING" : ("#" + (idx - (running.length ? 1 : 0) + 1) + " IN QUEUE");
+      const badgeClass = isRunning ? "HOLD" : "QUEUED";
+      li.innerHTML = (
+        "<span class=\"h-main\">" +
+          "<span class=\"h-top\">" +
+            "<span class=\"h-tk\">spy #" + item.id + " · " + escapeHtml(item.trade_date || "") + "</span>" +
+            "<span class=\"h-sig " + badgeClass + "\">" + label + "</span>" +
+          "</span>" +
+          "<span class=\"h-ts\">" + fmtTs(item.created_at) + "</span>" +
+        "</span>"
+      );
+      if (isRunning) li.querySelector(".h-main").addEventListener("click", () => loadSpyScan(item.id));
+      ul.appendChild(li);
+    });
+  } catch (e) {
+    ul.innerHTML = "<li class=\"empty\" style=\"color:var(--accent-red);\">" + escapeHtml(String(e)) + "</li>";
+  }
+}
 
 async function loadSpyHistory() {
+  loadSpyQueue();  // keep queue in sync whenever history refreshes
   const ul = $("spy-history");
   if (!ul) return;
   ul.innerHTML = "<li class=\"dim empty\">loading…</li>";
   try {
-    const url = activePaperAccountId ? "/api/spy-scans?account_id=" + activePaperAccountId : "/api/spy-scans";
+    const accountParam = activePaperAccountId ? "&account_id=" + activePaperAccountId : "";
+    const url = "/api/spy-scans?status=completed&status=failed&status=cancelled" + accountParam;
     const data = await apiFetch(url);
     const scans = data.scans || [];
     ul.innerHTML = "";
@@ -806,12 +857,16 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  // Load accounts on boot
+  // Load accounts on boot and wire up sidebar tabs
   loadPaperAccounts();
+  _setupSpyStabs();
 });
 
-// Auto-refresh history every 15s while tab is visible
+// Auto-refresh queue + history every 15s while tab is visible
 setInterval(() => {
   const pane = document.querySelector("[data-pane=\"spy\"]");
-  if (pane && !pane.hidden) loadSpyHistory();
+  if (pane && !pane.hidden) {
+    loadSpyQueue();
+    loadSpyHistory();
+  }
 }, 15000);

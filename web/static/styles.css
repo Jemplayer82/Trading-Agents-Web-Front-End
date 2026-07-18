@@ -152,6 +152,31 @@ a { color: var(--accent-cyan); }
 .panel-action:hover:not(:disabled) { color: var(--accent-red); }
 .panel-action:disabled { opacity: 0.4; cursor: default; }
 
+/* ----- Sidebar queue/history tab strip ----- */
+.sidebar-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--panel-border);
+  padding-bottom: 6px;
+}
+.stab {
+  background: transparent;
+  border: none;
+  color: var(--dim);
+  font-size: 11px;
+  font-family: inherit;
+  letter-spacing: 0.5px;
+  text-transform: lowercase;
+  padding: 2px 8px;
+  cursor: pointer;
+  border-radius: 2px;
+  transition: color 0.15s;
+}
+.stab:hover { color: var(--text); }
+.stab.active { color: var(--accent-cyan); font-weight: 600; }
+
 /* ----- Run Analysis form ----- */
 .form-grid {
   display: grid;
@@ -366,6 +391,7 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .badge.SELL, .h-sig.SELL   { background: var(--sell); color: #2e0a0a; }
 .badge.HOLD, .h-sig.HOLD   { background: var(--hold); color: #2e2204; }
 .badge.UNKNOWN, .h-sig.UNKNOWN { background: var(--panel-border); color: var(--dim); }
+.badge.QUEUED, .h-sig.QUEUED  { background: #1a2535; color: #6b9bd1; border: 1px solid #2d4a6e; }
 .badge.OPTION { background: transparent; border: 1px solid var(--panel-border); color: var(--dim); }
 
 /* ----- Decision panel + agent progress grid (Run Analysis tab) ----- */

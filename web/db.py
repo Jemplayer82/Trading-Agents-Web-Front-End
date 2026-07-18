@@ -686,11 +686,11 @@ def get_analysis(analysis_id: int) -> dict[str, Any] | None:
 
 # ---------- portfolio scans (nightly holdings sweep) ----------
 
-def create_portfolio_scan(trade_date: str) -> int:
+def create_portfolio_scan(trade_date: str, status: str = "running") -> int:
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO portfolio_scans (created_at, trade_date, status) VALUES (?, ?, 'running')",
-            (datetime.utcnow().isoformat(timespec="seconds") + "Z", trade_date),
+            "INSERT INTO portfolio_scans (created_at, trade_date, status) VALUES (?, ?, ?)",
+            (datetime.utcnow().isoformat(timespec="seconds") + "Z", trade_date, status),
         )
         return int(cur.lastrowid)
 
@@ -764,16 +764,24 @@ def mark_newsletter_sent(scan_id: int, message_id: str) -> None:
         )
 
 
-def list_portfolio_scans(limit: int = 50) -> list[dict[str, Any]]:
+def list_portfolio_scans(
+    limit: int = 50, statuses: list[str] | None = None
+) -> list[dict[str, Any]]:
     with connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT id, created_at, trade_date, status, num_tickers, signal_counts,
-                   newsletter_sent_at
-            FROM portfolio_scans ORDER BY id DESC LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
+        if statuses:
+            placeholders = ",".join("?" * len(statuses))
+            rows = conn.execute(
+                f"SELECT id, created_at, trade_date, status, num_tickers, signal_counts,"
+                f" newsletter_sent_at FROM portfolio_scans"
+                f" WHERE status IN ({placeholders}) ORDER BY id DESC LIMIT ?",
+                (*statuses, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, created_at, trade_date, status, num_tickers, signal_counts,"
+                " newsletter_sent_at FROM portfolio_scans ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
     out = []
     for r in rows:
         d = dict(r)
@@ -823,13 +831,14 @@ def create_spy_scan(
     paper_account_id: int | None = None,
     aggressiveness: int = 5,
     bias: str = "neutral",
+    status: str = "pending",
 ) -> int:
     with connect() as conn:
         cur = conn.execute(
             "INSERT INTO spy_scans (created_at, trade_date, status, cancel_requested, paper_account_id, aggressiveness, bias) "
-            "VALUES (?, ?, 'pending', 0, ?, ?, ?)",
+            "VALUES (?, ?, ?, 0, ?, ?, ?)",
             (datetime.utcnow().isoformat(timespec="seconds") + "Z", trade_date,
-             paper_account_id, aggressiveness, bias),
+             status, paper_account_id, aggressiveness, bias),
         )
         return int(cur.lastrowid)
 
@@ -876,7 +885,7 @@ def update_spy_scan(scan_id: int, **kwargs: Any) -> None:
 # Columns update_portfolio_scan is allowed to set. Column names are interpolated
 # into SQL (not parameterized), so this allow-list is a security control — keep it
 # tight to exactly the three progress columns.
-_PORTFOLIO_SCAN_UPDATABLE = {"scanned_count", "scan_total", "current_ticker"}
+_PORTFOLIO_SCAN_UPDATABLE = {"scanned_count", "scan_total", "current_ticker", "status"}
 
 
 def update_portfolio_scan(scan_id: int, **kwargs: Any) -> None:
@@ -963,7 +972,7 @@ def find_stuck_spy_scans(stall_before_iso: str) -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute(
             "SELECT id, trade_date FROM spy_scans "
-            "WHERE status NOT IN ('completed', 'cancelled', 'failed') "
+            "WHERE status NOT IN ('completed', 'cancelled', 'failed', 'queued') "
             "AND COALESCE(updated_at, created_at) < ?",
             (stall_before_iso,),
         ).fetchall()
@@ -1030,28 +1039,32 @@ def upsert_spy_quick_result(
         )
 
 
-def list_spy_scans(limit: int = 50, paper_account_id: int | None = None) -> list[dict[str, Any]]:
+def list_spy_scans(
+    limit: int = 50,
+    paper_account_id: int | None = None,
+    statuses: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    cols = (
+        "id, created_at, trade_date, status, quick_count, quick_total,"
+        " deep_count, deep_total, current_value, last_price_check,"
+        " paper_account_id, aggressiveness, bias, previous_scan_id, cancel_requested"
+    )
+    conditions: list[str] = []
+    params: list[Any] = []
+    if paper_account_id is not None:
+        conditions.append("paper_account_id = ?")
+        params.append(paper_account_id)
+    if statuses:
+        placeholders = ",".join("?" * len(statuses))
+        conditions.append(f"status IN ({placeholders})")
+        params.extend(statuses)
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    params.append(limit)
     with connect() as conn:
-        if paper_account_id is not None:
-            rows = conn.execute(
-                """
-                SELECT id, created_at, trade_date, status, quick_count, quick_total,
-                       deep_count, deep_total, current_value, last_price_check,
-                       paper_account_id, aggressiveness, bias
-                FROM spy_scans WHERE paper_account_id = ? ORDER BY id DESC LIMIT ?
-                """,
-                (paper_account_id, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT id, created_at, trade_date, status, quick_count, quick_total,
-                       deep_count, deep_total, current_value, last_price_check,
-                       paper_account_id, aggressiveness, bias
-                FROM spy_scans ORDER BY id DESC LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+        rows = conn.execute(
+            f"SELECT {cols} FROM spy_scans {where} ORDER BY id DESC LIMIT ?",
+            params,
+        ).fetchall()
     return [dict(r) for r in rows]
 
 

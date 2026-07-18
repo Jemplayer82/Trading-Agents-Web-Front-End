@@ -212,9 +212,13 @@
        cards — whichever rendered last wins (see portfolio.js header). -->
   <main class="layout tab-pane" data-pane="portfolio" hidden>
     <aside class="sidebar panel">
-      <div class="panel-title">[ Scan History ]</div>
-      <button id="portfolio-history-clear-btn" class="panel-action" title="Clear all history">clear</button>
-      <ul id="portfolio-history" class="history"></ul>
+      <div class="sidebar-tabs">
+        <button class="stab active" data-stab-target="portfolio-queue">Queue</button>
+        <button class="stab" data-stab-target="portfolio-history">History</button>
+        <button id="portfolio-history-clear-btn" class="panel-action" title="Clear all history" style="margin-left:auto;">clear</button>
+      </div>
+      <ul id="portfolio-queue" class="history"></ul>
+      <ul id="portfolio-history" class="history" hidden></ul>
     </aside>
 
     <section class="main">
@@ -269,9 +273,13 @@
        #spy-main is rebuilt wholesale by spy.js renderSpyScan on each load/poll. -->
   <main class="layout tab-pane" data-pane="spy" hidden>
     <aside class="sidebar panel">
-      <div class="panel-title">[ Scan History ]</div>
-      <button id="spy-history-clear-btn" class="panel-action" title="Clear all history">clear</button>
-      <ul id="spy-history" class="history"></ul>
+      <div class="sidebar-tabs">
+        <button class="stab active" data-stab-target="spy-queue">Queue</button>
+        <button class="stab" data-stab-target="spy-history">History</button>
+        <button id="spy-history-clear-btn" class="panel-action" title="Clear all history" style="margin-left:auto;">clear</button>
+      </div>
+      <ul id="spy-queue" class="history"></ul>
+      <ul id="spy-history" class="history" hidden></ul>
     </aside>
 
     <section class="main">

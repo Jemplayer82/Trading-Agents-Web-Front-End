@@ -77,14 +77,65 @@ function portfolioProgressHtml(scan) {
   );
 }
 
-// ---- Scan history + detail (HISTORICAL scan results) ----
+// ---- Scan queue/history sidebar ----
+
+function _setupPortfolioStabs() {
+  document.querySelectorAll("[data-stab-target^=\"portfolio-\"]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const target = btn.dataset.stabTarget;
+      document.querySelectorAll("[data-stab-target^=\"portfolio-\"]").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      [$("portfolio-queue"), $("portfolio-history")].forEach((el) => {
+        if (el) el.hidden = el.id !== target;
+      });
+    });
+  });
+}
+
+async function loadPortfolioQueue() {
+  const ul = $("portfolio-queue");
+  if (!ul) return;
+  try {
+    const r = await fetch("/api/portfolio/status");
+    const data = r.ok ? await r.json() : { running: null, queued: [] };
+    ul.innerHTML = "";
+    const running = data.running && data.running.scan_type === "portfolio" ? [data.running] : [];
+    const queuedPf = (data.queued || []).filter((q) => q.scan_type === "portfolio");
+    const items = [...running, ...queuedPf];
+    if (!items.length) {
+      ul.innerHTML = '<li class="dim empty">(queue empty)</li>';
+      return;
+    }
+    items.forEach((item, idx) => {
+      const li = document.createElement("li");
+      li.dataset.id = item.id;
+      const isRunning = item === data.running;
+      const label = isRunning ? "RUNNING" : ("#" + (idx - (running.length ? 1 : 0) + 1) + " IN QUEUE");
+      const badgeClass = isRunning ? "HOLD" : "QUEUED";
+      li.innerHTML = `
+        <span class="h-main">
+          <span class="h-top">
+            <span class="h-tk">pf #${item.id} · ${escapeHtml(item.trade_date || "")}</span>
+            <span class="h-sig ${badgeClass}">${label}</span>
+          </span>
+          <span class="h-ts">${fmtTs(item.created_at)}</span>
+        </span>
+      `;
+      if (isRunning) li.querySelector(".h-main").addEventListener("click", () => loadPortfolioScan(item.id));
+      ul.appendChild(li);
+    });
+  } catch (e) {
+    ul.innerHTML = `<li class="empty" style="color:var(--accent-red);">${escapeHtml(String(e))}</li>`;
+  }
+}
 
 async function loadPortfolioHistory() {
+  loadPortfolioQueue();  // keep queue in sync whenever history refreshes
   const ul = $("portfolio-history");
   if (!ul) return;
   ul.innerHTML = '<li class="dim empty">loading…</li>';
   try {
-    const r = await fetch("/api/portfolio-scans");
+    const r = await fetch("/api/portfolio-scans?status=completed&status=failed");
     const { scans } = await r.json();
     ul.innerHTML = "";
     $("portfolio-history-clear-btn").disabled = !scans.length;
@@ -268,7 +319,8 @@ async function runScanNow() {
     if (!r.ok) {
       out.innerHTML = `<span style="color: var(--accent-red);">${data.detail || JSON.stringify(data)}</span>`;
     } else {
-      out.innerHTML = `Scan <strong>#${data.scan_id}</strong> ${data.new ? "started" : "already running (idempotent)"}.`;
+      const status = data.status === "queued" ? "queued" : (data.new ? "started" : "already running (idempotent)");
+      out.innerHTML = `Scan <strong>#${data.scan_id}</strong> ${status}.`;
       loadPortfolioHistory();
     }
   } catch (e) {
@@ -467,6 +519,7 @@ function setupTabs() {
 
 document.addEventListener("DOMContentLoaded", () => {
   setupTabs();
+  _setupPortfolioStabs();
   $("btn-scan-now")?.addEventListener("click", runScanNow);
   $("portfolio-history-clear-btn")?.addEventListener("click", clearPortfolioHistory);
 
@@ -489,14 +542,18 @@ document.addEventListener("DOMContentLoaded", () => {
 
 document.addEventListener("tab-shown", (ev) => {
   if (ev.detail === "portfolio") {
+    loadPortfolioQueue();
     loadPortfolioHistory();
     loadSchwabStatusLine();
     loadAccountHoldings();
   }
 });
 
-// Auto-refresh portfolio history every 10s while the tab is visible
+// Auto-refresh portfolio queue + history every 10s while the tab is visible
 setInterval(() => {
   const pane = document.querySelector('[data-pane="portfolio"]');
-  if (pane && !pane.hidden) loadPortfolioHistory();
+  if (pane && !pane.hidden) {
+    loadPortfolioQueue();
+    loadPortfolioHistory();
+  }
 }, 10000);

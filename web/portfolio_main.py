@@ -32,12 +32,13 @@ a new key takes effect without restarting this container.
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 
 from tradingagents.constants import SIGNALS
 from tradingagents.dataflows import schwab_mcp
@@ -58,6 +59,51 @@ app = FastAPI(title="TradingAgents Portfolio")
 # table; scheduler->portfolio cron calls pass via the X-Internal-Token
 # bypass in auth_app.
 app.middleware("http")(auth_app.auth_middleware)
+
+
+# ---------- Scan queue coordination ----------
+# At most one scan (portfolio or SPY) runs at a time. Concurrent requests create
+# a 'queued' row and are started FIFO when the active scan finishes. The
+# in-memory lock is a belt-and-suspenders guard against race conditions; the
+# DB status is the authoritative queue state (survives restarts).
+
+_SCAN_LOCK = threading.Lock()
+
+
+def _is_any_scan_running(conn) -> dict | None:  # type: ignore[type-arg]
+    """Return info dict if any scan is actively running, else None."""
+    row = conn.execute(
+        "SELECT 'portfolio' AS scan_type, id FROM portfolio_scans WHERE status = 'running'"
+        " UNION SELECT 'spy', id FROM spy_scans"
+        " WHERE status IN ('running_quick','running_deep','running_alloc')"
+        " LIMIT 1"
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _dequeue_next_scan() -> None:
+    """If anything is queued, start the oldest one. Called at the end of every scan thread."""
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT 'portfolio' AS scan_type, id, trade_date FROM portfolio_scans"
+            " WHERE status = 'queued'"
+            " UNION SELECT 'spy', id, trade_date FROM spy_scans WHERE status = 'queued'"
+            " ORDER BY created_at LIMIT 1"
+        ).fetchone()
+    if not row:
+        return
+    scan_type, scan_id, trade_date = row["scan_type"], row["id"], row["trade_date"]
+    log.info("[queue] starting queued %s scan #%s", scan_type, scan_id)
+    if scan_type == "portfolio":
+        db.update_portfolio_scan(scan_id, status="running")
+        threading.Thread(
+            target=_run_scan_thread, args=(scan_id, trade_date), daemon=True
+        ).start()
+    else:
+        db.update_spy_scan(scan_id, status="running_quick")
+        threading.Thread(
+            target=_run_spy_scan_thread, args=(scan_id, trade_date), daemon=True
+        ).start()
 
 
 @app.on_event("startup")
@@ -114,7 +160,7 @@ async def start_scan(
     aggressiveness = int(body.get("aggressiveness") or 5)
     bias = body.get("bias") or "neutral"
     today = datetime.utcnow().date().isoformat()
-    # Idempotency check
+    # Idempotency check: don't create a second portfolio scan for today unless the last one failed.
     with db.connect() as conn:
         row = conn.execute(
             "SELECT id, status FROM portfolio_scans WHERE trade_date = ? AND status != 'failed' ORDER BY id DESC LIMIT 1",
@@ -128,14 +174,24 @@ async def start_scan(
     if not schwab_mcp.get_accounts(fields="positions"):
         raise HTTPException(status_code=400, detail="Schwab MCP not connected — re-authorize at https://schwab.txferguson.net/auth")
 
+    with db.connect() as conn:
+        busy = _is_any_scan_running(conn)
+    if busy:
+        scan_id = db.create_portfolio_scan(today, status="queued")
+        log.info("[queue] portfolio scan %s queued behind %s scan #%s", scan_id, busy["scan_type"], busy["id"])
+        return {"scan_id": scan_id, "status": "queued", "new": True, "queued_behind": busy}
+
     scan_id = db.create_portfolio_scan(today)
     background_tasks.add_task(_run_scan_thread, scan_id, today, aggressiveness, bias)
     return {"scan_id": scan_id, "status": "running", "new": True}
 
 
 @app.get("/api/portfolio-scans")
-def list_scans(limit: int = 50) -> dict[str, Any]:
-    return {"scans": db.list_portfolio_scans(limit=limit)}
+def list_scans(
+    limit: int = 50,
+    status: list[str] | None = Query(default=None),
+) -> dict[str, Any]:
+    return {"scans": db.list_portfolio_scans(limit=limit, statuses=status)}
 
 
 @app.get("/api/portfolio-scans/{scan_id}")
@@ -160,6 +216,28 @@ def delete_all_scans() -> dict[str, Any]:
     with db.connect() as conn:
         cur = conn.execute("DELETE FROM portfolio_scans")
     return {"status": "deleted", "count": cur.rowcount}
+
+
+@app.get("/api/portfolio/status")
+def scan_status() -> dict[str, Any]:
+    """Current scan queue state — used by the frontend and by agents before triggering.
+
+    Returns the actively running scan (if any) and the ordered queue of waiting scans.
+    The nginx /api/portfolio prefix block routes this to the portfolio app.
+    """
+    with db.connect() as conn:
+        running_row = _is_any_scan_running(conn)
+        queued_rows = conn.execute(
+            "SELECT 'portfolio' AS scan_type, id, trade_date, created_at"
+            " FROM portfolio_scans WHERE status = 'queued'"
+            " UNION SELECT 'spy', id, trade_date, created_at"
+            " FROM spy_scans WHERE status = 'queued'"
+            " ORDER BY created_at"
+        ).fetchall()
+    return {
+        "running": dict(running_row) if running_row else None,
+        "queued": [dict(r) for r in queued_rows],
+    }
 
 
 # ---------- background worker ----------
@@ -190,6 +268,8 @@ def _run_scan_thread(scan_id: int, trade_date: str, aggressiveness: int = 5, bia
         alerts.notify_run_failed(
             kind="Portfolio scan", run_id=scan_id, label=trade_date, error=str(exc)
         )
+    finally:
+        _dequeue_next_scan()
 
 
 def _mcp_positions() -> list[dict[str, Any]]:
@@ -395,19 +475,36 @@ async def start_spy_scan(
     aggressiveness = int(body.get("aggressiveness") or (account or {}).get("aggressiveness") or 5)
     bias = body.get("bias") or (account or {}).get("bias") or "neutral"
 
-    # A failed or cancelled scan from today must NOT block a fresh run.
+    # Idempotency: don't create a second spy scan for the same account+date unless the last failed/cancelled.
+    # NOTE: the idempotency check is intentionally per-account so different paper accounts can each
+    # have their own scan queued. Cross-account concurrency is prevented by the queue below.
     with db.connect() as conn:
         where = "trade_date = ? AND status NOT IN ('failed', 'cancelled')"
         params: list[Any] = [today]
         if account_id:
             where += " AND paper_account_id = ?"
             params.append(account_id)
+        else:
+            where += " AND paper_account_id IS NULL"
         row = conn.execute(
             f"SELECT id, status FROM spy_scans WHERE {where} ORDER BY id DESC LIMIT 1",
             params,
         ).fetchone()
     if row:
         return {"scan_id": int(row["id"]), "status": row["status"], "new": False}
+
+    with db.connect() as conn:
+        busy = _is_any_scan_running(conn)
+    if busy:
+        scan_id = db.create_spy_scan(
+            today,
+            paper_account_id=account_id,
+            aggressiveness=aggressiveness,
+            bias=bias,
+            status="queued",
+        )
+        log.info("[queue] spy scan %s queued behind %s scan #%s", scan_id, busy["scan_type"], busy["id"])
+        return {"scan_id": scan_id, "status": "queued", "new": True, "queued_behind": busy}
 
     scan_id = db.create_spy_scan(
         today,
@@ -420,8 +517,12 @@ async def start_spy_scan(
 
 
 @app.get("/api/spy-scans")
-def list_spy_scans(limit: int = 50, account_id: int | None = None) -> dict[str, Any]:
-    return {"scans": db.list_spy_scans(limit=limit, paper_account_id=account_id)}
+def list_spy_scans(
+    limit: int = 50,
+    account_id: int | None = None,
+    status: list[str] | None = Query(default=None),
+) -> dict[str, Any]:
+    return {"scans": db.list_spy_scans(limit=limit, paper_account_id=account_id, statuses=status)}
 
 
 @app.get("/api/spy-scans/{scan_id}")
@@ -733,6 +834,8 @@ def _run_spy_scan_thread(scan_id: int, trade_date: str) -> None:
         alerts.notify_run_failed(
             kind="S&P 500 scan", run_id=scan_id, label=trade_date, error=str(exc)
         )
+    finally:
+        _dequeue_next_scan()
 
 
 @contextmanager
