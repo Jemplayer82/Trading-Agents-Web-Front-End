@@ -1,8 +1,8 @@
 """Append-only markdown decision log for TradingAgents."""
 
-from typing import List, Optional
-from pathlib import Path
 import re
+from datetime import datetime, timedelta
+from pathlib import Path
 
 from tradingagents.agents.utils.rating import parse_rating
 
@@ -18,6 +18,7 @@ class TradingMemoryLog:
 
     def __init__(self, config: dict = None):
         cfg = config or {}
+        self._config = cfg
         self._log_path = None
         path = cfg.get("memory_log_path")
         if path:
@@ -37,13 +38,18 @@ class TradingMemoryLog:
         """Append pending entry at end of propagate(). No LLM call."""
         if not self._log_path:
             return
-        # Idempotency guard: fast raw-text scan instead of full parse
+        # Idempotency guard: fast raw-text scan instead of full parse.
+        # Matches pending AND resolved entries — re-running a (ticker, date)
+        # whose entry already resolved must not append a duplicate (it would
+        # double-count in calibration stats).
         if self._log_path.exists():
             raw = self._log_path.read_text(encoding="utf-8")
             for line in raw.splitlines():
-                if line.startswith(f"[{trade_date} | {ticker} |") and line.endswith("| pending]"):
+                if line.startswith(f"[{trade_date} | {ticker} |"):
                     return
-        rating = parse_rating(final_trade_decision)
+        # "Unrated" (not "Hold") on parse failure: a failed parse dumped into
+        # the Hold bucket would silently pollute Hold calibration stats.
+        rating = parse_rating(final_trade_decision, default="Unrated")
         tag = f"[{trade_date} | {ticker} | {rating} | pending]"
         entry = f"{tag}\n\nDECISION:\n{final_trade_decision}{self._SEPARATOR}"
         with open(self._log_path, "a", encoding="utf-8") as f:
@@ -51,7 +57,7 @@ class TradingMemoryLog:
 
     # --- Read path (Phase A) ---
 
-    def load_entries(self) -> List[dict]:
+    def load_entries(self) -> list[dict]:
         """Parse all entries from log. Returns list of dicts."""
         if not self._log_path or not self._log_path.exists():
             return []
@@ -64,35 +70,79 @@ class TradingMemoryLog:
                 entries.append(parsed)
         return entries
 
-    def get_pending_entries(self) -> List[dict]:
+    def get_pending_entries(self) -> list[dict]:
         """Return entries with outcome:pending (for Phase B)."""
         return [e for e in self.load_entries() if e.get("pending")]
 
     def get_past_context(self, ticker: str, n_same: int = 5, n_cross: int = 3) -> str:
-        """Return formatted past context string for agent prompt injection."""
-        entries = [e for e in self.load_entries() if not e.get("pending")]
-        if not entries:
+        """Return formatted past context string for agent prompt injection.
+
+        INVARIANT: this context is injected into the Portfolio Manager only.
+        Do not feed it to analysts/researchers — a wrong lesson biasing every
+        agent at once is how a memory contamination spiral starts; one
+        injection point keeps the blast radius bounded.
+
+        Layout: aggregate calibration stats first (luck cancels out across the
+        full log — that's the trustworthy signal), then recent anecdotal
+        lessons, which are explicitly n=1 stories.
+        """
+        all_entries = self.load_entries()
+        resolved = [e for e in all_entries if not e.get("pending")]
+        if not resolved:
             return ""
 
+        # Calibration runs over the FULL resolved log; the recency cutoff below
+        # only trims which anecdotes get retold.
+        from tradingagents.agents.utils.calibration import (
+            compute_calibration,
+            format_calibration,
+        )
+
+        calibration_block = format_calibration(
+            compute_calibration(all_entries, self._config)
+        )
+
+        max_age = self._config.get("memory_context_max_age_days")
+        if max_age:
+            cutoff = (datetime.now() - timedelta(days=max_age)).strftime("%Y-%m-%d")
+            resolved = [e for e in resolved if e["date"] >= cutoff]
+
         same, cross = [], []
-        for e in reversed(entries):
+        cross_tickers = set()
+        for e in reversed(resolved):
             if len(same) >= n_same and len(cross) >= n_cross:
                 break
             if e["ticker"] == ticker and len(same) < n_same:
                 same.append(e)
-            elif e["ticker"] != ticker and len(cross) < n_cross:
+            elif (
+                e["ticker"] != ticker
+                and len(cross) < n_cross
+                and e["ticker"] not in cross_tickers
+            ):
+                # One lesson per ticker: a portfolio sweep resolves whole
+                # batches at once, and without this a single name (or one
+                # day's correlated batch) monopolises every cross slot.
                 cross.append(e)
-
-        if not same and not cross:
-            return ""
+                cross_tickers.add(e["ticker"])
 
         parts = []
+        if calibration_block:
+            parts.append(calibration_block)
         if same:
             parts.append(f"Past analyses of {ticker} (most recent first):")
             parts.extend(self._format_full(e) for e in same)
         if cross:
-            parts.append("Recent cross-ticker lessons:")
-            parts.extend(self._format_reflection_only(e) for e in cross)
+            cross_formatted = [
+                f for f in (self._format_reflection_only(e) for e in cross) if f
+            ]
+            if cross_formatted:
+                parts.append(
+                    "Recent cross-ticker lessons (each is a single outcome — "
+                    "weigh the calibration stats above them):"
+                )
+                parts.extend(cross_formatted)
+        if not parts:
+            return ""
         return "\n\n".join(parts)
 
     # --- Update path (Phase B) ---
@@ -162,7 +212,7 @@ class TradingMemoryLog:
         tmp_path.write_text(new_text, encoding="utf-8")
         tmp_path.replace(self._log_path)
 
-    def batch_update_with_outcomes(self, updates: List[dict]) -> None:
+    def batch_update_with_outcomes(self, updates: list[dict]) -> None:
         """Apply multiple outcome updates in a single read + atomic write.
 
         Each element of updates must have keys: ticker, trade_date,
@@ -218,7 +268,7 @@ class TradingMemoryLog:
 
     # --- Helpers ---
 
-    def _apply_rotation(self, blocks: List[str]) -> List[str]:
+    def _apply_rotation(self, blocks: list[str]) -> list[str]:
         """Drop oldest resolved blocks when their count exceeds max_entries.
 
         Pending blocks are always kept (they represent unprocessed work).
@@ -247,7 +297,7 @@ class TradingMemoryLog:
             return blocks
 
         to_drop = resolved_count - self._max_entries
-        kept: List[str] = []
+        kept: list[str] = []
         for block, is_resolved in decisions:
             if is_resolved and to_drop > 0:
                 to_drop -= 1
@@ -255,7 +305,7 @@ class TradingMemoryLog:
             kept.append(block)
         return kept
 
-    def _parse_entry(self, raw: str) -> Optional[dict]:
+    def _parse_entry(self, raw: str) -> dict | None:
         lines = raw.strip().splitlines()
         if not lines:
             return None
@@ -291,10 +341,18 @@ class TradingMemoryLog:
             parts.append(f"REFLECTION:\n{e['reflection']}")
         return "\n\n".join(parts)
 
-    def _format_reflection_only(self, e: dict) -> str:
-        tag = f"[{e['date']} | {e['ticker']} | {e['rating']} | {e['raw'] or 'n/a'}]"
-        if e["reflection"]:
-            return f"{tag}\n{e['reflection']}"
-        text = e["decision"][:300]
-        suffix = "..." if len(e["decision"]) > 300 else ""
-        return f"{tag}\n{text}{suffix}"
+    def _format_reflection_only(self, e: dict) -> str | None:
+        """Short cross-ticker lesson format; None when there is no reflection.
+
+        Alpha is included alongside raw — a +4% raw in a +5% benchmark week is
+        a loss, and showing raw alone taught exactly the wrong lesson. Entries
+        without a reflection are skipped entirely rather than leaking raw
+        DECISION prose into prompts as if it were a graded lesson.
+        """
+        if not e["reflection"]:
+            return None
+        tag = (
+            f"[{e['date']} | {e['ticker']} | {e['rating']}"
+            f" | raw {e['raw'] or 'n/a'} | alpha {e['alpha'] or 'n/a'}]"
+        )
+        return f"{tag}\n{e['reflection']}"

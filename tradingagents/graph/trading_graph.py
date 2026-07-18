@@ -20,11 +20,8 @@ cli/main.py drive it; graph/portfolio_graph.py wraps it to sweep a whole portfol
 import json
 import logging
 import os
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
-
-import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +49,7 @@ from tradingagents.llm_clients import create_llm_client
 
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
 from .conditional_logic import ConditionalLogic
+from .outcome_resolution import fetch_returns, resolve_all_pending, resolve_benchmark
 from .propagation import Propagator
 from .reflection import Reflector
 from .setup import GraphSetup
@@ -205,23 +203,10 @@ class TradingAgentsGraph:
     def _resolve_benchmark(self, ticker: str) -> str:
         """Pick the benchmark ticker for alpha calculation against ``ticker``.
 
-        ``config["benchmark_ticker"]`` overrides everything when set; otherwise
-        the suffix map matches the ticker's exchange suffix (e.g. ``.T`` for
-        Tokyo). US-listed tickers without a dotted suffix fall through to the
-        empty-suffix entry (SPY by default). Unrecognised suffixes (including
-        US tickers with dots like ``BRK.B``) also fall back to the empty-suffix
-        entry, which is the right default because the alpha calculation works
-        in USD.
+        Thin delegate to :func:`outcome_resolution.resolve_benchmark` so the
+        nightly sweep and the in-graph path share one implementation.
         """
-        explicit = self.config.get("benchmark_ticker")
-        if explicit:
-            return explicit
-        benchmark_map = self.config.get("benchmark_map", {})
-        ticker_upper = ticker.upper()
-        for suffix, benchmark in benchmark_map.items():
-            if suffix and ticker_upper.endswith(suffix.upper()):
-                return benchmark
-        return benchmark_map.get("", "SPY")
+        return resolve_benchmark(ticker, self.config)
 
     def _fetch_returns(
         self, ticker: str, trade_date: str, holding_days: int = 5,
@@ -229,79 +214,29 @@ class TradingAgentsGraph:
     ) -> tuple[float | None, float | None, int | None]:
         """Fetch raw and alpha return for ticker over holding_days from trade_date.
 
-        ``benchmark`` is the index used as the alpha baseline (resolved by the
-        caller via ``_resolve_benchmark``). Returns ``(raw_return, alpha_return,
-        actual_holding_days)`` or ``(None, None, None)`` if price data is
-        unavailable (too recent, delisted, or network error).
+        Thin delegate to :func:`outcome_resolution.fetch_returns` (which adds
+        the maturity guard, date-aligned benchmark closes, and the crypto
+        absolute-return branch). Keeps the original 3-tuple signature for
+        existing callers; the sigma component is only needed by the sweep.
         """
-        try:
-            start = datetime.strptime(trade_date, "%Y-%m-%d")
-            end = start + timedelta(days=holding_days + 7)  # buffer for weekends/holidays
-            end_str = end.strftime("%Y-%m-%d")
-
-            stock = yf.Ticker(ticker).history(start=trade_date, end=end_str)
-            bench = yf.Ticker(benchmark).history(start=trade_date, end=end_str)
-
-            if len(stock) < 2 or len(bench) < 2:
-                return None, None, None
-
-            actual_days = min(holding_days, len(stock) - 1, len(bench) - 1)
-            raw = float(
-                (stock["Close"].iloc[actual_days] - stock["Close"].iloc[0])
-                / stock["Close"].iloc[0]
-            )
-            bench_ret = float(
-                (bench["Close"].iloc[actual_days] - bench["Close"].iloc[0])
-                / bench["Close"].iloc[0]
-            )
-            alpha = raw - bench_ret
-            return raw, alpha, actual_days
-        except Exception as e:
-            logger.warning(
-                "Could not resolve outcome for %s on %s vs %s (will retry next run): %s",
-                ticker, trade_date, benchmark, e,
-            )
-            return None, None, None
+        raw, alpha, days, _sigma = fetch_returns(
+            ticker, trade_date, holding_days, benchmark,
+        )
+        return raw, alpha, days
 
     def _resolve_pending_entries(self, ticker: str) -> None:
         """Resolve pending log entries for ticker at the start of a new run.
 
-        Fetches returns for each same-ticker pending entry, generates reflections,
-        then writes all updates in a single atomic batch write to avoid redundant I/O.
-        Skips entries whose price data is not yet available (too recent or delisted).
-
-        Trade-off: only same-ticker entries are resolved per run.  Entries for
-        other tickers accumulate until that ticker is run again.
+        Delegates to :func:`outcome_resolution.resolve_all_pending` filtered to
+        this ticker — preserving the original same-ticker-on-propagate
+        behaviour. The nightly sweep (web/scheduler.py) calls the same function
+        with no ticker filter to resolve every matured entry.
         """
-        pending = [e for e in self.memory_log.get_pending_entries() if e["ticker"] == ticker]
-        if not pending:
-            return
-
-        benchmark = self._resolve_benchmark(ticker)
-        updates = []
-        for entry in pending:
-            raw, alpha, days = self._fetch_returns(
-                ticker, entry["date"], benchmark=benchmark,
-            )
-            if raw is None:
-                continue  # price not available yet — try again next run
-            reflection = self.reflector.reflect_on_final_decision(
-                final_decision=entry.get("decision", ""),
-                raw_return=raw,
-                alpha_return=alpha,
-                benchmark_name=benchmark,
-            )
-            updates.append({
-                "ticker": ticker,
-                "trade_date": entry["date"],
-                "raw_return": raw,
-                "alpha_return": alpha,
-                "holding_days": days,
-                "reflection": reflection,
-            })
-
-        if updates:
-            self.memory_log.batch_update_with_outcomes(updates)
+        summary = resolve_all_pending(
+            self.memory_log, self.reflector, self.config, ticker=ticker,
+        )
+        if summary["resolved"] or summary["errors"]:
+            logger.info("Resolved pending entries for %s: %s", ticker, summary)
 
     def propagate(self, company_name, trade_date, asset_type: str = "stock"):
         """Run the trading agents graph for a company on a specific date.

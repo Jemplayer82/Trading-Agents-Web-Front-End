@@ -272,6 +272,17 @@ def _run_scan(scan_id: int, trade_date: str, aggressiveness: int = 5, bias: str 
             final_state, signal = orch.run(ticker, trade_date)
             signal = (signal or "").upper()
             db.complete_analysis(analysis_id, final_state, signal)
+            # Log the decision for deferred outcome grading (nightly sweep in
+            # web/scheduler.py resolves it once the holding window matures).
+            # Best-effort, mirrors web/runner.py — never block the scan on it.
+            try:
+                orch.memory_log.store_decision(
+                    ticker=ticker,
+                    trade_date=trade_date,
+                    final_trade_decision=final_state.get("final_trade_decision", ""),
+                )
+            except Exception:
+                log.exception("[scan %s] memory-log store failed for %s", scan_id, ticker)
             if signal in counts:
                 counts[signal] += 1
             db.add_scan_ticker(scan_id, ticker, analysis_id, pos["quantity"], pos["market_value"], signal)
