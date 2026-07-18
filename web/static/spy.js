@@ -36,7 +36,8 @@ let editingAccountId = null;
 
 async function loadPaperAccounts() {
   try {
-    const data = await apiFetch("/api/paper-accounts");
+    // kind=equity: options paper accounts live on the Options tab (options.js).
+    const data = await apiFetch("/api/paper-accounts?kind=equity");
     paperAccounts = data.accounts || [];
   } catch (e) {
     paperAccounts = [];

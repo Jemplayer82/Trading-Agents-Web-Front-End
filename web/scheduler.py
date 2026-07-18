@@ -15,6 +15,9 @@ Schedule (all times SCHEDULER_TIMEZONE, default America/New_York):
     hourly               Schwab token health GET /api/auth/schwab/status
     Sat 00:00            S&P 500 scan        POST /api/spy-scan
     Mon-Fri 09:00-16:00  SPY price refresh   POST /api/spy-scans/latest/refresh-prices
+    Mon-Fri 07:30        options scan        POST /api/options-scan (all options accounts)
+    Mon-Fri 10:00-16:00  options mark        POST /api/options-positions/refresh (+16:45 close pass)
+    Mon-Fri 20:00        options settlement  POST /api/options-positions/settle
 
 Each job also has a --run-*-now CLI flag for one-shot manual runs (handy for
 testing inside the container without waiting for cron).
@@ -179,6 +182,46 @@ def job_spy_price_refresh() -> None:
         log.exception("[spy_price_refresh] failed: %s", exc)
 
 
+def job_options_scan() -> None:
+    """Kick off the daily options build for every options paper account.
+
+    The endpoint is idempotent per (account, day) and queues background
+    workers, so the 60s timeout covers request startup only. A 409 means no
+    options accounts exist yet — informational, not a failure.
+    """
+    log.info("[options_scan] firing daily options scan at %s", PORTFOLIO_URL)
+    try:
+        r = httpx.post(f"{PORTFOLIO_URL}/api/options-scan", timeout=60, headers=_internal_headers())
+        if r.status_code == 409:
+            log.info("[options_scan] skipped: %s", r.text[:200])
+        else:
+            log.info("[options_scan] response %s: %s", r.status_code, r.text[:400])
+    except Exception as exc:
+        log.exception("[options_scan] failed: %s", exc)
+
+
+def job_options_refresh() -> None:
+    """Settle due expiries + mark all open option positions to market."""
+    log.info("[options_refresh] refreshing option marks")
+    try:
+        r = httpx.post(f"{PORTFOLIO_URL}/api/options-positions/refresh", timeout=300,
+                       headers=_internal_headers())
+        log.info("[options_refresh] response %s: %s", r.status_code, r.text[:200])
+    except Exception as exc:
+        log.exception("[options_refresh] failed: %s", exc)
+
+
+def job_options_settle() -> None:
+    """Nightly expiry-settlement sweep (idempotent; daily bars final after close)."""
+    log.info("[options_settle] running expiry settlement sweep")
+    try:
+        r = httpx.post(f"{PORTFOLIO_URL}/api/options-positions/settle", timeout=300,
+                       headers=_internal_headers())
+        log.info("[options_settle] response %s: %s", r.status_code, r.text[:200])
+    except Exception as exc:
+        log.exception("[options_settle] failed: %s", exc)
+
+
 def job_outcome_sweep() -> None:
     """Resolve ALL matured pending memory-log decisions (every ticker).
 
@@ -255,8 +298,9 @@ def job_reap_stuck_runs() -> None:
                                      label=scan.get("trade_date") or "", error=scan_err)
         for scan in db.find_stuck_spy_scans(scan_cutoff):
             db.fail_spy_scan(scan["id"], scan_err)
-            log.warning("[reaper] failed stuck SPY scan %s", scan["id"])
-            alerts.notify_run_failed(kind="S&P 500 scan", run_id=scan["id"],
+            kind_label = "Options scan" if scan.get("kind") == "options" else "S&P 500 scan"
+            log.warning("[reaper] failed stuck %s %s", kind_label, scan["id"])
+            alerts.notify_run_failed(kind=kind_label, run_id=scan["id"],
                                      label=scan.get("trade_date") or "", error=scan_err)
         for a in db.find_stuck_analyses(analysis_cutoff):
             db.fail_analysis(a["id"], analysis_err)
@@ -274,6 +318,9 @@ def main() -> None:
     parser.add_argument("--run-spy-scan-now", action="store_true", help="Trigger SPY scan once and exit")
     parser.add_argument("--refresh-spy-prices", action="store_true", help="Refresh SPY prices once and exit")
     parser.add_argument("--run-sweep-now", action="store_true", help="Run outcome-resolution sweep once and exit")
+    parser.add_argument("--run-options-scan-now", action="store_true", help="Trigger daily options scan once and exit")
+    parser.add_argument("--refresh-options-now", action="store_true", help="Refresh option marks once and exit")
+    parser.add_argument("--settle-options-now", action="store_true", help="Run options expiry settlement once and exit")
     args = parser.parse_args()
 
     _apply_db_config()  # pull UI-saved SMTP/notifier/credentials onto env
@@ -292,6 +339,15 @@ def main() -> None:
         return
     if args.run_sweep_now:
         job_outcome_sweep()
+        return
+    if args.run_options_scan_now:
+        job_options_scan()
+        return
+    if args.refresh_options_now:
+        job_options_refresh()
+        return
+    if args.settle_options_now:
+        job_options_settle()
         return
 
     sched = BlockingScheduler(timezone=TIMEZONE)
@@ -342,6 +398,36 @@ def main() -> None:
         id="outcome_sweep",
         replace_existing=True,
     )
+    sched.add_job(
+        job_options_scan,
+        # 07:30 ET: quick scan + 25 deep dives run pre-market; the build's own
+        # market-open gate holds allocation until 09:35 so entries fill at
+        # live mids.
+        CronTrigger(day_of_week="mon-fri", hour=7, minute=30, timezone=TIMEZONE),
+        id="options_scan",
+        replace_existing=True,
+    )
+    sched.add_job(
+        job_options_refresh,
+        CronTrigger(day_of_week="mon-fri", hour="10-16", minute=0, timezone=TIMEZONE),
+        id="options_refresh",
+        replace_existing=True,
+    )
+    sched.add_job(
+        job_options_refresh,
+        # Extra pass just after the close so the day ends on settled marks.
+        CronTrigger(day_of_week="mon-fri", hour=16, minute=45, timezone=TIMEZONE),
+        id="options_refresh_close",
+        replace_existing=True,
+    )
+    sched.add_job(
+        job_options_settle,
+        # 20:00 ET: daily bars final; catches Friday expiries same evening and
+        # holiday-shifted Thursday expiries without a market calendar.
+        CronTrigger(day_of_week="mon-fri", hour=20, minute=0, timezone=TIMEZONE),
+        id="options_settle",
+        replace_existing=True,
+    )
     # Sweep once at startup too — a crash that happened while the scheduler was
     # down should be caught and alerted immediately, not up to 20 min later.
     job_reap_stuck_runs()
@@ -354,6 +440,9 @@ def main() -> None:
     log.info(" - reap_stuck_runs    every 20m (stall>%dm scans / %dm analyses)",
              STUCK_SCAN_STALL_MIN, STUCK_ANALYSIS_MIN)
     log.info(" - outcome_sweep      cron 23:30 Mon-Fri %s", TIMEZONE)
+    log.info(" - options_scan       cron 07:30 Mon-Fri %s", TIMEZONE)
+    log.info(" - options_refresh    cron hourly Mon-Fri 10:00-16:00 + 16:45 %s", TIMEZONE)
+    log.info(" - options_settle     cron 20:00 Mon-Fri %s", TIMEZONE)
     try:
         sched.start()
     except (KeyboardInterrupt, SystemExit):

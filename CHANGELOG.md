@@ -6,6 +6,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [Unreleased]
+
+### Added
+
+- **Daily options paper trading.** New "Options" dashboard tab paper-trades
+  long single-leg calls/puts on S&P 500 movers, $100k per options paper
+  account. Every weekday (07:30 ET): momentum/volume pre-screen ranks the
+  universe, the top 150 movers get the cheap quick-LLM scan, the top 25
+  directional names (BUY *and* SELL — puts need bearish candidates) get the
+  full multi-agent deep dive, then after the open (09:35 ET gate for live
+  quotes) a deterministic contract selector (~21 DTE, ~0.45 delta or near-ATM,
+  liquidity gates against zero-bid/wide/illiquid quotes) feeds an LLM
+  allocator that opens/holds/closes contracts under hard guardrails: force-
+  close at DTE ≤ 3 or premium −60% (stop-loss), per-position and total-premium
+  caps scaled by aggressiveness, max 15 open positions, and a deterministic
+  conviction-ranked fallback when the LLM fails.
+  - Positions and cash live in new normalized tables (`options_positions` +
+    append-only `options_cash_ledger`) with transactional, idempotent
+    open/close/settle helpers — real realized-P&L accounting, unlike the
+    equity snapshot portfolio.
+  - Expiry settlement models OCC auto-exercise (ITM ≥ $0.01 settles at
+    intrinsic vs the last close on/before expiry; catch-up safe after
+    downtime), swept nightly at 20:00 ET and opportunistically before every
+    build/refresh.
+  - Marks refresh hourly via Schwab bulk option quotes (new
+    `getOptionChain`/`getOptionExpirationChain` wrappers and an option-safe
+    `mark → mid → last` price extractor in
+    `tradingagents/dataflows/schwab_mcp.py` — still zero order tools, paper
+    only) with a yfinance chain fallback; missing quotes carry the last mark
+    floored at intrinsic, never zero.
+  - Options runs are `spy_scans` rows with a new `kind` column, so quick/deep
+    progress bars, cooperative cancel, and the stuck-run reaper work
+    unchanged; `paper_accounts.kind` separates equity and options accounts.
+  - Three new scheduler jobs (scan / marks / settlement) with `--run-*-now`
+    CLI flags, `/api/options*` routes + nginx location, and
+    `web/static/options.js`.
+  - Options runs participate in the scan-serialization queue: they enqueue
+    behind a running portfolio/S&P scan and vice versa, and the dequeuer
+    dispatches `kind='options'` rows to the options build (not the equity
+    pipeline).
+
+### Fixed
+
+- **Scan queue never dequeued.** `_dequeue_next_scan`'s `ORDER BY created_at`
+  referenced a column absent from its UNION's result set — SQLite raised
+  `OperationalError` on the first queued scan, so queued runs sat forever.
+  Also closed the create→start race by counting `pending` scans as busy
+  (back-to-back scan requests could previously both start).
+
 ## [1.2.1] — 2026-07-07
 
 ### Added

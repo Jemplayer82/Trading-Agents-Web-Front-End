@@ -65,13 +65,16 @@ class TestUpdatePortfolioScanHelper:
         # Should not raise
         db.update_portfolio_scan(scan_id)
 
-    def test_rejects_status(self, monkeypatch, tmp_path):
-        """status is NOT in the allow-list — must raise ValueError."""
+    def test_status_allowed_error_rejected(self, monkeypatch, tmp_path):
+        """status joined the allow-list for the scan queue; other non-progress
+        columns (e.g. error) must still raise ValueError."""
         monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
         db.init_db()
         scan_id = db.create_portfolio_scan("2026-01-01")
+        db.update_portfolio_scan(scan_id, status="queued")
+        assert db.get_portfolio_scan(scan_id)["status"] == "queued"
         with pytest.raises(ValueError, match="disallowed"):
-            db.update_portfolio_scan(scan_id, status="running")
+            db.update_portfolio_scan(scan_id, error="nope")
 
     def test_rejects_arbitrary_column(self, monkeypatch, tmp_path):
         """Unknown columns must raise ValueError (SQL injection guard)."""

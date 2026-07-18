@@ -194,3 +194,69 @@ def quote_price(quote_obj: dict[str, Any]) -> float | None:
         if isinstance(v, (int, float)) and v > 0:
             return float(v)
     return None
+
+
+# ── Option chains (market data only — still no order/trade tools) ────────────
+
+def get_option_chain(
+    symbol: str,
+    contract_type: str = "ALL",
+    strike_count: int = 20,
+    from_date: str | None = None,
+    to_date: str | None = None,
+    include_underlying_quote: bool = True,
+) -> dict[str, Any] | None:
+    """Option chain for one underlying via getOptionChain.
+
+    Returns the Schwab chain payload ({'callExpDateMap'/'putExpDateMap':
+    {"YYYY-MM-DD:DTE": {"<strike>": [contract]}}, 'underlyingPrice', ...}) or
+    None. contract_type: CALL | PUT | ALL. strike_count bounds strikes around
+    ATM; from_date/to_date (YYYY-MM-DD) bound expirations.
+    """
+    args: dict[str, Any] = {
+        "symbol": symbol,
+        "contractType": contract_type,
+        "strikeCount": strike_count,
+        "includeUnderlyingQuote": include_underlying_quote,
+    }
+    if from_date:
+        args["fromDate"] = from_date
+    if to_date:
+        args["toDate"] = to_date
+    data = call_tool("getOptionChain", args, timeout=60.0)
+    return data if isinstance(data, dict) else None
+
+
+def get_option_expirations(symbol: str) -> list[dict[str, Any]] | None:
+    """Expiration list for one underlying via getOptionExpirationChain."""
+    data = call_tool("getOptionExpirationChain", {"symbol": symbol})
+    if isinstance(data, dict):
+        exp = data.get("expirationList")
+        return exp if isinstance(exp, list) else None
+    if isinstance(data, list):
+        return data
+    return None
+
+
+def option_quote_price(quote_obj: dict[str, Any]) -> float | None:
+    """Best current price from one OPTION quote object.
+
+    Order differs from quote_price() deliberately: for illiquid contracts
+    lastPrice can be a days-old trade, so prefer mark, then a live mid, and
+    only then last/close.
+    """
+    if not isinstance(quote_obj, dict):
+        return None
+    q = quote_obj.get("quote") or {}
+    mark = q.get("mark")
+    if isinstance(mark, (int, float)) and mark > 0:
+        return float(mark)
+    bid, ask = q.get("bidPrice"), q.get("askPrice")
+    if (isinstance(bid, (int, float)) and isinstance(ask, (int, float))
+            and bid > 0 and ask >= bid):
+        return round((float(bid) + float(ask)) / 2, 4)
+    for key in ("lastPrice", "closePrice"):
+        v = q.get(key)
+        if isinstance(v, (int, float)) and v > 0:
+            return float(v)
+    return None

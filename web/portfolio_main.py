@@ -43,7 +43,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from tradingagents.constants import SIGNALS
 from tradingagents.dataflows import schwab_mcp
 
-from . import alerts, auth_app, brokerages, db, spy_allocator, spy_scanner
+from . import alerts, auth_app, brokerages, db, options_engine, spy_allocator, spy_scanner
 from . import credentials as creds
 from ._logging import configure_logging
 from .portfolio import aggregator
@@ -71,23 +71,36 @@ _SCAN_LOCK = threading.Lock()
 
 
 def _is_any_scan_running(conn) -> dict | None:  # type: ignore[type-arg]
-    """Return info dict if any scan is actively running, else None."""
+    """Return info dict if any scan is actively running, else None.
+
+    'pending' counts as busy: it's the window between a scan row being created
+    and its worker's first status write, and (for daily options runs) the
+    multi-account loop creates several rows in one request. Without it two
+    back-to-back requests would both see "not busy" and run concurrently. A
+    pending row whose worker never started is closed out by the stuck-run
+    reaper, so it can't wedge the queue.
+    """
     row = conn.execute(
         "SELECT 'portfolio' AS scan_type, id FROM portfolio_scans WHERE status = 'running'"
         " UNION SELECT 'spy', id FROM spy_scans"
-        " WHERE status IN ('running_quick','running_deep','running_alloc')"
+        " WHERE status IN ('pending','running_quick','running_deep','running_alloc')"
         " LIMIT 1"
     ).fetchone()
     return dict(row) if row else None
 
 
 def _dequeue_next_scan() -> None:
-    """If anything is queued, start the oldest one. Called at the end of every scan thread."""
+    """If anything is queued, start the oldest one. Called at the end of every
+    scan thread. spy_scans rows carry kind: 'options' rows run the daily
+    options build, everything else the equity S&P pipeline."""
     with db.connect() as conn:
+        # created_at must be IN the compound select — SQLite (correctly) refuses
+        # ORDER BY on a column absent from a UNION's result set.
         row = conn.execute(
-            "SELECT 'portfolio' AS scan_type, id, trade_date FROM portfolio_scans"
-            " WHERE status = 'queued'"
-            " UNION SELECT 'spy', id, trade_date FROM spy_scans WHERE status = 'queued'"
+            "SELECT 'portfolio' AS scan_type, id, trade_date, 'equity' AS kind, created_at"
+            " FROM portfolio_scans WHERE status = 'queued'"
+            " UNION SELECT 'spy', id, trade_date, kind, created_at"
+            " FROM spy_scans WHERE status = 'queued'"
             " ORDER BY created_at LIMIT 1"
         ).fetchone()
     if not row:
@@ -98,6 +111,11 @@ def _dequeue_next_scan() -> None:
         db.update_portfolio_scan(scan_id, status="running")
         threading.Thread(
             target=_run_scan_thread, args=(scan_id, trade_date), daemon=True
+        ).start()
+    elif row["kind"] == "options":
+        db.update_spy_scan(scan_id, status="running_quick")
+        threading.Thread(
+            target=_run_options_scan_thread, args=(scan_id, trade_date), daemon=True
         ).start()
     else:
         db.update_spy_scan(scan_id, status="running_quick")
@@ -405,8 +423,9 @@ def _run_scan(scan_id: int, trade_date: str, aggressiveness: int = 5, bias: str 
 # ---------- Paper trading accounts ----------
 
 @app.get("/api/paper-accounts")
-def list_paper_accounts() -> dict[str, Any]:
-    return {"accounts": db.list_paper_accounts()}
+def list_paper_accounts(kind: str | None = None) -> dict[str, Any]:
+    """kind filter: 'equity' (S&P tab) or 'options' (Options tab); omit for all."""
+    return {"accounts": db.list_paper_accounts(kind=kind)}
 
 
 @app.post("/api/paper-accounts")
@@ -414,12 +433,19 @@ def create_paper_account(body: dict[str, Any]) -> dict[str, Any]:
     name = (body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
+    kind = (body.get("kind") or "equity").strip().lower()
+    if kind not in ("equity", "options"):
+        raise HTTPException(status_code=400, detail="kind must be 'equity' or 'options'")
+    bias = (body.get("bias") or "neutral").strip().lower()
+    if bias not in ("bullish", "neutral", "bearish"):
+        raise HTTPException(status_code=400, detail="bias must be bullish, neutral, or bearish")
     try:
         account_id = db.create_paper_account(
             name=name,
             starting_capital=float(body.get("starting_capital") or 100_000),
             aggressiveness=int(body.get("aggressiveness") or 5),
-            bias=body.get("bias") or "neutral",
+            bias=bias,
+            kind=kind,
         )
     except Exception as exc:
         if "UNIQUE" in str(exc):
@@ -433,6 +459,8 @@ def create_paper_account(body: dict[str, Any]) -> dict[str, Any]:
 def update_paper_account(account_id: int, body: dict[str, Any]) -> dict[str, Any]:
     if not db.get_paper_account(account_id):
         raise HTTPException(status_code=404, detail="not found")
+    if body.get("bias") and body["bias"] not in ("bullish", "neutral", "bearish"):
+        raise HTTPException(status_code=400, detail="bias must be bullish, neutral, or bearish")
     db.update_paper_account(
         account_id=account_id,
         name=body.get("name"),
@@ -475,11 +503,13 @@ async def start_spy_scan(
     aggressiveness = int(body.get("aggressiveness") or (account or {}).get("aggressiveness") or 5)
     bias = body.get("bias") or (account or {}).get("bias") or "neutral"
 
-    # Idempotency: don't create a second spy scan for the same account+date unless the last failed/cancelled.
-    # NOTE: the idempotency check is intentionally per-account so different paper accounts can each
-    # have their own scan queued. Cross-account concurrency is prevented by the queue below.
+    # Idempotency: don't create a second spy scan for the same account+date unless
+    # the last failed/cancelled. Per-account so different paper accounts can each
+    # have their own scan queued (cross-account concurrency is prevented by the
+    # queue below); the kind filter keeps daily options runs from blocking the
+    # equity scan.
     with db.connect() as conn:
-        where = "trade_date = ? AND status NOT IN ('failed', 'cancelled')"
+        where = "trade_date = ? AND status NOT IN ('failed', 'cancelled') AND kind = 'equity'"
         params: list[Any] = [today]
         if account_id:
             where += " AND paper_account_id = ?"
@@ -521,8 +551,9 @@ def list_spy_scans(
     limit: int = 50,
     account_id: int | None = None,
     status: list[str] | None = Query(default=None),
+    kind: str = "equity",
 ) -> dict[str, Any]:
-    return {"scans": db.list_spy_scans(limit=limit, paper_account_id=account_id, statuses=status)}
+    return {"scans": db.list_spy_scans(limit=limit, paper_account_id=account_id, statuses=status, kind=kind)}
 
 
 @app.get("/api/spy-scans/{scan_id}")
@@ -541,8 +572,8 @@ def delete_spy_scan_endpoint(scan_id: int) -> dict[str, Any]:
 
 
 @app.delete("/api/spy-scans")
-def delete_all_spy_scans_endpoint() -> dict[str, Any]:
-    return {"status": "deleted", "count": db.delete_all_spy_scans()}
+def delete_all_spy_scans_endpoint(kind: str = "equity") -> dict[str, Any]:
+    return {"status": "deleted", "count": db.delete_all_spy_scans(kind=kind)}
 
 
 @app.post("/api/spy-scans/{scan_id}/cancel")
@@ -576,6 +607,160 @@ def refresh_spy_prices_latest() -> dict[str, Any]:
 @app.post("/api/spy-scans/{scan_id}/refresh-prices")
 def refresh_spy_prices(scan_id: int) -> dict[str, Any]:
     return spy_scanner.refresh_portfolio_prices(scan_id)
+
+
+# ---------- Daily options paper trading ----------
+# Options runs are spy_scans rows with kind='options' (same progress/cancel/
+# reaper machinery); positions + cash live in their own normalized tables.
+# nginx routes /api/options* here via its own location block.
+
+def _run_options_scan_thread(scan_id: int, trade_date: str) -> None:
+    """Thread entry: route ScanCancelled to 'cancelled', anything else to 'failed'."""
+    _refresh_creds_from_db()
+    try:
+        options_engine.run_options_build(scan_id, trade_date)
+    except spy_scanner.ScanCancelled:
+        log.info("Options scan %s cancelled by user", scan_id)
+        db.update_spy_scan(scan_id, status="cancelled")
+    except Exception as exc:
+        log.exception("Options scan %s crashed", scan_id)
+        db.fail_spy_scan(scan_id, str(exc))
+        alerts.notify_run_failed(
+            kind="Options scan", run_id=scan_id, label=trade_date, error=str(exc)
+        )
+    finally:
+        _dequeue_next_scan()
+
+
+def _start_options_scan_for_account(
+    account: dict[str, Any],
+    today: str,
+    background_tasks: BackgroundTasks,
+    aggressiveness: int | None = None,
+    bias: str | None = None,
+) -> dict[str, Any]:
+    """Idempotent per (account, day): an existing non-failed scan (queued ones
+    included) is returned instead of duplicated, mirroring the equity guard.
+    Joins the scan-serialization queue when anything else is running."""
+    account_id = int(account["id"])
+    with db.connect() as conn:
+        row = conn.execute(
+            "SELECT id, status FROM spy_scans WHERE trade_date = ? "
+            "AND status NOT IN ('failed', 'cancelled') AND kind = 'options' "
+            "AND paper_account_id = ? ORDER BY id DESC LIMIT 1",
+            (today, account_id),
+        ).fetchone()
+        busy = None if row else _is_any_scan_running(conn)
+    if row:
+        return {"scan_id": int(row["id"]), "account_id": account_id,
+                "status": row["status"], "new": False}
+    if busy:
+        scan_id = db.create_spy_scan(
+            today,
+            paper_account_id=account_id,
+            aggressiveness=int(aggressiveness or account.get("aggressiveness") or 5),
+            bias=bias or account.get("bias") or "neutral",
+            status="queued",
+            kind="options",
+        )
+        log.info("[queue] options scan %s queued behind %s scan #%s",
+                 scan_id, busy["scan_type"], busy["id"])
+        return {"scan_id": scan_id, "account_id": account_id,
+                "status": "queued", "new": True, "queued_behind": busy}
+    scan_id = db.create_spy_scan(
+        today,
+        paper_account_id=account_id,
+        aggressiveness=int(aggressiveness or account.get("aggressiveness") or 5),
+        bias=bias or account.get("bias") or "neutral",
+        kind="options",
+    )
+    background_tasks.add_task(_run_options_scan_thread, scan_id, today)
+    return {"scan_id": scan_id, "account_id": account_id, "status": "pending", "new": True}
+
+
+@app.post("/api/options-scan")
+async def start_options_scan(
+    body: dict[str, Any] | None = None,
+    background_tasks: BackgroundTasks = None,
+) -> dict[str, Any]:
+    """Trigger the daily options build. Body {account_id} runs one account;
+    omitted (the scheduler's form) runs every options paper account."""
+    body = body or {}
+    today = datetime.utcnow().date().isoformat()
+    account_id = body.get("account_id")
+    if account_id:
+        try:
+            account_id = int(account_id)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="account_id must be an integer") from None
+        account = db.get_paper_account(account_id)
+        if not account:
+            raise HTTPException(status_code=404, detail="paper account not found")
+        if account.get("kind") != "options":
+            raise HTTPException(status_code=400, detail="not an options paper account")
+        accounts = [account]
+    else:
+        accounts = db.list_paper_accounts(kind="options")
+        if not accounts:
+            raise HTTPException(
+                status_code=409,
+                detail="no options paper accounts exist — create one first",
+            )
+    results = [
+        _start_options_scan_for_account(
+            a, today, background_tasks,
+            aggressiveness=body.get("aggressiveness"), bias=body.get("bias"),
+        )
+        for a in accounts
+    ]
+    if len(results) == 1:
+        return {**results[0], "scans": results}
+    return {"scans": results}
+
+
+@app.get("/api/options-scans")
+def list_options_scans(limit: int = 50, account_id: int | None = None) -> dict[str, Any]:
+    return {"scans": db.list_spy_scans(limit=limit, paper_account_id=account_id, kind="options")}
+
+
+@app.get("/api/options-scans/{scan_id}")
+def get_options_scan(scan_id: int) -> dict[str, Any]:
+    scan = db.get_spy_scan(scan_id)
+    if not scan or scan.get("kind") != "options":
+        raise HTTPException(status_code=404, detail="not found")
+    scan["opened_positions"] = db.list_options_positions(open_scan_id=scan_id)
+    scan["closed_positions"] = db.list_options_positions(close_scan_id=scan_id)
+    if scan.get("paper_account_id"):
+        scan["account_summary"] = options_engine.account_summary(int(scan["paper_account_id"]))
+    return scan
+
+
+@app.get("/api/options-positions")
+def list_options_positions(
+    account_id: int | None = None, status: str | None = None
+) -> dict[str, Any]:
+    """status: open | closed | expired_itm | expired_worthless | settled (any
+    non-open) | omitted (all)."""
+    return {"positions": db.list_options_positions(account_id, status=status)}
+
+
+@app.post("/api/options-positions/refresh")
+def refresh_options_positions() -> dict[str, Any]:
+    """Settle due expiries + mark all open contracts to market (hourly cron + UI)."""
+    return options_engine.refresh_positions()
+
+
+@app.post("/api/options-positions/settle")
+def settle_options_positions() -> dict[str, Any]:
+    """Nightly expiry-settlement sweep (idempotent)."""
+    return options_engine.settle_expired()
+
+
+@app.get("/api/options-summary")
+def options_summary(account_id: int) -> dict[str, Any]:
+    if not db.get_paper_account(account_id):
+        raise HTTPException(status_code=404, detail="paper account not found")
+    return options_engine.account_summary(account_id)
 
 
 # ---------- Live Schwab account (read-only, via Schwab MCP) ----------

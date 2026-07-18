@@ -43,19 +43,19 @@ All share one Docker image and one data volume (`tradingagents_data`, mounted at
 | Service | Entry point | Role |
 |---------|-------------|------|
 | `tradingagents-api` | `uvicorn web.main:app` | Dashboard backend: single-ticker analysis (WebSocket-streamed), auth/login, settings/credentials, Schwab OAuth. |
-| `tradingagents-portfolio` | `uvicorn web.portfolio_main:app` | **Separate** app so long portfolio/S&P scans don't block the ad-hoc api. Runs each holding through the core, then the aggregator. |
-| `tradingagents-scheduler` | `python -m web.scheduler` | APScheduler daemon: nightly portfolio scan (22:00 ET Mon-Fri), 5am newsletter, hourly Schwab-token health check, and a 20-min stuck-run reaper (fails+alerts crashed runs). Calls the api/portfolio apps over the Docker network. |
+| `tradingagents-portfolio` | `uvicorn web.portfolio_main:app` | **Separate** app so long portfolio/S&P/options scans don't block the ad-hoc api. Runs each holding through the core, then the aggregator. Also hosts the daily options paper trader (`web/options_engine.py`). |
+| `tradingagents-scheduler` | `python -m web.scheduler` | APScheduler daemon: nightly portfolio scan (22:00 ET Mon-Fri), daily options scan (07:30 Mon-Fri) + hourly option marks + 20:00 expiry settlement, 5am newsletter, hourly Schwab-token health check, and a 20-min stuck-run reaper (fails+alerts crashed runs). Calls the api/portfolio apps over the Docker network. |
 | `tradingagents-web` | nginx image | Serves `web/static/` and reverse-proxies the `/api/*` routes (see route priority below). Holds no secrets. |
 | `switchboard` | `ghcr.io/jemplayer82/mcp-switchboard` | **Optional, internal-only** message bus for the live Agent Bus feed (see below). No host port; reachable only on the Docker network at `switchboard:3107`. Own SQLite volume (`switchboard_data`). |
 | `tradingagents` | (CLI) | The Typer TUI, attached to interactively. |
 
 **nginx route priority** (`web/nginx.conf`): these are nginx *prefix* locations, so the
 longest matching prefix wins (file order does not decide it). `/api/spy`,
-`/api/accounts`, and `/api/portfolio` go to the **portfolio** app; everything else under
-`/api/` (including the `/api/analyze` and `/api/bus` WebSockets) goes to the **api** app.
-The gotcha: a new `portfolio_main.py` route that doesn't start with one of those three
-prefixes falls through to the generic `/api/` block, hits the api app, and 404s in
-production — add a matching `location` line when adding such routes.
+`/api/accounts`, `/api/options`, and `/api/portfolio` go to the **portfolio** app;
+everything else under `/api/` (including the `/api/analyze` and `/api/bus` WebSockets)
+goes to the **api** app. The gotcha: a new `portfolio_main.py` route that doesn't start
+with one of those prefixes falls through to the generic `/api/` block, hits the api app,
+and 404s in production — add a matching `location` line when adding such routes.
 
 Inter-service HTTP calls (scheduler → api/portfolio) authenticate with an
 `X-Internal-Token` header (`INTERNAL_API_TOKEN`, compared with `hmac.compare_digest`);
@@ -155,7 +155,14 @@ factory and resolves credentials in the order: explicit config → DB credential
 ## Data & persistence
 
 - **SQLite** (`web/db.py`): users/sessions, saved preferences, provider credentials and
-  app settings, analyses, portfolio + S&P scans. Created `0600`.
+  app settings, analyses, portfolio + S&P scans, and the options paper trader's
+  normalized `options_positions` + append-only `options_cash_ledger` (cash =
+  `SUM(amount)`; positions and ledger rows mutate only through explicit
+  `BEGIN IMMEDIATE` transactions with a `status='open'` idempotency guard, because —
+  unlike the equity paper portfolio's weekly JSON snapshot — contracts open, close,
+  and expire on different days, so cash and realized P&L must be authoritative).
+  Options scan runs are `spy_scans` rows with `kind='options'`, reusing the equity
+  scan's progress/cancel/reaper machinery. Created `0600`.
 - **Secrets at rest** (`web/secret_box.py`): provider API keys and app settings are
   Fernet-encrypted (key = `TOKEN_ENCRYPTION_KEY`) when that key is set; encrypted values
   carry an `enc:v1:` prefix. Backward-compatible — keyless deployments store plaintext.
@@ -169,8 +176,9 @@ factory and resolves credentials in the order: explicit config → DB credential
 Vanilla JS, no build step — classic `<script>` tags loaded in order from `index.html`.
 `utils.js` loads first and holds the shared globals (`$`, `escapeHtml`, `fmtTs`,
 `renderMarkdown`, `apiFetch`, `progressBar`); the per-tab modules (`app.js`,
-`portfolio.js` — analysis + Schwab account tabs + option cards, `spy.js`, `bus.js` — the
-Agent Bus panel, `credentials.js`, `auth.js`) build on them. Because these are non-module
+`portfolio.js` — analysis + Schwab account tabs + option cards, `spy.js`, `options.js`
+— the daily options paper trader tab, `bus.js` — the Agent Bus panel, `credentials.js`,
+`auth.js`) build on them. Because these are non-module
 scripts sharing one global scope, **load order matters and names must not be redeclared**
 (see the header comment in `utils.js`).
 

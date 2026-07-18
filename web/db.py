@@ -149,6 +149,7 @@ CREATE TABLE IF NOT EXISTS spy_scans (
     created_at TEXT NOT NULL,
     trade_date TEXT NOT NULL,
     status TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'equity',
     quick_count INTEGER DEFAULT 0,
     quick_total INTEGER DEFAULT 0,
     deep_count INTEGER DEFAULT 0,
@@ -215,15 +216,78 @@ CREATE TABLE IF NOT EXISTS ticker_info (
     fetched_at TEXT NOT NULL
 );
 
--- Named paper trading accounts for S&P 500 scans.
+-- Named paper trading accounts for S&P 500 scans (kind 'equity') and the
+-- daily options paper trader (kind 'options').
 CREATE TABLE IF NOT EXISTS paper_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
     starting_capital REAL NOT NULL DEFAULT 100000,
     aggressiveness INTEGER NOT NULL DEFAULT 5,
     bias TEXT NOT NULL DEFAULT 'neutral',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'equity'
 );
+
+-- One row per paper option contract position over its whole life. Unlike the
+-- equity paper portfolio (a weekly JSON snapshot in spy_scans.portfolio_json),
+-- option positions open/close/expire on different days, so cash and realized
+-- P&L must be authoritative — normalized rows + the append-only cash ledger
+-- below, mutated only through the transactional helpers in this module.
+CREATE TABLE IF NOT EXISTS options_positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    paper_account_id INTEGER NOT NULL,
+    open_scan_id INTEGER NOT NULL,
+    close_scan_id INTEGER,
+    occ_symbol TEXT NOT NULL,
+    underlying TEXT NOT NULL,
+    put_call TEXT NOT NULL,
+    strike REAL NOT NULL,
+    expiration_date TEXT NOT NULL,
+    contracts INTEGER NOT NULL,
+    entry_premium REAL NOT NULL,
+    cost_basis REAL NOT NULL,
+    entry_underlying REAL,
+    entry_delta REAL,
+    entry_bid REAL,
+    entry_ask REAL,
+    entry_oi INTEGER,
+    signal TEXT,
+    conviction INTEGER,
+    rationale TEXT,
+    status TEXT NOT NULL DEFAULT 'open',
+    opened_at TEXT NOT NULL,
+    closed_at TEXT,
+    exit_premium REAL,
+    exit_value REAL,
+    realized_pnl REAL,
+    exit_reason TEXT,
+    settlement_close REAL,
+    current_premium REAL,
+    current_value REAL,
+    last_marked_at TEXT,
+    price_source TEXT,
+    stale_count INTEGER DEFAULT 0,
+    data_source TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_options_positions_acct
+    ON options_positions (paper_account_id, status);
+
+-- Append-only cash ledger for options paper accounts; cash = SUM(amount).
+-- kind: deposit | open | close | expire. Opens are negative.
+CREATE TABLE IF NOT EXISTS options_cash_ledger (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    paper_account_id INTEGER NOT NULL,
+    ts TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    amount REAL NOT NULL,
+    scan_id INTEGER,
+    position_id INTEGER,
+    note TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_options_ledger_acct
+    ON options_cash_ledger (paper_account_id, id);
 """
 
 
@@ -246,6 +310,10 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     ("spy_scans", "paper_account_id", "INTEGER"),
     ("spy_scans", "aggressiveness", "INTEGER DEFAULT 5"),
     ("spy_scans", "bias", "TEXT DEFAULT 'neutral'"),
+    # Daily options paper trading: options runs reuse spy_scans (same progress
+    # counters / cancel / reaper machinery), discriminated by kind.
+    ("spy_scans", "kind", "TEXT NOT NULL DEFAULT 'equity'"),
+    ("paper_accounts", "kind", "TEXT NOT NULL DEFAULT 'equity'"),
 ]
 
 
@@ -832,13 +900,14 @@ def create_spy_scan(
     aggressiveness: int = 5,
     bias: str = "neutral",
     status: str = "pending",
+    kind: str = "equity",
 ) -> int:
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO spy_scans (created_at, trade_date, status, cancel_requested, paper_account_id, aggressiveness, bias) "
-            "VALUES (?, ?, ?, 0, ?, ?, ?)",
+            "INSERT INTO spy_scans (created_at, trade_date, status, cancel_requested, paper_account_id, aggressiveness, bias, kind) "
+            "VALUES (?, ?, ?, 0, ?, ?, ?, ?)",
             (datetime.utcnow().isoformat(timespec="seconds") + "Z", trade_date,
-             status, paper_account_id, aggressiveness, bias),
+             status, paper_account_id, aggressiveness, bias, kind),
         )
         return int(cur.lastrowid)
 
@@ -923,10 +992,11 @@ def complete_spy_scan(
 def get_latest_completed_spy_scan(
     exclude_id: int | None = None,
     paper_account_id: int | None = None,
+    kind: str = "equity",
 ) -> dict[str, Any] | None:
     """Return the most recent completed scan, optionally filtered by account or excluding one ID."""
-    conditions = ["status = 'completed'"]
-    params: list[Any] = []
+    conditions = ["status = 'completed'", "kind = ?"]
+    params: list[Any] = [kind]
     if exclude_id is not None:
         conditions.append("id != ?")
         params.append(exclude_id)
@@ -969,9 +1039,10 @@ def find_stuck_portfolio_scans(stall_before_iso: str) -> list[dict[str, Any]]:
 
 
 def find_stuck_spy_scans(stall_before_iso: str) -> list[dict[str, Any]]:
+    """Covers both equity and options runs (kind included for reaper labels)."""
     with connect() as conn:
         rows = conn.execute(
-            "SELECT id, trade_date FROM spy_scans "
+            "SELECT id, trade_date, kind FROM spy_scans "
             "WHERE status NOT IN ('completed', 'cancelled', 'failed', 'queued') "
             "AND COALESCE(updated_at, created_at) < ?",
             (stall_before_iso,),
@@ -1043,14 +1114,19 @@ def list_spy_scans(
     limit: int = 50,
     paper_account_id: int | None = None,
     statuses: list[str] | None = None,
+    kind: str = "equity",
 ) -> list[dict[str, Any]]:
+    """List scans of one kind ('equity' default keeps the S&P tab unchanged;
+    pass 'options' for the daily options runs), optionally filtered by status
+    (the Queue/History sidebar tabs)."""
     cols = (
         "id, created_at, trade_date, status, quick_count, quick_total,"
         " deep_count, deep_total, current_value, last_price_check,"
-        " paper_account_id, aggressiveness, bias, previous_scan_id, cancel_requested"
+        " paper_account_id, aggressiveness, bias, previous_scan_id,"
+        " cancel_requested, kind"
     )
-    conditions: list[str] = []
-    params: list[Any] = []
+    conditions: list[str] = ["kind = ?"]
+    params: list[Any] = [kind]
     if paper_account_id is not None:
         conditions.append("paper_account_id = ?")
         params.append(paper_account_id)
@@ -1058,7 +1134,7 @@ def list_spy_scans(
         placeholders = ",".join("?" * len(statuses))
         conditions.append(f"status IN ({placeholders})")
         params.extend(statuses)
-    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    where = "WHERE " + " AND ".join(conditions)
     params.append(limit)
     with connect() as conn:
         rows = conn.execute(
@@ -1096,10 +1172,11 @@ def get_spy_quick_result(scan_id: int, ticker: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-def latest_spy_scan() -> dict[str, Any] | None:
+def latest_spy_scan(kind: str = "equity") -> dict[str, Any] | None:
     with connect() as conn:
         row = conn.execute(
-            "SELECT id FROM spy_scans ORDER BY id DESC LIMIT 1"
+            "SELECT id FROM spy_scans WHERE kind = ? ORDER BY id DESC LIMIT 1",
+            (kind,),
         ).fetchone()
     if not row:
         return None
@@ -1117,14 +1194,16 @@ def delete_spy_scan(scan_id: int) -> bool:
         return cur.rowcount > 0
 
 
-def delete_all_spy_scans() -> int:
-    """Delete all scans and their quick results (FK ON DELETE CASCADE).
+def delete_all_spy_scans(kind: str = "equity") -> int:
+    """Delete all scans of one kind and their quick results (FK ON DELETE
+    CASCADE). Scoped by kind so the S&P tab's "clear" can't nuke options
+    history (and vice versa).
 
     Deep-dive `analyses` rows the scans created are intentionally kept — they
     remain accessible from the Run Analysis history.
     """
     with connect() as conn:
-        cur = conn.execute("DELETE FROM spy_scans")
+        cur = conn.execute("DELETE FROM spy_scans WHERE kind = ?", (kind,))
         return cur.rowcount
 
 
@@ -1214,30 +1293,38 @@ def create_paper_account(
     starting_capital: float = 100_000.0,
     aggressiveness: int = 5,
     bias: str = "neutral",
+    kind: str = "equity",
 ) -> int:
     """Create a named paper account. Raises sqlite3.IntegrityError if name exists."""
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO paper_accounts (name, starting_capital, aggressiveness, bias, created_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO paper_accounts (name, starting_capital, aggressiveness, bias, created_at, kind) VALUES (?, ?, ?, ?, ?, ?)",
             (name, starting_capital, aggressiveness, bias,
-             datetime.utcnow().isoformat(timespec="seconds") + "Z"),
+             datetime.utcnow().isoformat(timespec="seconds") + "Z", kind),
         )
         return int(cur.lastrowid)
 
 
-def list_paper_accounts() -> list[dict[str, Any]]:
+def list_paper_accounts(kind: str | None = None) -> list[dict[str, Any]]:
     with connect() as conn:
-        rows = conn.execute(
-            "SELECT id, name, starting_capital, aggressiveness, bias, created_at "
-            "FROM paper_accounts ORDER BY id"
-        ).fetchall()
+        if kind is not None:
+            rows = conn.execute(
+                "SELECT id, name, starting_capital, aggressiveness, bias, created_at, kind "
+                "FROM paper_accounts WHERE kind = ? ORDER BY id",
+                (kind,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, name, starting_capital, aggressiveness, bias, created_at, kind "
+                "FROM paper_accounts ORDER BY id"
+            ).fetchall()
     return [dict(r) for r in rows]
 
 
 def get_paper_account(account_id: int) -> dict[str, Any] | None:
     with connect() as conn:
         row = conn.execute(
-            "SELECT id, name, starting_capital, aggressiveness, bias, created_at "
+            "SELECT id, name, starting_capital, aggressiveness, bias, created_at, kind "
             "FROM paper_accounts WHERE id = ?",
             (account_id,),
         ).fetchone()
@@ -1274,6 +1361,285 @@ def delete_paper_account(account_id: int) -> bool:
     with connect() as conn:
         cur = conn.execute("DELETE FROM paper_accounts WHERE id = ?", (account_id,))
     return cur.rowcount > 0
+
+
+# ---------- options paper trading (positions + cash ledger) ----------
+# Cash and realized P&L are authoritative here (unlike the equity paper
+# portfolio's derived-from-snapshot math): every position open/close/settle
+# writes the position row and its ledger entry inside ONE explicit transaction
+# (connect() is autocommit-per-statement, so BEGIN IMMEDIATE is required).
+# Close/settle are guarded by `status = 'open'` — re-running them is a no-op,
+# which is the double-settlement protection.
+
+OPTION_POSITION_OPEN = "open"
+OPTION_POSITION_CLOSED = "closed"
+OPTION_POSITION_EXPIRED_ITM = "expired_itm"
+OPTION_POSITION_EXPIRED_WORTHLESS = "expired_worthless"
+
+
+def append_options_cash(
+    paper_account_id: int,
+    kind: str,
+    amount: float,
+    scan_id: int | None = None,
+    position_id: int | None = None,
+    note: str | None = None,
+) -> int:
+    """Append one ledger row (used directly only for 'deposit'; open/close/expire
+    rows are written by the transactional position helpers below)."""
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO options_cash_ledger (paper_account_id, ts, kind, amount, scan_id, position_id, note) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (paper_account_id, datetime.utcnow().isoformat(timespec="seconds") + "Z",
+             kind, round(float(amount), 2), scan_id, position_id, note),
+        )
+        return int(cur.lastrowid)
+
+
+def options_cash_balance(paper_account_id: int) -> float:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) AS cash FROM options_cash_ledger WHERE paper_account_id = ?",
+            (paper_account_id,),
+        ).fetchone()
+    return round(float(row["cash"]), 2) if row else 0.0
+
+
+def has_options_deposit(paper_account_id: int) -> bool:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM options_cash_ledger WHERE paper_account_id = ? AND kind = 'deposit' LIMIT 1",
+            (paper_account_id,),
+        ).fetchone()
+    return row is not None
+
+
+def options_realized_pnl(paper_account_id: int) -> float:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(realized_pnl), 0) AS pnl FROM options_positions "
+            "WHERE paper_account_id = ? AND status != 'open'",
+            (paper_account_id,),
+        ).fetchone()
+    return round(float(row["pnl"]), 2) if row else 0.0
+
+
+def open_options_position(paper_account_id: int, scan_id: int, pos: dict[str, Any]) -> int:
+    """Open a position and debit its premium from the ledger atomically.
+
+    pos requires: occ_symbol, underlying, put_call, strike, expiration_date,
+    contracts, entry_premium; optional: entry_underlying, entry_delta,
+    entry_bid, entry_ask, entry_oi, signal, conviction, rationale, data_source.
+    cost_basis is computed here (premium x 100 x contracts).
+    """
+    contracts = int(pos["contracts"])
+    entry_premium = float(pos["entry_premium"])
+    cost_basis = round(entry_premium * 100 * contracts, 2)
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = conn.execute(
+                """INSERT INTO options_positions (
+                       paper_account_id, open_scan_id, occ_symbol, underlying, put_call,
+                       strike, expiration_date, contracts, entry_premium, cost_basis,
+                       entry_underlying, entry_delta, entry_bid, entry_ask, entry_oi,
+                       signal, conviction, rationale, status, opened_at,
+                       current_premium, current_value, last_marked_at, price_source, data_source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)""",
+                (paper_account_id, scan_id, pos["occ_symbol"], pos["underlying"], pos["put_call"],
+                 float(pos["strike"]), pos["expiration_date"], contracts, entry_premium, cost_basis,
+                 pos.get("entry_underlying"), pos.get("entry_delta"), pos.get("entry_bid"),
+                 pos.get("entry_ask"), pos.get("entry_oi"),
+                 pos.get("signal"), pos.get("conviction"), pos.get("rationale"), now,
+                 entry_premium, cost_basis, now, pos.get("data_source"), pos.get("data_source")),
+            )
+            position_id = int(cur.lastrowid)
+            conn.execute(
+                "INSERT INTO options_cash_ledger (paper_account_id, ts, kind, amount, scan_id, position_id, note) "
+                "VALUES (?, ?, 'open', ?, ?, ?, ?)",
+                (paper_account_id, now, -cost_basis, scan_id, position_id,
+                 f"open {pos['occ_symbol']} x{contracts}"),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    return position_id
+
+
+def close_options_position(
+    position_id: int,
+    exit_premium: float,
+    exit_reason: str,
+    close_scan_id: int | None = None,
+) -> bool:
+    """Close an open position at exit_premium and credit proceeds atomically.
+
+    Returns False (writing nothing) if the position is not open — safe to call
+    from concurrent paths.
+    """
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    exit_premium = round(float(exit_premium), 4)
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT paper_account_id, contracts, cost_basis, occ_symbol FROM options_positions "
+                "WHERE id = ? AND status = 'open'",
+                (position_id,),
+            ).fetchone()
+            if not row:
+                conn.execute("ROLLBACK")
+                return False
+            exit_value = round(exit_premium * 100 * int(row["contracts"]), 2)
+            realized = round(exit_value - float(row["cost_basis"]), 2)
+            conn.execute(
+                """UPDATE options_positions
+                   SET status = 'closed', closed_at = ?, exit_premium = ?, exit_value = ?,
+                       realized_pnl = ?, exit_reason = ?, close_scan_id = ?,
+                       current_premium = ?, current_value = ?, last_marked_at = ?
+                   WHERE id = ? AND status = 'open'""",
+                (now, exit_premium, exit_value, realized, exit_reason, close_scan_id,
+                 exit_premium, exit_value, now, position_id),
+            )
+            conn.execute(
+                "INSERT INTO options_cash_ledger (paper_account_id, ts, kind, amount, scan_id, position_id, note) "
+                "VALUES (?, ?, 'close', ?, ?, ?, ?)",
+                (int(row["paper_account_id"]), now, exit_value, close_scan_id, position_id,
+                 f"close {row['occ_symbol']} ({exit_reason})"),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    return True
+
+
+def settle_options_position(
+    position_id: int,
+    intrinsic: float,
+    settlement_close: float,
+) -> bool:
+    """Settle an expired position at intrinsic value (0 => expired worthless).
+
+    Models OCC auto-exercise: ITM by >= $0.01 settles at intrinsic computed from
+    the underlying's close; anything less expires worthless. Idempotent via the
+    status = 'open' guard.
+    """
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    intrinsic = max(0.0, round(float(intrinsic), 4))
+    itm = intrinsic >= 0.01
+    status = OPTION_POSITION_EXPIRED_ITM if itm else OPTION_POSITION_EXPIRED_WORTHLESS
+    with connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT paper_account_id, contracts, cost_basis, occ_symbol FROM options_positions "
+                "WHERE id = ? AND status = 'open'",
+                (position_id,),
+            ).fetchone()
+            if not row:
+                conn.execute("ROLLBACK")
+                return False
+            exit_premium = intrinsic if itm else 0.0
+            exit_value = round(exit_premium * 100 * int(row["contracts"]), 2)
+            realized = round(exit_value - float(row["cost_basis"]), 2)
+            conn.execute(
+                """UPDATE options_positions
+                   SET status = ?, closed_at = ?, exit_premium = ?, exit_value = ?,
+                       realized_pnl = ?, exit_reason = 'expiry', settlement_close = ?,
+                       current_premium = ?, current_value = ?, last_marked_at = ?
+                   WHERE id = ? AND status = 'open'""",
+                (status, now, exit_premium, exit_value, realized, float(settlement_close),
+                 exit_premium, exit_value, now, position_id),
+            )
+            # Zero-amount rows for worthless expiries are kept as audit records.
+            conn.execute(
+                "INSERT INTO options_cash_ledger (paper_account_id, ts, kind, amount, scan_id, position_id, note) "
+                "VALUES (?, ?, 'expire', ?, NULL, ?, ?)",
+                (int(row["paper_account_id"]), now, exit_value, position_id,
+                 f"expire {row['occ_symbol']} ({status})"),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    return True
+
+
+def list_options_positions(
+    paper_account_id: int | None = None,
+    status: str | None = None,
+    open_scan_id: int | None = None,
+    close_scan_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """status filter: 'open' | 'closed' | 'expired_itm' | 'expired_worthless'
+    | 'settled' (any non-open) | None (all)."""
+    conditions: list[str] = []
+    params: list[Any] = []
+    if paper_account_id is not None:
+        conditions.append("paper_account_id = ?")
+        params.append(paper_account_id)
+    if status == "settled":
+        conditions.append("status != 'open'")
+    elif status is not None:
+        conditions.append("status = ?")
+        params.append(status)
+    if open_scan_id is not None:
+        conditions.append("open_scan_id = ?")
+        params.append(open_scan_id)
+    if close_scan_id is not None:
+        conditions.append("close_scan_id = ?")
+        params.append(close_scan_id)
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM options_positions" + where + " ORDER BY id DESC",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_options_position(position_id: int) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM options_positions WHERE id = ?", (position_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def mark_options_position(
+    position_id: int,
+    premium: float,
+    value: float,
+    price_source: str,
+    reset_stale: bool = True,
+) -> None:
+    """Record a mark-to-market price on an open position (read-only w.r.t. cash)."""
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    stale_sql = ", stale_count = 0" if reset_stale else ", stale_count = stale_count + 1"
+    with connect() as conn:
+        conn.execute(
+            "UPDATE options_positions SET current_premium = ?, current_value = ?, "
+            "last_marked_at = ?, price_source = ?" + stale_sql + " WHERE id = ? AND status = 'open'",
+            (round(float(premium), 4), round(float(value), 2), now, price_source, position_id),
+        )
+
+
+def bump_options_position_stale(position_id: int) -> int:
+    """Increment the stale counter (quote unavailable); returns the new count."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE options_positions SET stale_count = COALESCE(stale_count, 0) + 1 "
+            "WHERE id = ? AND status = 'open'",
+            (position_id,),
+        )
+        row = conn.execute(
+            "SELECT stale_count FROM options_positions WHERE id = ?", (position_id,)
+        ).fetchone()
+    return int(row["stale_count"]) if row and row["stale_count"] is not None else 0
 
 
 def _serialize(obj: Any) -> Any:
