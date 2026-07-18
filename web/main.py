@@ -37,6 +37,7 @@ import secrets
 import sqlite3
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -707,11 +708,18 @@ async def analyze(ws: WebSocket) -> None:
     """Run one single-ticker analysis, streaming progress frames to the client.
 
     Protocol: the client sends a single JSON params object ({"ticker",
-    "trade_date", "provider", ...}); the server replies {"type": "started",
+    "provider", ...}); the server replies {"type": "started",
     "analysis_id": N}, then forwards every frame the runner emits
     (web/runner.py) until its end-of-stream sentinel. The runner persists
     results to the analyses table as it goes, so a dropped socket loses the
     live view but not the analysis — it's still in history when done.
+
+    ``trade_date`` is always today (UTC), computed server-side below and
+    overwritten unconditionally — not accepted from the client. Analyzing a
+    past date gave inconsistent, partly-broken results here (some tools
+    filter correctly, some ignore the date, news breaks for non-recent
+    dates) and nothing on this path uses it for dedupe or checkpoint/resume,
+    so there was never a real use for a client-chosen value.
     """
     # The http auth middleware doesn't see websocket scope, so gate here:
     # require a valid session cookie (or the internal-token header). The token
@@ -732,14 +740,21 @@ async def analyze(ws: WebSocket) -> None:
     except WebSocketDisconnect:
         return
 
-    required = ("ticker", "trade_date")
+    # Always analyze as of "today" server-side — same pattern as
+    # portfolio_main.py's start_scan/start_spy_scan. Overwritten
+    # unconditionally so this holds for any caller, not just the browser
+    # form (which no longer sends trade_date at all).
+    params["trade_date"] = datetime.utcnow().date().isoformat()
+
+    required = ("ticker",)
     if any(not params.get(k) for k in required):
-        await ws.send_json({"type": "error", "message": "missing ticker or trade_date"})
+        await ws.send_json({"type": "error", "message": "missing ticker"})
         await ws.close()
         return
 
     try:
-        db.save_preferences(params)
+        prefs_payload = {k: v for k, v in params.items() if k != "trade_date"}
+        db.save_preferences(prefs_payload)
     except Exception:
         pass
 

@@ -187,15 +187,6 @@ a { color: var(--accent-cyan); }
   border-color: var(--accent-cyan);
 }
 
-/* Make the date input's native calendar icon clearly visible + clickable on the
-   dark field (color-scheme:dark already light-tints it; this brightens further). */
-.form-grid input[type="date"]::-webkit-calendar-picker-indicator {
-  cursor: pointer;
-  opacity: 0.85;
-  filter: invert(0.9);
-}
-.form-grid input[type="date"]::-webkit-calendar-picker-indicator:hover { opacity: 1; }
-
 /* ----- Aggressiveness slider ----- */
 .slider-row { display: flex; align-items: center; gap: 8px; }
 .slider-row input[type="range"] {

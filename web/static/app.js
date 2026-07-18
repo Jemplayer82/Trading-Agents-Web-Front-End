@@ -89,14 +89,6 @@ document.addEventListener("DOMContentLoaded", async () => {
       btn.classList.add("active");
     });
   });
-  // Open the native calendar on a click/focus anywhere in the date field, not
-  // just on its icon. showPicker() is recent — guard it for older browsers.
-  const fdate = $("f-date");
-  if (fdate) {
-    const openPicker = () => { try { fdate.showPicker?.(); } catch (e) { /* not supported / not allowed */ } };
-    fdate.addEventListener("focus", openPicker);
-    fdate.addEventListener("click", openPicker);
-  }
   setupTickerSearch();
   setupScanActivity();
   const rt = $("reasoning-toggle");
@@ -273,9 +265,6 @@ function restoreModelPref(selectId, customInputId, saved) {
 }
 
 async function loadPreferences() {
-  const today = new Date().toISOString().slice(0, 10);
-  $("f-date").value = today;
-
   let prefs = {};
   try {
     const resp = await fetch("/api/preferences");
@@ -283,7 +272,6 @@ async function loadPreferences() {
   } catch (e) {}
 
   $("f-ticker").value = prefs.ticker || "";
-  $("f-date").value = prefs.trade_date || today;
   $("f-language").value = prefs.language || "English";
   $("f-quick-provider").value = prefs.quick_provider || prefs.provider || "ollama";
   onQuickProviderChange();
@@ -603,7 +591,6 @@ function collectParams() {
   const activeBiasBtn = document.querySelector(".bias-btn.active");
   return {
     ticker: $("f-ticker").value.trim(),
-    trade_date: $("f-date").value,
     language: $("f-language").value,
     quick_provider: $("f-quick-provider").value,
     deep_provider: $("f-deep-provider").value,
@@ -623,7 +610,7 @@ function startRun() {
   if (!params.analysts.length) { alert("Select at least one analyst."); return; }
 
   currentReports = {};
-  lastRunMeta = { ticker: params.ticker, trade_date: params.trade_date };
+  lastRunMeta = { ticker: params.ticker, trade_date: new Date().toISOString().slice(0, 10) };
   $("progress").innerHTML = "";
   resetReasoning();
   hideChartAndQa();
