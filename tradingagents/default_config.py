@@ -17,6 +17,11 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAX_RISK_ROUNDS":      "max_risk_discuss_rounds",
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
+    "TRADINGAGENTS_REFLECTION_HOLDING_DAYS":       "reflection_holding_days",
+    "TRADINGAGENTS_NOISE_ALPHA_THRESHOLD":         "noise_alpha_threshold",
+    "TRADINGAGENTS_SWEEP_MAX_REFLECTIONS_PER_RUN": "sweep_max_reflections_per_run",
+    "TRADINGAGENTS_SWEEP_CENSOR_AFTER_DAYS":       "sweep_censor_after_days",
+    "TRADINGAGENTS_MEMORY_CONTEXT_MAX_AGE_DAYS":   "memory_context_max_age_days",
 }
 
 
@@ -49,7 +54,33 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Optional cap on the number of resolved memory log entries. When set,
     # the oldest resolved entries are pruned once this limit is exceeded.
     # Pending entries are never pruned. None disables rotation entirely.
-    "memory_log_max_entries": None,
+    # Capped by default so a nightly sweep + portfolio-scan decision volume
+    # can't grow the log (and the injected context source) without bound.
+    "memory_log_max_entries": 300,
+    # --- Outcome resolution / reflection (nightly sweep) ---
+    # Forward-return window (trading days) a decision is graded over. The
+    # maturity guard refuses to resolve an entry before this window has data.
+    "reflection_holding_days": 5,
+    # Fixed fallback noise band for |alpha|: below it, outcomes get a canned
+    # NOISE reflection (no LLM call) and don't count as directional hits or
+    # misses. Used when there isn't enough history for the vol-scaled band.
+    "noise_alpha_threshold": 0.02,
+    # Volatility-scaled noise band: N = clamp(sigma_5d * frac, min, max).
+    # A fixed band mislabels noise as conviction on high-vol names (crypto).
+    "noise_band_sigma_frac": 0.5,
+    "noise_band_min": 0.015,
+    "noise_band_max": 0.06,
+    # LLM-reflection budget per sweep run — a large backlog drains over
+    # several nights instead of one expensive burst. Canned NOISE/CENSORED
+    # reflections are free and never capped.
+    "sweep_max_reflections_per_run": 50,
+    # Entries older than this (calendar days) whose price series ended early
+    # resolve as CENSORED (probable delisting/halt) instead of pending forever
+    # — otherwise the worst blowups silently vanish from the record.
+    "sweep_censor_after_days": 30,
+    # Resolved entries older than this are excluded from injected context so
+    # a dead regime's lessons expire. None disables the cutoff.
+    "memory_context_max_age_days": 180,
     # LLM settings
     "llm_provider": "openai",
     "deep_think_llm": "gpt-5.4",

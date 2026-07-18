@@ -54,9 +54,14 @@ def _resolve_entry(log, ticker, date, decision, reflection="Good call."):
     log.update_with_outcome(ticker, date, 0.05, 0.02, 5, reflection)
 
 
-def _price_df(prices):
-    """Minimal DataFrame matching yfinance .history() output shape."""
-    return pd.DataFrame({"Close": prices})
+def _price_df(prices, start="2026-01-05"):
+    """Minimal DataFrame matching yfinance .history() output shape.
+
+    Uses a business-day DatetimeIndex because outcome_resolution normalizes
+    and joins on calendar dates (date-aligned alpha).
+    """
+    idx = pd.bdate_range(start=start, periods=len(prices))
+    return pd.DataFrame({"Close": prices}, index=idx)
 
 
 def _make_pm_state(past_context=""):
@@ -171,10 +176,12 @@ class TestTradingMemoryLogCore:
         log.store_decision("AAPL", "2026-01-11", DECISION_OVERWEIGHT)
         assert log.load_entries()[0]["rating"] == "Overweight"
 
-    def test_rating_fallback_hold(self, tmp_path):
+    def test_rating_fallback_unrated(self, tmp_path):
+        """Parse failure stores 'Unrated', not 'Hold' — a failed parse dumped
+        into the Hold bucket would pollute Hold calibration stats."""
         log = make_log(tmp_path)
         log.store_decision("MSFT", "2026-01-12", DECISION_NO_RATING)
-        assert log.load_entries()[0]["rating"] == "Hold"
+        assert log.load_entries()[0]["rating"] == "Unrated"
 
     def test_rating_priority_over_prose(self, tmp_path):
         """'Rating: X' label wins even when an opposing rating word appears earlier in prose."""
@@ -521,8 +528,13 @@ class TestDeferredReflection:
             raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "XXXXXFAKE", "2026-01-10")
         assert raw is None and alpha is None and days is None
 
-    def test_fetch_returns_spy_shorter_than_stock(self):
-        """SPY having fewer rows than the stock must not raise IndexError."""
+    def test_fetch_returns_spy_lagging_defers(self):
+        """Benchmark data ending before the stock's window end defers resolution.
+
+        The old behaviour resolved early at whatever partial window both had —
+        freezing a 2-day return into the log as if it were the 5-day outcome.
+        The maturity guard now returns None so the entry retries next run.
+        """
         stock_prices = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
         spy_prices   = [400.0, 402.0, 403.0]
         mock_graph = MagicMock(spec=TradingAgentsGraph)
@@ -533,8 +545,7 @@ class TestDeferredReflection:
                 return m
             mock_ticker_cls.side_effect = _make_ticker
             raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "NVDA", "2026-01-05")
-        assert raw is not None and alpha is not None and days is not None
-        assert days == 2
+        assert raw is None and alpha is None and days is None
 
     # TradingAgentsGraph._resolve_benchmark — picks index for alpha calc
 
@@ -631,9 +642,13 @@ class TestDeferredReflection:
         log.store_decision("AAPL", "2026-01-10", DECISION_BUY)
         mock_graph = MagicMock(spec=TradingAgentsGraph)
         mock_graph.memory_log = log
-        mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
-        TradingAgentsGraph._resolve_pending_entries(mock_graph, "NVDA")
-        mock_graph._fetch_returns.assert_not_called()
+        mock_graph.reflector = MagicMock()
+        mock_graph.config = {}
+        with patch(
+            "tradingagents.graph.outcome_resolution.fetch_returns"
+        ) as mock_fetch:
+            TradingAgentsGraph._resolve_pending_entries(mock_graph, "NVDA")
+            mock_fetch.assert_not_called()
         assert len(log.get_pending_entries()) == 1
 
     def test_resolve_marks_entry_completed(self, tmp_path):
@@ -645,15 +660,22 @@ class TestDeferredReflection:
         mock_graph = MagicMock(spec=TradingAgentsGraph)
         mock_graph.memory_log = log
         mock_graph.reflector = mock_reflector
-        mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
-        TradingAgentsGraph._resolve_pending_entries(mock_graph, "NVDA")
+        mock_graph.config = {}
+        with patch(
+            "tradingagents.graph.outcome_resolution.fetch_returns",
+            return_value=(0.05, 0.03, 5, None),
+        ), patch(
+            "tradingagents.graph.outcome_resolution._fetch_news_context",
+            return_value="",
+        ):
+            TradingAgentsGraph._resolve_pending_entries(mock_graph, "NVDA")
         assert log.get_pending_entries() == []
         entries = log.load_entries()
         assert len(entries) == 1
         assert entries[0]["pending"] is False
         assert entries[0]["reflection"] == "Momentum confirmed."
         assert "+5.0%" in entries[0]["raw"]
-        assert "+2.0%" in entries[0]["alpha"]
+        assert "+3.0%" in entries[0]["alpha"]
 
 
 # ---------------------------------------------------------------------------

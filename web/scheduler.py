@@ -10,6 +10,7 @@ pull SMTP/notifier settings from the shared DB first.
 
 Schedule (all times SCHEDULER_TIMEZONE, default America/New_York):
     22:00 Mon-Fri        portfolio scan      POST /api/portfolio-scan
+    23:30 Mon-Fri        outcome sweep       (in-process — resolves pending memory-log entries)
     05:00 daily          morning newsletter  (in-process)
     hourly               Schwab token health GET /api/auth/schwab/status
     Sat 00:00            S&P 500 scan        POST /api/spy-scan
@@ -178,6 +179,57 @@ def job_spy_price_refresh() -> None:
         log.exception("[spy_price_refresh] failed: %s", exc)
 
 
+def job_outcome_sweep() -> None:
+    """Resolve ALL matured pending memory-log decisions (every ticker).
+
+    In-process like the newsletter: this container mounts the same
+    ``tradingagents_data`` volume that holds the memory log, so no HTTP hop is
+    needed. Without this sweep, entries only resolve when the same ticker is
+    re-run through the CLI graph — in the deployed topology that almost never
+    happens, so decisions sit pending forever and the agents learn from a
+    sparse, survivor-biased subset of their own track record.
+
+    Runs after US close so day-0 bars are final; the maturity guard inside
+    ``resolve_all_pending`` ensures each entry waits for its full holding
+    window. LLM cost is bounded by ``sweep_max_reflections_per_run``; canned
+    NOISE/CENSORED reflections are free.
+    """
+    log.info("[outcome_sweep] starting")
+    _apply_db_config()  # LLM provider keys may live in the shared DB
+    try:
+        from tradingagents.agents.utils.memory import TradingMemoryLog
+        from tradingagents.default_config import DEFAULT_CONFIG
+        from tradingagents.graph.outcome_resolution import resolve_all_pending
+        from tradingagents.graph.reflection import Reflector
+        from tradingagents.llm_clients import create_llm_client
+
+        config = dict(DEFAULT_CONFIG)
+        memory_log = TradingMemoryLog(config)
+        # Missing/misconfigured LLM keys degrade the sweep (NOISE/CENSORED
+        # entries still resolve; LLM-graded ones defer) instead of killing it.
+        reflector = None
+        try:
+            llm = create_llm_client(
+                provider=config["llm_provider"],
+                model=config["quick_think_llm"],
+                base_url=config.get("backend_url"),
+            ).get_llm()
+            reflector = Reflector(llm)
+        except Exception:
+            log.exception("[outcome_sweep] LLM client unavailable — resolving canned entries only")
+        summary = resolve_all_pending(
+            memory_log,
+            reflector,
+            config,
+            max_reflections=config.get("sweep_max_reflections_per_run", 50),
+        )
+        log.info("[outcome_sweep] done: %s", summary)
+        if summary["errors"]:
+            log.warning("[outcome_sweep] %d entries errored — see log above", summary["errors"])
+    except Exception:
+        log.exception("[outcome_sweep] crashed")
+
+
 def _cutoff_iso(minutes: int) -> str:
     """UTC cutoff `minutes` in the past, in the same ISO+Z format rows are stored."""
     return (datetime.utcnow() - timedelta(minutes=minutes)).isoformat(timespec="seconds") + "Z"
@@ -221,6 +273,7 @@ def main() -> None:
     parser.add_argument("--run-scan-now", action="store_true", help="Trigger Schwab scan once and exit")
     parser.add_argument("--run-spy-scan-now", action="store_true", help="Trigger SPY scan once and exit")
     parser.add_argument("--refresh-spy-prices", action="store_true", help="Refresh SPY prices once and exit")
+    parser.add_argument("--run-sweep-now", action="store_true", help="Run outcome-resolution sweep once and exit")
     args = parser.parse_args()
 
     _apply_db_config()  # pull UI-saved SMTP/notifier/credentials onto env
@@ -236,6 +289,9 @@ def main() -> None:
         return
     if args.refresh_spy_prices:
         job_spy_price_refresh()
+        return
+    if args.run_sweep_now:
+        job_outcome_sweep()
         return
 
     sched = BlockingScheduler(timezone=TIMEZONE)
@@ -278,6 +334,14 @@ def main() -> None:
         id="reap_stuck_runs",
         replace_existing=True,
     )
+    sched.add_job(
+        job_outcome_sweep,
+        # Mon-Fri 23:30 ET: after US close (day-0 bars final) and after the
+        # 22:00 nightly scan has queued, so the two don't contend.
+        CronTrigger(day_of_week="mon-fri", hour=23, minute=30, timezone=TIMEZONE),
+        id="outcome_sweep",
+        replace_existing=True,
+    )
     # Sweep once at startup too — a crash that happened while the scheduler was
     # down should be caught and alerted immediately, not up to 20 min later.
     job_reap_stuck_runs()
@@ -289,6 +353,7 @@ def main() -> None:
     log.info(" - spy_price_refresh  cron hourly Mon-Fri 09:00-16:00 %s", TIMEZONE)
     log.info(" - reap_stuck_runs    every 20m (stall>%dm scans / %dm analyses)",
              STUCK_SCAN_STALL_MIN, STUCK_ANALYSIS_MIN)
+    log.info(" - outcome_sweep      cron 23:30 Mon-Fri %s", TIMEZONE)
     try:
         sched.start()
     except (KeyboardInterrupt, SystemExit):
