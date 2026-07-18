@@ -24,7 +24,7 @@
 
 ## `[ overview ]`
 
-TradingAgents runs a team of specialized LLM agents that mirror the desks of a real trading firm — analysts, researchers, a trader, and a risk/portfolio manager — and surfaces the whole pipeline in a real-time web dashboard. Submit a ticker and watch each agent stream its reasoning, ending in a BUY / SELL / HOLD decision with full reports; connect a Schwab account to scan a live portfolio; or let the scheduler sweep the entire S&P 500 every week and rebalance a paper portfolio on its own.
+TradingAgents runs a team of specialized LLM agents that mirror the desks of a real trading firm — analysts, researchers, a trader, and a risk/portfolio manager — and surfaces the whole pipeline in a real-time web dashboard. Submit a ticker and watch each agent stream its reasoning, ending in a BUY / SELL / HOLD decision with full reports; connect a Schwab account to scan a live portfolio; let the scheduler sweep the entire S&P 500 every week and rebalance a paper portfolio on its own; or turn on the daily options paper trader, which hunts S&P 500 movers every weekday and trades long calls and puts under hard risk guardrails.
 
 The project ships as container images and deploys as a Portainer edge stack, backed by a single FastAPI service and a SQLite database. The repository is **self-contained** — the underlying TradingAgents agent framework is vendored in directly, so everything needed to build and run the dashboard lives in this repo with no dependency on the upstream project.
 
@@ -52,7 +52,7 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
 
 **Web Dashboard**
 - Terminal-aesthetic UI with dark theme and color-coded signals
-- 4-tab interface: Run Analysis, Portfolio Scan, S&P 500 Scanner, Settings (Schwab connection + credentials live under Settings)
+- 5-tab interface: Run Analysis, Portfolio Scan, S&P 500 Scanner, Options, Settings (Schwab connection + credentials live under Settings)
 - Real-time WebSocket streaming of agent progress and reports
 - Interactive technical charts with RSI, MACD, Bollinger Bands overlays
 - Per-analysis Q&A thread (multi-turn conversation without re-running)
@@ -63,6 +63,7 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
 - Selectable data source — Schwab MCP server or built-in collection method (toggle in settings)
 - Automated nightly portfolio analysis of all holdings
 - S&P 500 weekly scanner (all ~500 tickers, deep-dive top 50, $100k portfolio builder)
+- Daily options paper trader (movers pre-screen → quick scan top 150 → deep-dive top 25 → long calls/puts with hard risk guardrails, real cash/realized-P&L ledger)
 - Background job scheduler (APScheduler with cron expressions)
 
 **Provider & Credential Management**
@@ -74,7 +75,7 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
 **Deployment Architecture**
 - Six-container stack from three pre-built images: backends/CLI (`tradingagents`), nginx web tier (`tradingagents-web`), and the Agent Bus (`mcp-switchboard`)
 - nginx serves the SPA and reverse-proxies separate `api` and `portfolio` FastAPI backends
-- Dedicated scheduler container (APScheduler) for nightly portfolio scans, the weekly S&P 500 sweep, the 5am newsletter, and hourly Schwab-token health
+- Dedicated scheduler container (APScheduler) for nightly portfolio scans, the weekly S&P 500 sweep, the daily options scan + hourly option marks + nightly expiry settlement, the 5am newsletter, and hourly Schwab-token health
 - SQLite with WAL mode for concurrent access and persistence
 - Deployed as a Portainer edge stack; images built and pushed to `ghcr.io` by GitHub Actions CI
 
@@ -192,7 +193,7 @@ Single-ticker deep analysis with real-time streaming:
 5. **Q&A Thread** — Multi-turn follow-up questions without re-running the full analysis
 6. **Live Reasoning** — each agent's streamed train-of-thought (tool calls included), shown beneath the reports
 
-> **Aggressiveness vs. bias.** *Aggressiveness* (1–10) controls how much risk the run takes — it sets debate depth (1–3 → 1 round, 4–7 → 2, 8–10 → 3) and, in the portfolio builders, position sizing (≤3: max 7% per position / 20% cash · 4–7: 12% / 10% · 8–10: 20% / 5%). *Decision bias* (bullish / neutral / bearish) nudges the stance the agents lean toward on borderline calls — a suggestion, not a hard limit. The two are **independent**: aggressiveness = *how much*, bias = *which way*. Both are available on the Run Analysis, Portfolio Scan, and S&P 500 (per paper-account) tabs.
+> **Aggressiveness vs. bias.** *Aggressiveness* (1–10) controls how much risk the run takes — it sets debate depth (1–3 → 1 round, 4–7 → 2, 8–10 → 3) and, in the portfolio builders, position sizing (equities ≤3: max 7% per position / 20% cash · 4–7: 12% / 10% · 8–10: 20% / 5%; options ≤3: max 5% premium per position / 15% total at risk · 4–7: 8% / 30% · 8–10: 12% / 50%). *Decision bias* (bullish / neutral / bearish) nudges the stance the agents lean toward on borderline calls — a suggestion, not a hard limit. The two are **independent**: aggressiveness = *how much*, bias = *which way*. Both are available on the Run Analysis, Portfolio Scan, S&P 500, and Options (per paper-account) tabs.
 
 ### Schwab Tab
 
@@ -223,6 +224,18 @@ Weekly automated scan of all ~500 S&P 500 tickers, run in three phases:
 - **Phase 3 (Allocate)** — Build a $100k portfolio with position sizing
 
 The scan re-runs automatically every Saturday, and the AI agent rebalances the paper portfolio — adding, trimming, or exiting positions as it sees fit. Results include an interactive allocation table with entry prices and performance tracking.
+
+### Options Tab
+
+Daily options paper trader — long single-leg calls and puts on S&P 500 movers, 100% simulated with $100k per options paper account. Every weekday:
+
+- **07:30 ET** — momentum/volume pre-screen ranks the ~500 S&P names; the top **150 movers** get the quick LLM scan; the top **25 directional names** (BUY *and* SELL — big losers become put candidates) get the full multi-agent deep dive
+- **09:35 ET gate** — allocation waits for the market open so entries fill at live quotes
+- **Contract selection** — deterministic, pre-LLM: ~21 DTE (10–45 window), ~0.45 delta via Schwab chains (near-ATM fallback on yfinance), liquidity gates against zero-bid / crossed / wide / illiquid quotes
+- **LLM allocator** decides open / hold / close daily under **hard guardrails**: force-close at DTE ≤ 3 or premium −60% (stop-loss), per-position and total-premium caps by aggressiveness, max 15 open positions, deterministic fallback if the LLM fails
+- **Hourly marks** (10:00–16:00 + 16:45 ET) and a **20:00 ET expiry settlement** sweep that models OCC auto-exercise (ITM ≥ $0.01 settles at intrinsic vs the last close on/before expiry)
+
+Unlike the S&P tab's weekly snapshot, options positions live in a real ledger — cash and realized P&L are tracked per contract through opens, closes, and expiries, with open/closed position tables, a daily decision log, and the allocator's report on the tab. Paper only: no order endpoints exist anywhere in the stack.
 
 ### Credentials Tab
 
