@@ -152,14 +152,42 @@ class SwitchboardOrchestrator:
         state["messages"] = [HumanMessage(content="Continue")]
 
     def _run_analyst(self, analyst_node, state: dict) -> None:
-        """Run an analyst through its tool-calling loop until no tool_calls remain."""
+        """Run an analyst through its tool-calling loop until no tool_calls remain.
+
+        If the model never naturally reaches a turn with zero tool_calls, the
+        loop would previously exhaust ``max_iters`` and silently leave the
+        report empty — no exception, no log line, no trace anywhere. Confirmed
+        in production across market/news/fundamentals analysts (the three that
+        use tool-calling; sentiment_analyst pre-fetches its data and never
+        enters this loop, which is why it was never affected). On the final
+        allowed iteration we now nudge the model to stop and synthesize from
+        whatever has been gathered, giving the loop a real chance to terminate
+        cleanly; if it still doesn't comply, that's now logged instead of
+        silently discarded.
+        """
         max_iters = 20
-        for _ in range(max_iters):
+        for i in range(max_iters):
+            if i == max_iters - 1:
+                state["messages"].append(HumanMessage(
+                    content="You are at your final turn. Do not call any more "
+                            "tools — write your complete report now based on "
+                            "everything gathered so far."
+                ))
+
             update = analyst_node(state)
             self._merge(state, update)
 
             last = state["messages"][-1] if state["messages"] else None
             if not last or not getattr(last, "tool_calls", None):
+                break
+
+            if i == max_iters - 1:
+                logger.warning(
+                    "Analyst tool-calling loop for node=%s exhausted "
+                    "max_iters=%d and ignored the stop instruction — "
+                    "report will be empty for this run.",
+                    self._current_node, max_iters,
+                )
                 break
 
             # Emit message summaries so the frontend knows tools are being called
@@ -184,6 +212,10 @@ class SwitchboardOrchestrator:
                     try:
                         result = tool_fn.invoke(tc_args)
                     except Exception as exc:
+                        logger.warning(
+                            "Tool call failed for node=%s tool=%s: %s",
+                            self._current_node, tc_name, exc,
+                        )
                         result = f"Tool error: {exc}"
 
                 state["messages"].append(ToolMessage(content=str(result), tool_call_id=tc_id))
