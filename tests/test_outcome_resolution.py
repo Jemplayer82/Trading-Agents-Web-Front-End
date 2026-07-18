@@ -340,7 +340,7 @@ def _resolved_entry(ticker, date, rating, alpha_pct, reflection="CLASS: CONFIRME
     return {
         "date": date, "ticker": ticker, "rating": rating, "pending": False,
         "raw": alpha_pct, "alpha": alpha_pct, "holding": "5d",
-        "decision": "Rating: %s" % rating, "reflection": reflection,
+        "decision": f"Rating: {rating}", "reflection": reflection,
     }
 
 
@@ -365,7 +365,7 @@ class TestCalibration:
 
     def test_exogenous_skew_warning(self):
         entries = [
-            _resolved_entry("T%d" % i, "2026-06-01", "Buy", "-5.0%",
+            _resolved_entry(f"T{i}", "2026-06-01", "Buy", "-5.0%",
                             reflection="CLASS: EXOGENOUS-SURPRISE\nLESSON: excuse")
             for i in range(5)
         ]
@@ -415,7 +415,7 @@ class TestContextInjection:
         log = make_log(tmp_path)
         for i, d in enumerate([_recent_date(30), _recent_date(25), _recent_date(20)]):
             log.store_decision("AAPL", d, DECISION_BUY)
-            log.update_with_outcome("AAPL", d, 0.05, 0.04, 5, "CLASS: CONFIRMED-THESIS\nLESSON: l%d" % i)
+            log.update_with_outcome("AAPL", d, 0.05, 0.04, 5, f"CLASS: CONFIRMED-THESIS\nLESSON: l{i}")
         d2 = _recent_date(15)
         log.store_decision("MSFT", d2, DECISION_BUY)
         log.update_with_outcome("MSFT", d2, 0.05, 0.04, 5, "CLASS: CONFIRMED-THESIS\nLESSON: m")
