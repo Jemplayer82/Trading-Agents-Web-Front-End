@@ -84,6 +84,72 @@ def apply_indicator_vendor(cfg: dict[str, Any]) -> None:
     cfg["data_vendors"] = dv
 
 
+def _catalog_default(provider: str, mode: str) -> str | None:
+    """First real model the provider's own catalog offers for `mode`.
+
+    Imported lazily: web.providers resolves OLLAMA_BASE_URL at call time, so
+    the Ollama menu (and therefore this default) follows the Settings UI
+    between local tags and the cloud catalog without a restart.
+    """
+    from .providers import get_providers
+
+    for p in get_providers():
+        if p["key"] != provider:
+            continue
+        for m in p["models"].get(mode, []):
+            if m["value"] != "custom":  # "custom" is a UI sentinel, not a model
+                return m["value"]
+    return None
+
+
+def _resolve_model(
+    params: dict[str, Any], cfg: dict[str, Any], provider: str, mode: str
+) -> str:
+    """Pick the model for one role, in strict precedence order.
+
+    explicit param  ->  TRADINGAGENTS_*_THINK_LLM env  ->  provider catalog  ->  DEFAULT_CONFIG
+
+    Why the catalog step exists: DEFAULT_CONFIG hardcodes OpenAI model names
+    (default_config.py) while the provider above defaults to "ollama". On a
+    fresh database (no saved preferences) that produced the impossible pair
+    provider=ollama + model=gpt-5.4-mini, so EVERY background scan 404'd while
+    interactive runs — which always post an explicit model from the form —
+    worked fine. See web/llm_helpers.py, whose correct cloud fallbacks were
+    dead code precisely because a non-empty wrong default always beat them.
+
+    Why the env step comes first: default_config.py maps
+    TRADINGAGENTS_{DEEP,QUICK}_THINK_LLM onto DEFAULT_CONFIG as a deliberate
+    operator override (tests/test_env_overrides.py). The catalog must not
+    silently outrank it.
+
+    Why the catalog only applies on a cross-provider mismatch: an OpenAI user
+    with empty preferences should keep DEFAULT_CONFIG's OpenAI model, not get
+    silently repointed at a different (possibly pricier) one.
+    """
+    explicit = params.get(f"{mode}_model")
+    if explicit:
+        return str(explicit)
+
+    configured = cfg[f"{mode}_think_llm"]
+    env_var = f"TRADINGAGENTS_{mode.upper()}_THINK_LLM"
+    if os.environ.get(env_var):
+        return configured
+
+    # Only override when the configured name plainly belongs to another
+    # provider — i.e. it isn't in this provider's catalog at all.
+    from .providers import get_providers
+
+    known = {
+        m["value"]
+        for p in get_providers()
+        if p["key"] == provider
+        for m in p["models"].get(mode, [])
+    }
+    if configured in known:
+        return configured
+    return _catalog_default(provider, mode) or configured
+
+
 def build_config(params: dict[str, Any]) -> dict[str, Any]:
     """Merge user params with DEFAULT_CONFIG to build the orchestrator config."""
     cfg = dict(DEFAULT_CONFIG)
@@ -93,8 +159,8 @@ def build_config(params: dict[str, Any]) -> dict[str, Any]:
     cfg["quick_llm_provider"] = quick_provider
     cfg["deep_llm_provider"] = deep_provider
     cfg["llm_provider"] = deep_provider  # legacy alias — portfolio_main.py:256, spy_scanner.py:371 read this for display
-    cfg["deep_think_llm"] = params.get("deep_model") or cfg["deep_think_llm"]
-    cfg["quick_think_llm"] = params.get("quick_model") or cfg["quick_think_llm"]
+    cfg["deep_think_llm"] = _resolve_model(params, cfg, deep_provider, "deep")
+    cfg["quick_think_llm"] = _resolve_model(params, cfg, quick_provider, "quick")
     cfg["output_language"] = params.get("language") or cfg.get("output_language", "English")
 
     # Aggressiveness (1–10) → debate rounds. Overrides research_depth when set.

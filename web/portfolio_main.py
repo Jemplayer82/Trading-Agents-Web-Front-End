@@ -1096,6 +1096,11 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
 
     if db.is_spy_scan_cancelled(scan_id):
         raise spy_scanner.ScanCancelled()
+    # Half or more of the quick scans erroring is infrastructure, not a quiet
+    # market — fail rather than "degrade" into building a portfolio out of
+    # error rows. This sits ABOVE the least-bad-50 fallback below on purpose:
+    # that fallback exists for a pathological but WORKING scan, not a dead one.
+    spy_scanner.assert_quick_scan_healthy(quick_results)
 
     # Phase 2: deep dive top 50 by conviction
     buy_or_hold = [r for r in quick_results if (r.get("signal") or "").upper() in ("BUY", "HOLD")]
@@ -1106,15 +1111,24 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
         top50 = sorted(quick_results, key=lambda r: -(r.get("conviction") or 0))[:50]
     with _phase("Deep-dive analysis failed"):
         enriched = spy_scanner.run_deep_dives(scan_id, top50, trade_date, config, selected_analysts)
+    spy_scanner.assert_deep_dives_healthy(enriched)
 
     if db.is_spy_scan_cancelled(scan_id):
         raise spy_scanner.ScanCancelled()
 
     # Phase 3: allocator (rebalance if a previous portfolio exists, else fresh capital)
     db.update_spy_scan(scan_id, status="running_alloc")
+    # A failed dive keeps its quick-scan signal/conviction (run_deep_dives
+    # returns {**candidate, "error": ...}) and the allocator never inspects
+    # `error` — so unfiltered, a partial deep-dive outage gets equal-weighted
+    # into the paper portfolio at a fabricated entry_price. Drop those rows.
+    usable = [e for e in enriched if not e.get("error")]
+    if len(usable) != len(enriched):
+        log.warning("[spy %s] dropping %d failed deep dives before allocation",
+                    scan_id, len(enriched) - len(usable))
     with _phase("Portfolio allocation failed"):
         alloc_result = spy_allocator.run(
-            enriched,
+            usable,
             trade_date,
             config,
             previous_portfolio=previous_portfolio,

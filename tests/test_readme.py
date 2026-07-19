@@ -32,7 +32,7 @@ _FORBIDDEN = [
     ("web/requirements.txt", "deps live in root requirements.txt / pyproject, not web/requirements.txt"),
     ("tradingagents/tests", "tests live in tests/ at the repo root"),
     ("web/tests", "tests live in tests/ at the repo root"),
-    ("5-tab", "the dashboard has 4 tabs: Run Analysis / Portfolio Scan / S&P 500 / Settings"),
+    ("4-tab", "the dashboard has 5 tabs now: Run Analysis / Portfolio Scan / S&P 500 / Options / Settings"),
     ("Messages Log", "the tool-calls panel was removed; it is Live Reasoning now"),
 ]
 

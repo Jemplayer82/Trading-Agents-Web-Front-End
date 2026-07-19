@@ -378,6 +378,42 @@ def _wait_for_market_open(scan_id: int) -> None:
         time_mod.sleep(30)
 
 
+def _zero_candidate_reason(
+    quick_results: list[dict[str, Any]],
+    directional: list[dict[str, Any]],
+    enriched: list[dict[str, Any]],
+    usable: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+) -> str | None:
+    """Explain a zero-candidate run, or None when there were candidates.
+
+    A bare "0 new / 0 hold / 0 close" is indistinguishable from a broken run,
+    which is exactly the confusion that made a fully-failed scan look like a
+    quiet market. Counts are derived from each stage separately so the text can
+    never misattribute a failure as "nothing passed vetting".
+
+    Reachable only when the run was not TOTALLY broken — the guards in
+    run_options_build fail the scan outright in that case.
+    """
+    if candidates:
+        return None
+    errored_quick = sum(1 for r in quick_results if r.get("error"))
+    noise = f" ({errored_quick} of {len(quick_results)} quick scans errored)" if errored_quick else ""
+
+    if not directional:
+        return (f"No ticker in the movers pre-screen scored BUY or SELL today — "
+                f"every name came back HOLD{noise}. Nothing to trade.")
+    if not enriched:
+        return f"{len(directional)} directional signals, but no deep dive ran{noise}."
+    failed = len(enriched) - len(usable)
+    if not usable:
+        return (f"All {len(enriched)} deep dives failed{noise}. No contracts were vetted — "
+                f"check the analysis history for the underlying error.")
+    extra = f" ({failed} further dives failed and were skipped)" if failed else ""
+    return (f"{len(usable)} of {len(enriched)} deep dives produced a usable signal, but no "
+            f"contract passed liquidity/delta/DTE vetting{extra} — see the vetting notes below.")
+
+
 def run_options_build(scan_id: int, trade_date: str) -> None:
     """Worker for one daily options run. Raises on failure (the endpoint's
     thread wrapper records failed/cancelled status, mirroring the equity scan)."""
@@ -418,6 +454,10 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
         quick_results = spy_scanner.run_quick_scan(scan_id, movers, config)
     if db.is_spy_scan_cancelled(scan_id):
         raise spy_scanner.ScanCancelled()
+    # Wholesale failure must fail the run, not complete green with an empty
+    # portfolio. Checked here rather than inside run_quick_scan because the
+    # equity scan has its own deliberate degrade policy for a bad quick scan.
+    spy_scanner.assert_quick_scan_healthy(quick_results)
 
     # Phase 2: deep dive the top directional names — BUY *and* SELL (puts need
     # bearish candidates; deliberately unlike the equity scan's BUY/HOLD cut).
@@ -428,6 +468,9 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
     if top:
         with _phase("Deep-dive analysis failed"):
             enriched = spy_scanner.run_deep_dives(scan_id, top, trade_date, config, selected_analysts)
+        # Quick and deep resolve independent providers/models, so a deep-only
+        # outage passes the quick guard above and lands here.
+        spy_scanner.assert_deep_dives_healthy(enriched)
     else:
         log.info("[options %s] no directional quick-scan signals today", scan_id)
     if db.is_spy_scan_cancelled(scan_id):
@@ -439,10 +482,18 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
     with _phase("Position mark-to-market failed"):
         refresh_positions(account_id)
 
+    # A FAILED deep dive still carries its quick-scan signal/conviction
+    # (run_deep_dives returns {**candidate, "error": ...}), and fetch_candidates
+    # filters only on signal/conviction — so without this, contracts get vetted
+    # and real paper positions opened off analyses that crashed. Drop them.
+    usable = [e for e in enriched if not e.get("error")]
+    if len(usable) != len(enriched):
+        log.warning("[options %s] dropping %d failed deep dives before vetting",
+                    scan_id, len(enriched) - len(usable))
     with _phase("Chain fetch failed"):
-        candidates, chain_notes = options_data.fetch_candidates(enriched)
-    log.info("[options %s] %d vetted candidates from %d deep dives",
-             scan_id, len(candidates), len(enriched))
+        candidates, chain_notes = options_data.fetch_candidates(usable)
+    log.info("[options %s] %d vetted candidates from %d usable deep dives (%d total)",
+             scan_id, len(candidates), len(usable), len(enriched))
 
     open_positions = db.list_options_positions(account_id, status="open")
     eq = account_equity(account_id)
@@ -509,6 +560,9 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
                               "rationale": h.get("rationale")})
 
     report = alloc["report_md"]
+    reason = _zero_candidate_reason(quick_results, directional, enriched, usable, candidates)
+    if reason:
+        report += f"\n## Why no new positions\n{reason}\n"
     if skipped_opens:
         report += "\n## Skipped opens (cash)\n" + "\n".join(f"- {s}" for s in skipped_opens) + "\n"
     if chain_notes:

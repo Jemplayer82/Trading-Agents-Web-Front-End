@@ -49,6 +49,37 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Fixed
 
+- **Background scans silently did nothing on a fresh database.** `build_config`
+  defaulted the *provider* to Ollama while `DEFAULT_CONFIG` supplied OpenAI
+  *model* names, so with no saved preferences every background LLM call 404'd
+  (`model "gpt-5.4-mini" not found`). Interactive runs were unaffected because
+  the form always posts an explicit model — which is also the only thing that
+  ever wrote preferences, so the bug was invisible on any instance that had run
+  one analysis. `build_config` now resolves a provider-appropriate default from
+  the provider's own catalog, after any explicit param and any
+  `TRADINGAGENTS_*_THINK_LLM` operator override, and only when the configured
+  name belongs to a different provider.
+- **Four retired models were still offered in the model picker.** Ollama Cloud
+  retires models and returns HTTP 410 for them; `kimi-k2:1t-cloud` (the *deep*
+  default), `glm-4.6:cloud`, `deepseek-v3.1:671b-cloud` and
+  `qwen3-coder:480b-cloud` had all gone dead. Catalog refreshed against the
+  live model list, with the revalidation command documented alongside it.
+- **A totally failed scan reported success.** Per-ticker errors degrade to
+  HOLD/conviction-1 by design (one bad ticker must not sink 500), but nothing
+  inspected the aggregate — so a dead backend was indistinguishable from a
+  quiet market and the run completed green with an empty portfolio and no
+  alert. Quick scans now fail the run when ≥50% error, deep dives when 100%
+  fail (the stricter bar reflects that partial deep-dive failure is normal),
+  and the alert quotes the underlying error. Missing price data carries no
+  `error` key, so it never counts toward the rate.
+- **Failed analyses could be traded on.** A crashed deep dive keeps the
+  quick-scan `signal`/`conviction` in its result row, and neither the options
+  contract vetter nor the equity allocator inspected `error` — so a partial
+  deep-dive outage could open paper positions off analyses that never
+  completed. Both paths now drop errored rows before allocation.
+- **Zero-trade runs now explain themselves** in the allocator report, telling
+  "nothing scored directional" apart from "dives failed" and "nothing passed
+  contract vetting".
 - **Scan queue never dequeued.** `_dequeue_next_scan`'s `ORDER BY created_at`
   referenced a column absent from its UNION's result set — SQLite raised
   `OperationalError` on the first queued scan, so queued runs sat forever.

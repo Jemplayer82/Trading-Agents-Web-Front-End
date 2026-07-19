@@ -10,6 +10,7 @@ No network access. Run with: uv run pytest tests/test_portfolio_progress.py -v
 from __future__ import annotations
 
 import sqlite3
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -178,16 +179,24 @@ class TestRunScanProgress:
         # Patch the Schwab MCP positions source
         monkeypatch.setattr(portfolio_main, "_mcp_positions", lambda: fake_positions)
 
-        # Patch run_single_ticker at the source module (it is a local import inside _run_scan)
-        def fake_run_single_ticker(ticker, trade_date, config, analysts):
-            return {
-                "final_state": {"trader_investment_plan": "", "final_trade_decision": ""},
-                "signal": "HOLD",
-            }
+        # Stub the orchestrator _run_scan actually uses. It imports
+        # SwitchboardOrchestrator locally, so patch it at its source module.
+        #
+        # This previously patched tradingagents.graph.portfolio_graph.
+        # run_single_ticker, which _run_scan never calls — so the test made
+        # REAL network calls and only "passed" because the configured model
+        # name was invalid and every request 404'd instantly. Once the model
+        # defaults were fixed the requests became valid and the test hung on a
+        # live LLM analysis. Keep this stub aligned with _run_scan.
+        class FakeOrchestrator:
+            def __init__(self, config=None, selected_analysts=None):
+                self.memory_log = MagicMock()
+
+            def run(self, ticker, trade_date):
+                return ({"trader_investment_plan": "", "final_trade_decision": ""}, "HOLD")
 
         monkeypatch.setattr(
-            "tradingagents.graph.portfolio_graph.run_single_ticker",
-            fake_run_single_ticker,
+            "tradingagents.orchestrator.SwitchboardOrchestrator", FakeOrchestrator
         )
 
         # Stub out the aggregator and complete_portfolio_scan to avoid side effects

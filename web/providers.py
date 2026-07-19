@@ -20,24 +20,37 @@ def _is_ollama_cloud(url: str | None) -> bool:
 
 # Ollama Cloud catalog — names that actually resolve at https://ollama.com/v1.
 # Order matters: the first entry is the default in the dropdown for a fresh
-# session (no saved preferences yet). We default to a deliberate mixed pair
-# — gpt-oss for quick + kimi-k2 for deep — to keep the analyst and
+# session (no saved preferences yet) AND the fallback build_config uses when no
+# model is saved (web/runner.py _catalog_default). We default to a deliberate
+# mixed pair — gpt-oss for quick + deepseek for deep — to keep the analyst and
 # decision-maker stages on different model lineages.
+#
+# ⚠️ Ollama Cloud RETIRES models, and a retired name returns HTTP 410, not 404.
+# In July 2026 four entries here (kimi-k2:1t-cloud, glm-4.6:cloud,
+# deepseek-v3.1:671b-cloud, qwen3-coder:480b-cloud) had gone dead while still
+# being offered in the dropdown — including the deep default. Revalidate with:
+#
+#     curl -H "Authorization: Bearer $OLLAMA_API_KEY" https://ollama.com/v1/models
+#
+# Every value below must appear in that list. Entries are also verified to
+# support tool calling, which the analysts require (they bind get_stock_data /
+# get_indicators — a model without tool support fails the whole graph).
+# Last verified: 2026-07-18.
 _OLLAMA_CLOUD_MODELS = {
     "quick": [
         ("GPT-OSS 20B (cloud) — default", "gpt-oss:20b-cloud"),
         ("GPT-OSS 120B (cloud)", "gpt-oss:120b-cloud"),
-        ("Kimi K2 1T (cloud)", "kimi-k2:1t-cloud"),
-        ("GLM-4.6 (cloud)", "glm-4.6:cloud"),
+        ("DeepSeek V4 Flash", "deepseek-v4-flash"),
+        ("Nemotron 3 Nano 30B", "nemotron-3-nano:30b"),
         ("Custom model ID", "custom"),
     ],
     "deep": [
-        ("Kimi K2 1T (cloud) — default", "kimi-k2:1t-cloud"),
+        ("DeepSeek V4 Pro — default", "deepseek-v4-pro"),
         ("GPT-OSS 120B (cloud)", "gpt-oss:120b-cloud"),
         ("GPT-OSS 20B (cloud)", "gpt-oss:20b-cloud"),
-        ("DeepSeek V3.1 671B (cloud)", "deepseek-v3.1:671b-cloud"),
-        ("Qwen3-Coder 480B (cloud)", "qwen3-coder:480b-cloud"),
-        ("GLM-4.6 (cloud)", "glm-4.6:cloud"),
+        ("Kimi K2.6", "kimi-k2.6"),
+        ("GLM-5.2", "glm-5.2"),
+        ("Qwen3.5 397B", "qwen3.5:397b"),
         ("Custom model ID", "custom"),
     ],
 }

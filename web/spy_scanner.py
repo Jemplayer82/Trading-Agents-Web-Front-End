@@ -27,6 +27,7 @@ import os
 import re
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -44,6 +45,75 @@ log = logging.getLogger(__name__)
 
 class ScanCancelled(Exception):
     """Raised inside a scan worker loop when the user requests cancellation."""
+
+
+class ScanInfrastructureError(RuntimeError):
+    """Raised when a scan stage failed wholesale — not "the market was quiet".
+
+    Subclasses RuntimeError so the existing `except Exception` in the scan
+    thread wrappers routes it to fail_spy_scan + alerts.notify_run_failed
+    without any new plumbing.
+    """
+
+
+def _dominant_error(rows: list[dict[str, Any]]) -> str:
+    """Most common error string across `rows`, formatted for an alert."""
+    counts = Counter(str(r.get("error")) for r in rows if r.get("error"))
+    if not counts:
+        return "(no error detail)"
+    top, n = counts.most_common(1)[0]
+    # alerts.py truncates at 1500 chars; keep well under so context survives.
+    return f"({n}x) {top[:500]}"
+
+
+def assert_quick_scan_healthy(results: list[dict[str, Any]]) -> None:
+    """Fail the scan when at least half the quick scans errored.
+
+    Per-ticker resilience (_quick_scan_one swallows exceptions into
+    HOLD/conviction-1 + an `error` key) is deliberate: one bad ticker must not
+    sink a 500-ticker run. But nothing used to inspect the AGGREGATE, so a
+    total infrastructure failure — a retired model name, a dead endpoint, an
+    expired key — was indistinguishable from a quiet market: the scan completed
+    GREEN with an empty portfolio and no alert. That happened in production
+    (150/150 tickers 404'd on a stale model name; the run reported success).
+
+    50% is safe against false failures. Rows skipped by cancellation are never
+    appended, and a missing-price-data ticker returns HOLD/1 with NO `error`
+    key — so this rate tracks LLM/infrastructure failures only. Routine
+    flakiness across hundreds of tickers cannot approach half; a misconfigured
+    backend hits every single one.
+    """
+    if not results:
+        return
+    errored = [r for r in results if r.get("error")]
+    if len(errored) * 2 < len(results):
+        return
+    raise ScanInfrastructureError(
+        f"LLM infrastructure failure: {len(errored)}/{len(results)} quick scans failed. "
+        f"Most common error: {_dominant_error(errored)}"
+    )
+
+
+def assert_deep_dives_healthy(enriched: list[dict[str, Any]]) -> None:
+    """Fail the scan only when EVERY deep dive failed.
+
+    Deliberately stricter than the quick-scan guard rather than a rate check:
+    partial deep-dive failure is normal (these are full multi-agent graphs, and
+    callers already tolerate fewer usable candidates). Only 100% is
+    unambiguously infrastructure — and it catches the asymmetric case the quick
+    guard cannot, since quick and deep resolve independent providers/models
+    (runner.build_config sets four separate keys), so a deep-only breakage
+    sails through a perfectly healthy quick scan.
+    """
+    if not enriched:
+        return
+    errored = [e for e in enriched if e.get("error")]
+    if len(errored) < len(enriched):
+        return
+    raise ScanInfrastructureError(
+        f"LLM infrastructure failure: all {len(enriched)} deep dives failed. "
+        f"Most common error: {_dominant_error(errored)}"
+    )
 
 
 def _total_budget() -> int:
