@@ -69,6 +69,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   await loadProviders();
   await loadPreferences();
   await loadHistory();
+  _setupAnalyzeStabs();
+  loadAnalyzeQueue();
   buildReportTabs();
   $("btn-run").addEventListener("click", startRun);
   $("btn-stop").addEventListener("click", stopRun);
@@ -337,6 +339,46 @@ async function loadHistory() {
   });
 }
 
+// ---- Queue sidebar (Run Analysis shows EVERY scan type's queue) ----
+
+function _setupAnalyzeStabs() {
+  document.querySelectorAll(".stab[data-stab-target='analyze-queue'], .stab[data-stab-target='history']").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const target = btn.dataset.stabTarget;
+      document.querySelectorAll(".stab[data-stab-target='analyze-queue'], .stab[data-stab-target='history']")
+        .forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      [$("analyze-queue"), $("history")].forEach((el) => {
+        if (el) el.hidden = el.id !== target;
+      });
+    });
+  });
+}
+
+// Jump to a running scan's own tab and open it (queue items are cross-type here).
+function _openRunningScan(item) {
+  const key = scanTypeKey(item);
+  const tab = { portfolio: "portfolio", spy: "spy", options: "options" }[key];
+  if (!tab) return;
+  const tabBtn = document.querySelector(`.main-tab[data-tab="${tab}"]`);
+  if (tabBtn) tabBtn.click();
+  if (key === "portfolio" && typeof loadPortfolioScan === "function") loadPortfolioScan(item.id);
+  else if (key === "spy" && typeof loadSpyScan === "function") loadSpyScan(item.id);
+  else if (key === "options" && typeof loadOptionsScan === "function") loadOptionsScan(item.id);
+}
+
+async function loadAnalyzeQueue() {
+  const ul = $("analyze-queue");
+  if (!ul) return;
+  try {
+    const r = await fetch("/api/portfolio/status");
+    const data = r.ok ? await r.json() : { running: null, queued: [] };
+    renderScanQueue(ul, data, { onOpen: _openRunningScan });  // no `only` → all scan types
+  } catch (e) {
+    ul.innerHTML = `<li class="empty" style="color:var(--accent-red);">${escapeHtml(String(e))}</li>`;
+  }
+}
+
 async function loadHistoryItem(id) {
   activeHistoryId = id;
   document.querySelectorAll("#history li").forEach((li) => {
@@ -520,11 +562,11 @@ function setupScanActivity() {
   });
   pollScanActivity();  // analyze is the default tab — poll right away
   document.addEventListener("tab-shown", (ev) => {
-    if (ev.detail === "analyze") pollScanActivity();
+    if (ev.detail === "analyze") { pollScanActivity(); loadAnalyzeQueue(); }
   });
   setInterval(() => {
     const pane = document.querySelector('[data-pane="analyze"]');
-    if (pane && !pane.hidden) pollScanActivity();
+    if (pane && !pane.hidden) { pollScanActivity(); loadAnalyzeQueue(); }
   }, 5000);
 }
 

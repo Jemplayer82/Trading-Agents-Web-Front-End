@@ -230,9 +230,37 @@ function optDte(p) {
   return Math.round((exp - Date.now()) / 86400000);
 }
 
-// ===== History sidebar =====
+// ===== Queue + History sidebar =====
+
+function _setupOptionsStabs() {
+  document.querySelectorAll("[data-stab-target^=\"options-\"]").forEach((btn) => {
+    if (!btn.dataset.stabTarget) return;  // skip the clear button
+    btn.addEventListener("click", () => {
+      const target = btn.dataset.stabTarget;
+      document.querySelectorAll(".stab[data-stab-target^=\"options-\"]").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      [$("options-queue"), $("options-history")].forEach((el) => {
+        if (el) el.hidden = el.id !== target;
+      });
+    });
+  });
+}
+
+async function loadOptionsQueue() {
+  const ul = $("options-queue");
+  if (!ul) return;
+  try {
+    const data = await apiFetch("/api/portfolio/status");
+    // Options runs are spy_scans rows with kind='options'; only:["options"]
+    // keeps S&P equity runs out of this queue.
+    renderScanQueue(ul, data, { only: ["options"], onOpen: (item) => loadOptionsScan(item.id) });
+  } catch (e) {
+    ul.innerHTML = "<li class=\"empty\" style=\"color:var(--accent-red);\">" + escapeHtml(String(e)) + "</li>";
+  }
+}
 
 async function loadOptionsHistory() {
+  loadOptionsQueue();  // keep queue in sync whenever history refreshes
   const ul = $("options-history");
   if (!ul) return;
   ul.innerHTML = "<li class=\"dim empty\">loading…</li>";
@@ -701,6 +729,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (refreshBtn) refreshBtn.addEventListener("click", refreshOptionMarks);
   const clearBtn = $("options-history-clear-btn");
   if (clearBtn) clearBtn.addEventListener("click", clearOptionsHistory);
+  _setupOptionsStabs();
 
   const sel = $("opt-account-sel");
   if (sel) {

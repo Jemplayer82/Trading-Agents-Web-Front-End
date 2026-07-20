@@ -98,32 +98,7 @@ async function loadPortfolioQueue() {
   try {
     const r = await fetch("/api/portfolio/status");
     const data = r.ok ? await r.json() : { running: null, queued: [] };
-    ul.innerHTML = "";
-    const running = data.running && data.running.scan_type === "portfolio" ? [data.running] : [];
-    const queuedPf = (data.queued || []).filter((q) => q.scan_type === "portfolio");
-    const items = [...running, ...queuedPf];
-    if (!items.length) {
-      ul.innerHTML = '<li class="dim empty">(queue empty)</li>';
-      return;
-    }
-    items.forEach((item, idx) => {
-      const li = document.createElement("li");
-      li.dataset.id = item.id;
-      const isRunning = item === data.running;
-      const label = isRunning ? "RUNNING" : ("#" + (idx - (running.length ? 1 : 0) + 1) + " IN QUEUE");
-      const badgeClass = isRunning ? "HOLD" : "QUEUED";
-      li.innerHTML = `
-        <span class="h-main">
-          <span class="h-top">
-            <span class="h-tk">pf #${item.id} · ${escapeHtml(item.trade_date || "")}</span>
-            <span class="h-sig ${badgeClass}">${label}</span>
-          </span>
-          <span class="h-ts">${fmtTs(item.created_at)}</span>
-        </span>
-      `;
-      if (isRunning) li.querySelector(".h-main").addEventListener("click", () => loadPortfolioScan(item.id));
-      ul.appendChild(li);
-    });
+    renderScanQueue(ul, data, { only: ["portfolio"], onOpen: (item) => loadPortfolioScan(item.id) });
   } catch (e) {
     ul.innerHTML = `<li class="empty" style="color:var(--accent-red);">${escapeHtml(String(e))}</li>`;
   }

@@ -103,6 +103,25 @@ def test_paper_account_kind_filter(tmp_db):
     assert {a["id"] for a in db.list_paper_accounts()} == {e, o}
 
 
+def test_status_endpoint_exposes_kind(tmp_db):
+    """The sidebar queue on every tab filters on scan_type + kind, so
+    /api/portfolio/status must label options runs (spy_scans, kind='options')
+    distinctly from equity S&P runs — otherwise options leak into the S&P queue."""
+    from web import portfolio_main
+
+    pf = db.create_portfolio_scan("2026-07-20", status="queued")
+    eq = db.create_spy_scan("2026-07-20", kind="equity", status="queued")
+    opt = db.create_spy_scan("2026-07-20", kind="options", status="queued")
+
+    status = portfolio_main.scan_status()
+    by_key = {(q["scan_type"], q["kind"]): q["id"] for q in status["queued"]}
+    assert by_key == {
+        ("portfolio", "equity"): pf,
+        ("spy", "equity"): eq,
+        ("spy", "options"): opt,
+    }
+
+
 # ── Ledger + position lifecycle ──────────────────────────────────────────────
 
 def test_open_close_ledger_flow(account_id):

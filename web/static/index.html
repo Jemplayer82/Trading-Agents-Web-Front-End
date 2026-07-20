@@ -80,9 +80,13 @@
   <!-- ===== TAB: Run Analysis (app.js; [ Agent Bus ] panel is bus.js) ===== -->
   <main class="layout tab-pane active" data-pane="analyze">
     <aside class="sidebar panel">
-      <div class="panel-title">[ History ]</div>
-      <button id="history-clear-btn" class="panel-action" title="Clear all history">clear</button>
-      <ul id="history" class="history"></ul>
+      <div class="sidebar-tabs">
+        <button class="stab active" data-stab-target="analyze-queue">Queue</button>
+        <button class="stab" data-stab-target="history">History</button>
+        <button id="history-clear-btn" class="panel-action" title="Clear all history" style="margin-left:auto;">clear</button>
+      </div>
+      <ul id="analyze-queue" class="history"></ul>
+      <ul id="history" class="history" hidden></ul>
     </aside>
 
     <section class="main">
@@ -345,15 +349,19 @@
        #options-main is rebuilt wholesale by options.js renderOptionsScan. -->
   <main class="layout tab-pane" data-pane="options" hidden>
     <aside class="sidebar panel">
-      <div class="panel-title">[ Scan History ]</div>
-      <button id="options-history-clear-btn" class="panel-action" title="Clear all options scans">clear</button>
-      <ul id="options-history" class="history"></ul>
+      <div class="sidebar-tabs">
+        <button class="stab active" data-stab-target="options-queue">Queue</button>
+        <button class="stab" data-stab-target="options-history">History</button>
+        <button id="options-history-clear-btn" class="panel-action" title="Clear all options scans" style="margin-left:auto;">clear</button>
+      </div>
+      <ul id="options-queue" class="history"></ul>
+      <ul id="options-history" class="history" hidden></ul>
     </aside>
 
     <section class="main">
       <div class="panel">
         <div class="panel-title">[ Options Paper Trader ]</div>
-        <p class="dim" style="margin: 0 0 10px;">Long calls/puts on S&amp;P 500 movers, 100% simulated. Every weekday: pre-screens the top 150 movers, deep-dives the top 25 directional names, then buys/holds/closes single-leg contracts after the open. Auto-runs Mon–Fri 07:30 ET.</p>
+        <p class="dim" style="margin: 0 0 10px;">Long calls/puts on S&amp;P 500 movers, 100% simulated. Every weekday: pre-screens the top 250 movers, quick-scans the top 100 + SPY, deep-dives the top 25 directional names, then buys/holds/closes single-leg contracts after the open. Auto-runs Mon–Fri 07:30 ET.</p>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
           <label class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap;">Account</label>
           <select id="opt-account-sel" style="flex:1;min-width:160px;max-width:300px;background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:5px 8px;font-family:inherit;font-size:13px;border-radius:3px;"></select>

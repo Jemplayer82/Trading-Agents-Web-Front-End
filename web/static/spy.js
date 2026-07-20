@@ -242,32 +242,9 @@ async function loadSpyQueue() {
   if (!ul) return;
   try {
     const data = await apiFetch("/api/portfolio/status");
-    ul.innerHTML = "";
-    const running = data.running && data.running.scan_type === "spy" ? [data.running] : [];
-    const queuedSpy = (data.queued || []).filter((q) => q.scan_type === "spy");
-    const items = [...running, ...queuedSpy];
-    if (!items.length) {
-      ul.innerHTML = "<li class=\"dim empty\">(queue empty)</li>";
-      return;
-    }
-    items.forEach((item, idx) => {
-      const li = document.createElement("li");
-      li.dataset.id = item.id;
-      const isRunning = item === data.running;
-      const label = isRunning ? "RUNNING" : ("#" + (idx - (running.length ? 1 : 0) + 1) + " IN QUEUE");
-      const badgeClass = isRunning ? "HOLD" : "QUEUED";
-      li.innerHTML = (
-        "<span class=\"h-main\">" +
-          "<span class=\"h-top\">" +
-            "<span class=\"h-tk\">spy #" + item.id + " · " + escapeHtml(item.trade_date || "") + "</span>" +
-            "<span class=\"h-sig " + badgeClass + "\">" + label + "</span>" +
-          "</span>" +
-          "<span class=\"h-ts\">" + fmtTs(item.created_at) + "</span>" +
-        "</span>"
-      );
-      if (isRunning) li.querySelector(".h-main").addEventListener("click", () => loadSpyScan(item.id));
-      ul.appendChild(li);
-    });
+    // only:["spy"] excludes options runs (also spy_scans rows, kind='options')
+    // that would otherwise leak into the S&P queue.
+    renderScanQueue(ul, data, { only: ["spy"], onOpen: (item) => loadSpyScan(item.id) });
   } catch (e) {
     ul.innerHTML = "<li class=\"empty\" style=\"color:var(--accent-red);\">" + escapeHtml(String(e)) + "</li>";
   }

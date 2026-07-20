@@ -81,8 +81,9 @@ def _is_any_scan_running(conn) -> dict | None:  # type: ignore[type-arg]
     reaper, so it can't wedge the queue.
     """
     row = conn.execute(
-        "SELECT 'portfolio' AS scan_type, id FROM portfolio_scans WHERE status = 'running'"
-        " UNION SELECT 'spy', id FROM spy_scans"
+        "SELECT 'portfolio' AS scan_type, id, trade_date, 'equity' AS kind, created_at"
+        " FROM portfolio_scans WHERE status = 'running'"
+        " UNION SELECT 'spy', id, trade_date, kind, created_at FROM spy_scans"
         " WHERE status IN ('pending','running_quick','running_deep','running_alloc')"
         " LIMIT 1"
     ).fetchone()
@@ -246,9 +247,9 @@ def scan_status() -> dict[str, Any]:
     with db.connect() as conn:
         running_row = _is_any_scan_running(conn)
         queued_rows = conn.execute(
-            "SELECT 'portfolio' AS scan_type, id, trade_date, created_at"
+            "SELECT 'portfolio' AS scan_type, id, trade_date, 'equity' AS kind, created_at"
             " FROM portfolio_scans WHERE status = 'queued'"
-            " UNION SELECT 'spy', id, trade_date, created_at"
+            " UNION SELECT 'spy', id, trade_date, kind, created_at"
             " FROM spy_scans WHERE status = 'queued'"
             " ORDER BY created_at"
         ).fetchall()

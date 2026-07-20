@@ -217,3 +217,8 @@ __marimo__/
 
 # Cache
 **/data_cache/
+
+# SQLite databases (real DB lives at ~/.tradingagents/web.db)
+*.db
+*.db-wal
+*.db-shm
