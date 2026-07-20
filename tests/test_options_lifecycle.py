@@ -122,6 +122,46 @@ def test_status_endpoint_exposes_kind(tmp_db):
     }
 
 
+# ── Deep-dive target selection ───────────────────────────────────────────────
+
+def _q(ticker, signal="BUY", conviction=5):
+    return {"ticker": ticker, "signal": signal, "conviction": conviction}
+
+
+def test_deep_targets_top_by_conviction_capped_at_deep_top():
+    """Only the top DEEP_TOP directional names by conviction get a deep dive."""
+    rows = [_q(f"T{i}", "BUY", conviction=i) for i in range(options_engine.DEEP_TOP + 40)]
+    top = options_engine.select_deep_dive_targets(rows)
+    # DEEP_TOP directional picks; SPY wasn't in the quick set so nothing forced.
+    assert len(top) == options_engine.DEEP_TOP
+    # Highest-conviction names survive; the low-conviction tail is dropped.
+    picked = {r["ticker"] for r in top}
+    assert f"T{options_engine.DEEP_TOP + 39}" in picked
+    assert "T0" not in picked
+
+
+def test_deep_targets_include_both_buy_and_sell():
+    rows = [_q("BULL", "BUY", 9), _q("BEAR", "SELL", 8), _q("MEH", "HOLD", 9)]
+    picked = {r["ticker"] for r in options_engine.select_deep_dive_targets(rows)}
+    assert picked == {"BULL", "BEAR"}  # HOLD is not directional
+
+
+def test_spy_always_deep_dived_even_when_hold():
+    """SPY is guaranteed a deep dive every run — the '+1 done on SPY' rule —
+    even when its quick scan is HOLD and it's outside the directional set."""
+    rows = [_q(f"T{i}", "BUY", 9) for i in range(options_engine.DEEP_TOP)]
+    rows.append(_q("SPY", "HOLD", 1))
+    top = options_engine.select_deep_dive_targets(rows)
+    assert any(r["ticker"] == "SPY" for r in top), "SPY must always be deep-dived"
+    assert len(top) == options_engine.DEEP_TOP + 1  # the forced +1
+
+
+def test_spy_not_duplicated_when_already_directional():
+    rows = [_q("SPY", "BUY", 10)] + [_q(f"T{i}", "BUY", 5) for i in range(3)]
+    top = options_engine.select_deep_dive_targets(rows)
+    assert [r["ticker"] for r in top].count("SPY") == 1
+
+
 # ── Ledger + position lifecycle ──────────────────────────────────────────────
 
 def test_open_close_ledger_flow(account_id):

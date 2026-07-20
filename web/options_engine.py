@@ -2,9 +2,9 @@
 
 Pipeline (run_options_build, behind POST /api/options-scan, cron Mon-Fri):
   settle expiries -> movers pre-screen (top 250 S&P momentum/volume) ->
-  select top 100 + SPY (101 total for quick LLM scan) -> full deep dive on the
-  top DEEP_TOP directional names (BUY *and* SELL — puts need bearish candidates,
-  unlike the equity scan's BUY/HOLD filter) -> market-open gate -> chain fetch +
+  quick LLM scan of those 250 + SPY -> full deep dive on the top DEEP_TOP (100)
+  directional names + SPY (BUY *and* SELL — puts need bearish candidates, unlike
+  the equity scan's BUY/HOLD filter) -> market-open gate -> chain fetch +
   contract vetting (options_data) -> LLM allocator (options_allocator) ->
   apply decisions through db's transactional position/ledger helpers.
 
@@ -39,9 +39,9 @@ from .spy_tickers import get_sp500_tickers
 
 log = logging.getLogger(__name__)
 
-PRESCREEN_TOP = 250     # movers fetched for ranking (top 250 S&P momentum/volume)
-SCAN_LIMIT = 100        # of those 250, only scan the top 100 + SPY (101 total)
-DEEP_TOP = 25           # directional names that get the full agent graph
+PRESCREEN_TOP = 250     # top movers (by momentum/volume) that get the quick LLM scan
+DEEP_TOP = 100          # directional names that get the full agent graph
+ALWAYS_DEEP = ("SPY",)  # tickers guaranteed a deep dive every run, HOLD or not
 MARKET_OPEN_ET = (9, 35)  # allocation waits for live quotes on trading days
 SETTLE_HOUR_ET = 17     # expiry-day positions settle only after this hour
 STALE_ALERT_THRESHOLD = 3
@@ -102,6 +102,27 @@ def prescreen(tickers: list[str], top_n: int = PRESCREEN_TOP) -> list[str]:
                 scored.append((s, tickers[0]))
     scored.sort(key=lambda x: (-x[0], x[1]))
     return [t for _, t in scored[:top_n]]
+
+
+def select_deep_dive_targets(quick_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The rows that get a full multi-agent deep dive.
+
+    Top DEEP_TOP directional names (BUY *and* SELL, by conviction) PLUS every
+    ALWAYS_DEEP ticker (SPY) guaranteed a dive even when its quick scan came back
+    HOLD or it fell outside the top DEEP_TOP — the full agent graph gets its own
+    shot at a directional call on the index gauge. ALWAYS_DEEP names are appended
+    once (never duplicated when they already made the directional cut)."""
+    directional = [r for r in quick_results
+                   if (r.get("signal") or "").upper() in ("BUY", "SELL")]
+    top = sorted(directional, key=lambda r: -(r.get("conviction") or 0))[:DEEP_TOP]
+    have = {(r.get("ticker") or "").upper() for r in top}
+    for sym in ALWAYS_DEEP:
+        if sym not in have:
+            row = next((r for r in quick_results
+                        if (r.get("ticker") or "").upper() == sym), None)
+            if row:
+                top.append(row)
+    return top
 
 
 # ── Expiry settlement ────────────────────────────────────────────────────────
@@ -448,15 +469,15 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
     with _phase("Couldn't fetch the S&P 500 ticker list"):
         universe = get_sp500_tickers()
     with _phase("Movers pre-screen failed"):
-        all_movers = prescreen(universe, PRESCREEN_TOP)
-    if not all_movers:
+        movers = prescreen(universe, PRESCREEN_TOP)
+    if not movers:
         raise RuntimeError("Movers pre-screen returned no tickers")
-    # Scan top 100 movers + SPY (always included for leverage/portfolio hedging context)
-    movers = all_movers[:SCAN_LIMIT]
-    if "SPY" not in movers:
-        movers.append("SPY")
-    log.info("[options %s] scanning %d movers (top %d of %d prescreened)",
-             scan_id, len(movers), SCAN_LIMIT, len(all_movers))
+    # Quick-scan the top 250 movers + SPY (the index gauge, always included).
+    for sym in ALWAYS_DEEP:
+        if sym not in movers:
+            movers.append(sym)
+    log.info("[options %s] quick-scanning %d movers (top %d + %s)",
+             scan_id, len(movers), PRESCREEN_TOP, ",".join(ALWAYS_DEEP))
     with _phase("Quick scan failed"):
         quick_results = spy_scanner.run_quick_scan(scan_id, movers, config)
     if db.is_spy_scan_cancelled(scan_id):
@@ -468,9 +489,7 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
 
     # Phase 2: deep dive the top directional names — BUY *and* SELL (puts need
     # bearish candidates; deliberately unlike the equity scan's BUY/HOLD cut).
-    directional = [r for r in quick_results
-                   if (r.get("signal") or "").upper() in ("BUY", "SELL")]
-    top = sorted(directional, key=lambda r: -(r.get("conviction") or 0))[:DEEP_TOP]
+    top = select_deep_dive_targets(quick_results)
     enriched: list[dict[str, Any]] = []
     if top:
         with _phase("Deep-dive analysis failed"):

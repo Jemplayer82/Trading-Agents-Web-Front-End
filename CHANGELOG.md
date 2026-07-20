@@ -13,9 +13,10 @@ Breaking changes within the 0.x line are called out explicitly.
 - **Daily options paper trading.** New "Options" dashboard tab paper-trades
   long single-leg calls/puts on S&P 500 movers, $100k per options paper
   account. Every weekday (07:30 ET): momentum/volume pre-screen ranks the
-  universe, the top 150 movers get the cheap quick-LLM scan, the top 25
-  directional names (BUY *and* SELL — puts need bearish candidates) get the
-  full multi-agent deep dive, then after the open (09:35 ET gate for live
+  universe, the top 250 movers + SPY get the cheap quick-LLM scan, the top 100
+  directional names + SPY (BUY *and* SELL — puts need bearish candidates; SPY
+  is deep-dived every run) get the full multi-agent deep dive, then after the
+  open (09:35 ET gate for live
   quotes) a deterministic contract selector (~21 DTE, ~0.45 delta or near-ATM,
   liquidity gates against zero-bid/wide/illiquid quotes) feeds an LLM
   allocator that opens/holds/closes contracts under hard guardrails: force-
