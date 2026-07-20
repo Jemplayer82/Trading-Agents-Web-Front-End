@@ -1,8 +1,8 @@
 """Daily options paper-trading engine.
 
 Pipeline (run_options_build, behind POST /api/options-scan, cron Mon-Fri):
-  settle expiries -> movers pre-screen (top 250 S&P momentum/volume) ->
-  quick LLM scan of those 250 + SPY -> full deep dive on the top DEEP_TOP (100)
+  settle expiries -> pre-screen the whole S&P 500 by momentum/volume ->
+  quick LLM scan of the top 150 + SPY -> full deep dive on the top DEEP_TOP (50)
   directional names + SPY (BUY *and* SELL — puts need bearish candidates, unlike
   the equity scan's BUY/HOLD filter) -> market-open gate -> chain fetch +
   contract vetting (options_data) -> LLM allocator (options_allocator) ->
@@ -39,8 +39,8 @@ from .spy_tickers import get_sp500_tickers
 
 log = logging.getLogger(__name__)
 
-PRESCREEN_TOP = 250     # top movers (by momentum/volume) that get the quick LLM scan
-DEEP_TOP = 100          # directional names that get the full agent graph
+PRESCREEN_TOP = 150     # top movers (by momentum/volume) that get the quick LLM scan
+DEEP_TOP = 50           # directional names that get the full agent graph
 ALWAYS_DEEP = ("SPY",)  # tickers guaranteed a deep dive every run, HOLD or not
 MARKET_OPEN_ET = (9, 35)  # allocation waits for live quotes on trading days
 SETTLE_HOUR_ET = 17     # expiry-day positions settle only after this hour

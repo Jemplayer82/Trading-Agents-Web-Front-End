@@ -63,7 +63,7 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
 - Selectable data source — Schwab MCP server or built-in collection method (toggle in settings)
 - Automated nightly portfolio analysis of all holdings
 - S&P 500 weekly scanner (all ~500 tickers, deep-dive top 50, $100k portfolio builder)
-- Daily options paper trader (movers pre-screen top 250 → quick scan top 250 + SPY → deep-dive top 100 directional + SPY → long calls/puts with hard risk guardrails, real cash/realized-P&L ledger)
+- Daily options paper trader (pre-screen the whole S&P 500 → quick scan top 150 + SPY → deep-dive top 50 directional + SPY → long calls/puts with hard risk guardrails, real cash/realized-P&L ledger)
 - Background job scheduler (APScheduler with cron expressions)
 
 **Provider & Credential Management**
@@ -229,7 +229,7 @@ The scan re-runs automatically every Saturday, and the AI agent rebalances the p
 
 Daily options paper trader — long single-leg calls and puts on S&P 500 movers, 100% simulated with $100k per options paper account. Every weekday:
 
-- **07:30 ET** — momentum/volume pre-screen ranks the top **250** S&P movers; those **250 + SPY** get the quick LLM scan; the top **100 directional names + SPY** (BUY *and* SELL — big losers become put candidates; SPY is deep-dived every run) get the full multi-agent deep dive
+- **07:30 ET** — momentum/volume pre-screen ranks the **whole S&P 500**; the top **150 + SPY** get the quick LLM scan; the top **50 directional names + SPY** (BUY *and* SELL — big losers become put candidates; SPY is deep-dived every run) get the full multi-agent deep dive
 - **09:35 ET gate** — allocation waits for the market open so entries fill at live quotes
 - **Contract selection** — deterministic, pre-LLM: ~21 DTE (10–45 window), ~0.45 delta via Schwab chains (near-ATM fallback on yfinance), liquidity gates against zero-bid / crossed / wide / illiquid quotes
 - **LLM allocator** decides open / hold / close daily under **hard guardrails**: force-close at DTE ≤ 3 or premium −60% (stop-loss), per-position and total-premium caps by aggressiveness, max 15 open positions, deterministic fallback if the LLM fails
