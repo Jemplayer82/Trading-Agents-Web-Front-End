@@ -259,6 +259,35 @@ def scan_status() -> dict[str, Any]:
     }
 
 
+def _advance_queue_if_idle() -> dict[str, Any] | None:
+    """Start the next queued scan iff nothing is currently running.
+
+    Recovery path for the wedge where a worker dies SILENTLY (crash/OOM/host
+    SIGKILL): its `finally: _dequeue_next_scan()` never runs, so any scan queued
+    behind it sits 'queued' forever with nothing running. The stuck-run reaper
+    (web/scheduler.py) calls this after failing abandoned scans. Guarded on
+    _is_any_scan_running so it's a safe no-op while a scan is live and can't
+    double-start one. Returns the now-running scan, or None if it stayed idle.
+    """
+    with db.connect() as conn:
+        if _is_any_scan_running(conn):
+            return None
+    _dequeue_next_scan()
+    with db.connect() as conn:
+        running = _is_any_scan_running(conn)
+    return dict(running) if running else None
+
+
+@app.post("/api/portfolio/advance-queue")
+def advance_queue() -> dict[str, Any]:
+    """Internal recovery hook (reaper → here): kick the scan queue if idle.
+
+    nginx routes /api/portfolio* to this app; the scheduler calls it directly
+    over the internal network with X-Internal-Token. No-op when a scan runs."""
+    started = _advance_queue_if_idle()
+    return {"started": started}
+
+
 # ---------- background worker ----------
 
 def _refresh_creds_from_db() -> None:

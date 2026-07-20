@@ -310,6 +310,20 @@ def job_reap_stuck_runs() -> None:
     except Exception:
         log.exception("[reaper] sweep failed")
 
+    # A silently-dead worker never ran its finally-dequeue, so a scan queued
+    # behind it would sit stranded 'queued' forever with nothing running. Kick
+    # the queue on every sweep (idle-guarded no-op if a scan is live), so a
+    # crash can't permanently wedge the pipeline. Runs regardless of whether
+    # this sweep failed anything — it also recovers a queue stranded earlier.
+    try:
+        r = httpx.post(f"{PORTFOLIO_URL}/api/portfolio/advance-queue",
+                       timeout=30, headers=_internal_headers())
+        started = (r.json() or {}).get("started") if r.is_success else None
+        if started:
+            log.info("[reaper] advanced stranded queue → scan %s", started.get("id"))
+    except Exception:
+        log.exception("[reaper] advance-queue kick failed")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()

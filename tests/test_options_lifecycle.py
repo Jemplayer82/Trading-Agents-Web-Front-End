@@ -366,6 +366,46 @@ def test_pending_counts_as_busy(tmp_db):
     assert busy is not None and busy["scan_type"] == "spy"
 
 
+def test_advance_queue_starts_next_when_idle(tmp_db, monkeypatch):
+    """The stuck-run reaper's recovery hook. A silently dead worker never runs
+    its finally-dequeue, so a scan queued behind it sits stranded forever with
+    nothing running. Advancing must start the oldest queued scan. Regression for
+    the production wedge (equity scan #10 stuck 'queued' behind a crashed run)."""
+    import threading
+
+    from web import portfolio_main
+
+    started: dict[str, int] = {}
+    done = threading.Event()
+
+    def _rec(name):
+        def _t(scan_id, trade_date):
+            started[name] = scan_id
+            done.set()
+        return _t
+
+    monkeypatch.setattr(portfolio_main, "_run_spy_scan_thread", _rec("equity"))
+    q = db.create_spy_scan("2026-07-17", status="queued", kind="equity")
+
+    kicked = portfolio_main._advance_queue_if_idle()
+    assert done.wait(5)
+    assert started == {"equity": q}
+    assert kicked is not None and kicked["id"] == q
+
+
+def test_advance_queue_noop_when_busy(tmp_db, monkeypatch):
+    """Advancing must not start a second scan while one is already running —
+    otherwise the reaper's recovery kick could double-start a live scan."""
+    from web import portfolio_main
+
+    calls: list[int] = []
+    monkeypatch.setattr(portfolio_main, "_dequeue_next_scan", lambda: calls.append(1))
+    db.create_spy_scan("2026-07-17", status="running_quick", kind="options")  # busy
+
+    assert portfolio_main._advance_queue_if_idle() is None
+    assert calls == [], "must not dequeue while a scan is running"
+
+
 def test_mover_score_direction_agnostic():
     closes_up = [100 + i for i in range(21)]
     closes_down = [100 - i * 0.8 for i in range(21)]
