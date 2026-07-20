@@ -1,9 +1,9 @@
 """Daily options paper-trading engine.
 
 Pipeline (run_options_build, behind POST /api/options-scan, cron Mon-Fri):
-  settle expiries -> movers pre-screen (top PRESCREEN_TOP of the S&P 500) ->
-  quick LLM scan (spy_scanner.run_quick_scan) -> full deep dive on the top
-  DEEP_TOP directional names (BUY *and* SELL — puts need bearish candidates,
+  settle expiries -> movers pre-screen (top 250 S&P momentum/volume) ->
+  select top 100 + SPY (101 total for quick LLM scan) -> full deep dive on the
+  top DEEP_TOP directional names (BUY *and* SELL — puts need bearish candidates,
   unlike the equity scan's BUY/HOLD filter) -> market-open gate -> chain fetch +
   contract vetting (options_data) -> LLM allocator (options_allocator) ->
   apply decisions through db's transactional position/ledger helpers.
@@ -39,7 +39,8 @@ from .spy_tickers import get_sp500_tickers
 
 log = logging.getLogger(__name__)
 
-PRESCREEN_TOP = 150     # movers that get the cheap quick-LLM scan
+PRESCREEN_TOP = 250     # movers fetched for ranking (top 250 S&P momentum/volume)
+SCAN_LIMIT = 100        # of those 250, only scan the top 100 + SPY (101 total)
 DEEP_TOP = 25           # directional names that get the full agent graph
 MARKET_OPEN_ET = (9, 35)  # allocation waits for live quotes on trading days
 SETTLE_HOUR_ET = 17     # expiry-day positions settle only after this hour
@@ -447,9 +448,15 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
     with _phase("Couldn't fetch the S&P 500 ticker list"):
         universe = get_sp500_tickers()
     with _phase("Movers pre-screen failed"):
-        movers = prescreen(universe, PRESCREEN_TOP)
-    if not movers:
+        all_movers = prescreen(universe, PRESCREEN_TOP)
+    if not all_movers:
         raise RuntimeError("Movers pre-screen returned no tickers")
+    # Scan top 100 movers + SPY (always included for leverage/portfolio hedging context)
+    movers = all_movers[:SCAN_LIMIT]
+    if "SPY" not in movers:
+        movers.append("SPY")
+    log.info("[options %s] scanning %d movers (top %d of %d prescreened)",
+             scan_id, len(movers), SCAN_LIMIT, len(all_movers))
     with _phase("Quick scan failed"):
         quick_results = spy_scanner.run_quick_scan(scan_id, movers, config)
     if db.is_spy_scan_cancelled(scan_id):
