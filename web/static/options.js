@@ -202,13 +202,25 @@ function optMoneyCell(v, { signed = false } = {}) {
   return "<span style=\"color:" + color + ";font-weight:600;\">" + sign + "$" + Math.round(v).toLocaleString() + "</span>";
 }
 
-// "AAPL 230C" + expiry — the display convention brokerages.py uses for real
-// held options.
+// Display format: ticker (company name) + strike/call/put + expiration date.
+// Company names sourced from a static map of top S&P 500 tickers.
 function optContractLabel(p) {
+  const companies = {
+    "AAPL": "Apple", "MSFT": "Microsoft", "NVDA": "NVIDIA", "GOOGL": "Alphabet", "AMZN": "Amazon",
+    "TSLA": "Tesla", "META": "Meta", "BRK": "Berkshire", "JPMJ": "JPMorgan", "V": "Visa",
+    "JNJ": "J&J", "WMT": "Walmart", "XOM": "ExxonMobil", "KO": "Coca-Cola", "PG": "Procter & Gamble",
+    "MA": "Mastercard", "HD": "Home Depot", "MRK": "Merck", "LLY": "Eli Lilly", "PFE": "Pfizer",
+    "ABBV": "AbbVie", "ORCL": "Oracle", "NVO": "Novo Nordisk", "MMM": "3M", "CRM": "Salesforce",
+    "IBM": "IBM", "INTC": "Intel", "AVGO": "Broadcom", "CAT": "Caterpillar", "C": "Citi",
+    "UNH": "UnitedHealth", "CVX": "Chevron", "GE": "General Electric", "CSCO": "Cisco", "APO": "Apollo",
+  };
+  const ticker = p.underlying || "?";
+  const company = companies[ticker] || "";
+  const label = company ? ticker + " (" + company + ")" : ticker;
   const cp = (p.put_call || "?")[0];
   const strike = p.strike != null ? Number(p.strike) : 0;
   const strikeTxt = Number.isInteger(strike) ? strike : strike.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
-  return "<strong style=\"color:var(--accent-cyan);\">" + escapeHtml(p.underlying || "?") + " " + strikeTxt + cp + "</strong>" +
+  return "<strong style=\"color:var(--accent-cyan);\">" + escapeHtml(label) + " $" + strikeTxt + cp + "</strong>" +
     "<span class=\"dim\" style=\"font-size:10px;margin-left:6px;\">" + escapeHtml(p.expiration_date || "") + "</span>";
 }
 
@@ -501,14 +513,30 @@ function optClosedPositionsHtml(positions) {
 function optDecisionsHtml(scan) {
   if (!scan || !scan.portfolio_json || !scan.portfolio_json.length) return "";
   const actionColor = { NEW: "var(--accent-cyan)", CLOSE: "var(--accent-red)", HOLD: "var(--dim)" };
+  const companies = {
+    "AAPL": "Apple", "MSFT": "Microsoft", "NVDA": "NVIDIA", "GOOGL": "Alphabet", "AMZN": "Amazon",
+    "TSLA": "Tesla", "META": "Meta", "BRK": "Berkshire", "JPMJ": "JPMorgan", "V": "Visa",
+    "JNJ": "J&J", "WMT": "Walmart", "XOM": "ExxonMobil", "KO": "Coca-Cola", "PG": "Procter & Gamble",
+    "MA": "Mastercard", "HD": "Home Depot", "MRK": "Merck", "LLY": "Eli Lilly", "PFE": "Pfizer",
+    "ABBV": "AbbVie", "ORCL": "Oracle", "NVO": "Novo Nordisk", "MMM": "3M", "CRM": "Salesforce",
+    "IBM": "IBM", "INTC": "Intel", "AVGO": "Broadcom", "CAT": "Caterpillar", "C": "Citi",
+    "UNH": "UnitedHealth", "CVX": "Chevron", "GE": "General Electric", "CSCO": "Cisco", "APO": "Apollo",
+  };
   const rows = scan.portfolio_json.map((d) => {
     const act = (d.action || "—").toUpperCase();
+    const ticker = d.underlying || "?";
+    const company = companies[ticker] || "";
+    const contractLabel = company ? ticker + " (" + company + ")" : ticker;
+    const cp = (d.put_call || "?")[0];
+    const strike = d.strike != null ? Number(d.strike) : 0;
+    const strikeTxt = Number.isInteger(strike) ? strike : strike.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+    const contractStr = escapeHtml(contractLabel) + " $" + strikeTxt + cp + " " + escapeHtml(d.expiration_date || "");
     const detail = act === "NEW"
       ? d.contracts + "x @ $" + (Number(d.entry_premium) || 0).toFixed(2) + " ($" + Math.round(d.cost || 0).toLocaleString() + ")"
       : (act === "CLOSE" ? "exit @ $" + (Number(d.exit_premium) || 0).toFixed(2) + " (" + escapeHtml(d.exit_reason || "") + ")" : "—");
     return (
       "<tr>" +
-        "<td style=\"font-family:monospace;font-size:11px;\">" + escapeHtml(d.occ_symbol || "") + "</td>" +
+        "<td style=\"font-size:11px;font-weight:600;color:var(--accent-cyan);\">" + contractStr + "</td>" +
         "<td><span style=\"font-size:10px;font-weight:700;color:" + (actionColor[act] || "var(--dim)") + ";\">" + act + "</span></td>" +
         "<td class=\"dim\" style=\"font-size:11px;\">" + detail + "</td>" +
         "<td class=\"dim\" style=\"font-size:11px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;\">" + escapeHtml((d.rationale || "").slice(0, 110)) + "</td>" +
