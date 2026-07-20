@@ -48,13 +48,22 @@ services:
       - switchboard
 
   # Portfolio scan backend — separate container so long scans don't block ad-hoc.
+  # mem_limit + reduced scan concurrency: the host is a 11.5 GB VM already ~67%
+  # full at idle across 33 containers, so a large options quick-scan's memory
+  # growth used to tip it into a HOST-level OOM that SIGKILLed this process with
+  # no traceback (RestartCount climbing, scans reaped as "abandoned"). The cgroup
+  # limit both protects the other containers from a host-wide OOM and makes any
+  # future breach diagnosable (OOMKilled=true) instead of an invisible host kill.
   tradingagents-portfolio:
     image: ghcr.io/jemplayer82/tradingagents:latest
     pull_policy: always
     entrypoint: ["uvicorn", "web.portfolio_main:app", "--host", "0.0.0.0", "--port", "8000"]
+    mem_limit: 4g
     environment:
       LLM_PROVIDER: ollama
       TRADINGAGENTS_LLM_PROVIDER: ollama
+      # Fewer concurrent scan workers → lower peak memory on the tight host.
+      OLLAMA_MAX_CONCURRENCY: "3"
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY}
       SCHWAB_APP_KEY: ${SCHWAB_APP_KEY}
