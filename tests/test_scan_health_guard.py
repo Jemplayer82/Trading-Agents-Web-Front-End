@@ -7,7 +7,7 @@ options scan reported **completed** with an empty portfolio and no alert.
 
 import pytest
 
-from web import options_engine, runner, spy_scanner
+from web import options_engine, runner
 from web.spy_scanner import (
     ScanInfrastructureError,
     assert_deep_dives_healthy,
@@ -39,13 +39,13 @@ def test_total_failure_raises_and_quotes_the_error():
 
 
 def test_healthy_scan_passes():
-    assert_quick_scan_healthy([_row(f"T{i}") for i in range(150)]) is None
+    assert assert_quick_scan_healthy([_row(f"T{i}") for i in range(150)]) is None
 
 
 def test_partial_errors_do_not_trip_the_guard():
     """Routine flakiness across a large universe must never fail a run."""
     rows = [_row(f"T{i}") for i in range(140)] + [_row(f"E{i}", error="boom") for i in range(10)]
-    assert_quick_scan_healthy(rows) is None
+    assert assert_quick_scan_healthy(rows) is None
 
 
 @pytest.mark.parametrize(

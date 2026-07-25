@@ -586,7 +586,7 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
                               "rationale": h.get("rationale")})
 
     report = alloc["report_md"]
-    reason = _zero_candidate_reason(quick_results, directional, enriched, usable, candidates)
+    reason = _zero_candidate_reason(quick_results, top, enriched, usable, candidates)
     if reason:
         report += f"\n## Why no new positions\n{reason}\n"
     if skipped_opens:
