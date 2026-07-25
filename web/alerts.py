@@ -82,8 +82,29 @@ def notify_run_failed(
     summary = f"⚠️ {kind} #{run_id} failed: {label}".strip()
     detail = (error or "").strip()[:_ERROR_MAX]
     target = link or _dashboard_url()
+    return notify(summary, detail, link=target)
+
+
+def notify(summary: str, detail: str = "", *, link: str | None = None) -> threading.Thread:
+    """General-purpose dual-channel alert (webhook + email). Never raises.
+
+    Same delivery guarantee as notify_run_failed but for callers that aren't
+    reporting a specific failed run (e.g. scheduler.py's Schwab-token-health
+    and scan-rejected-at-cron-time checks) — those used to call
+    web/notifier.py's default_notifier().send() directly, which is
+    single-channel and goes silent whenever FRED_NOTIFY_URL is unreachable.
+
+    summary short one-line headline.
+    detail   optional body text (truncated to _ERROR_MAX).
+    link     deep link; defaults to DASHBOARD_URL.
+
+    Returns the delivery thread (already started) so callers/tests can join it;
+    normal callers ignore it.
+    """
+    target = link or _dashboard_url()
     t = threading.Thread(
-        target=_deliver, args=(summary, detail, target), name="run-failure-alert", daemon=True
+        target=_deliver, args=(summary, (detail or "").strip()[:_ERROR_MAX], target),
+        name="alert", daemon=True,
     )
     t.start()
     return t

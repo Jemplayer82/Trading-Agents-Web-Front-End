@@ -39,7 +39,6 @@ from apscheduler.triggers.interval import IntervalTrigger
 from . import alerts, db, newsletter
 from . import credentials as creds
 from ._logging import configure_logging
-from .notifier import default_notifier
 
 configure_logging()
 log = logging.getLogger("scheduler")
@@ -53,6 +52,21 @@ DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "https://trading.txferguson.net"
 # crashed worker. Generous defaults so a slow-but-healthy deep dive isn't reaped.
 STUCK_SCAN_STALL_MIN = int(os.environ.get("STUCK_SCAN_STALL_MIN", "60"))
 STUCK_ANALYSIS_MIN = int(os.environ.get("STUCK_ANALYSIS_MIN", "90"))
+
+_ALERT_DETAIL_MAX = 400  # cap response bodies/tracebacks embedded in scheduler alerts
+
+# Re-alert cadence while Schwab stays de-authorized (hours). The first alert
+# fires immediately on the connected->not-connected transition; after that,
+# re-nag periodically instead of hourly (spammy) or once (a missed alert
+# means days of silent nightly-scan failures, as happened 2026-07-25).
+SCHWAB_REALERT_HOURS = int(os.environ.get("SCHWAB_REALERT_HOURS", "6"))
+# Last known Schwab connection state (None=unknown at startup, True/False
+# after the first check). Module-level and in-memory: resets on container
+# restart (rare — restart: unless-stopped), acceptable since a restart also
+# re-checks within the hour and re-alerts if still down.
+_schwab_last_connected: bool | None = None
+_schwab_down_since: datetime | None = None
+_schwab_last_alert_at: datetime | None = None
 
 
 def _internal_headers() -> dict[str, str]:
@@ -87,10 +101,21 @@ def job_nightly_scan() -> None:
     try:
         r = httpx.post(f"{PORTFOLIO_URL}/api/portfolio-scan", timeout=60, headers=_internal_headers())
         log.info("[nightly_scan] response %s: %s", r.status_code, r.text[:400])
+        if r.status_code >= 400:
+            # e.g. 400 "Schwab MCP not connected" — the cron fired but the scan
+            # was rejected before a row was even created. Previously only
+            # logged, so a dead Schwab token silently killed every nightly
+            # scan with no user-visible signal beyond a log line no one reads.
+            alerts.notify(
+                f"⚠️ Nightly portfolio scan rejected ({r.status_code}).",
+                r.text[:_ALERT_DETAIL_MAX],
+                link=DASHBOARD_URL,
+            )
     except Exception as exc:
         log.exception("[nightly_scan] failed: %s", exc)
-        default_notifier().send(
+        alerts.notify(
             "⚠️ Nightly portfolio scan failed to start.",
+            str(exc),
             link=DASHBOARD_URL,
         )
 
@@ -122,7 +147,7 @@ def job_morning_newsletter() -> None:
     scan = _latest_scan_for_today()
     if not scan:
         log.warning("[newsletter] no scan to send")
-        default_notifier().send("Morning newsletter skipped: no overnight scan found.")
+        alerts.notify("Morning newsletter skipped: no overnight scan found.", link=DASHBOARD_URL)
         return
     if scan.get("status") != "completed":
         log.warning("[newsletter] latest scan status=%s — sending anyway", scan.get("status"))
@@ -138,7 +163,17 @@ def job_morning_newsletter() -> None:
 
 
 def job_token_health() -> None:
-    """Hourly Schwab MCP session check; notifies the user when re-auth is needed."""
+    """Hourly Schwab MCP session check; notifies the user when re-auth is needed.
+
+    Alerts on the connected->not-connected transition (dual-channel, so a
+    dead Fred webhook can't swallow it — see 2026-07-25: the token died,
+    token_health logged a WARNING every hour for 13+ hours, and the ONLY
+    notification channel (FRED_NOTIFY_URL) was connection-refused the whole
+    time, so nothing ever reached the user). Re-alerts every
+    SCHWAB_REALERT_HOURS while still down, in case the first alert is missed,
+    instead of hourly (spammy) or once (silent for days if missed).
+    """
+    global _schwab_last_connected, _schwab_down_since, _schwab_last_alert_at
     try:
         r = httpx.get(f"{API_URL}/api/auth/schwab/status", timeout=15, headers=_internal_headers())
         if r.status_code != 200:
@@ -152,14 +187,41 @@ def job_token_health() -> None:
     if not data.get("enabled", True):
         log.info("[token_health] Schwab disabled — skipping")
         return
+
+    now = datetime.utcnow()
     if not data.get("connected"):
         log.warning("[token_health] Schwab MCP not authorized")
-        default_notifier().send(
-            "⚠️ Schwab MCP session is not authorized — nightly/portfolio scans and live "
-            "quotes are down. Re-authorize at https://schwab.txferguson.net/auth",
-            link="https://schwab.txferguson.net/auth",
+        became_down_now = _schwab_last_connected is not False  # True or None (startup)
+        due_for_realert = (
+            _schwab_last_alert_at is not None
+            and (now - _schwab_last_alert_at) >= timedelta(hours=SCHWAB_REALERT_HOURS)
         )
+        if became_down_now or due_for_realert:
+            if _schwab_down_since is None:
+                _schwab_down_since = now
+            down_for = now - _schwab_down_since
+            hours = int(down_for.total_seconds() // 3600)
+            alerts.notify(
+                "⚠️ Schwab MCP session is not authorized — nightly/portfolio scans and "
+                "live quotes are down.",
+                f"Down for ~{hours}h. Re-authorize at https://schwab.txferguson.net/auth",
+                link="https://schwab.txferguson.net/auth",
+            )
+            _schwab_last_alert_at = now
+        _schwab_last_connected = False
         return
+    if _schwab_last_connected is False:
+        log.info("[token_health] Schwab MCP reconnected after outage")
+        down_for = now - _schwab_down_since if _schwab_down_since else None
+        hours = int(down_for.total_seconds() // 3600) if down_for else 0
+        alerts.notify(
+            "✅ Schwab MCP re-authorized — scans and live quotes are back.",
+            f"Was down for ~{hours}h." if hours else "",
+            link=DASHBOARD_URL,
+        )
+    _schwab_last_connected = True
+    _schwab_down_since = None
+    _schwab_last_alert_at = None
     log.info("[token_health] Schwab MCP connected")
 
 
@@ -168,8 +230,19 @@ def job_spy_scan() -> None:
     try:
         r = httpx.post(f"{PORTFOLIO_URL}/api/spy-scan", timeout=60, headers=_internal_headers())
         log.info("[spy_scan] response %s: %s", r.status_code, r.text[:400])
+        if r.status_code >= 400:
+            alerts.notify(
+                f"⚠️ Weekly S&P 500 scan rejected ({r.status_code}).",
+                r.text[:_ALERT_DETAIL_MAX],
+                link=DASHBOARD_URL,
+            )
     except Exception as exc:
         log.exception("[spy_scan] failed: %s", exc)
+        alerts.notify(
+            "⚠️ Weekly S&P 500 scan failed to start.",
+            str(exc),
+            link=DASHBOARD_URL,
+        )
 
 
 def job_spy_price_refresh() -> None:
@@ -247,6 +320,17 @@ def job_outcome_sweep() -> None:
         from tradingagents.llm_clients import create_llm_client
 
         config = dict(DEFAULT_CONFIG)
+        if config.get("llm_provider", "openai").lower() == "openai" and not os.environ.get("OPENAI_API_KEY"):
+            # DEFAULT_CONFIG hardcodes provider="openai", which needs
+            # OPENAI_API_KEY — not configured on this deployment (the
+            # scheduler container carries no LLM credentials of its own).
+            # Every other scan path here (portfolio/SPY/chat) resolves
+            # through the switchboard bus instead of a raw provider key;
+            # do the same rather than crash-degrade to canned-only
+            # resolution every night (was: "Missing OPENAI_API_KEY" in
+            # logs since at least 2026-07-23).
+            config["llm_provider"] = "switchboard"
+            config["quick_think_llm"] = "claude-haiku-4-5-20251001"
         memory_log = TradingMemoryLog(config)
         # Missing/misconfigured LLM keys degrade the sweep (NOISE/CENSORED
         # entries still resolve; LLM-graded ones defer) instead of killing it.
@@ -364,7 +448,18 @@ def main() -> None:
         job_options_settle()
         return
 
-    sched = BlockingScheduler(timezone=TIMEZONE)
+    sched = BlockingScheduler(
+        timezone=TIMEZONE,
+        job_defaults={
+            # APScheduler default misfire_grace_time is 1 second — a fire time
+            # missed by more than that (container briefly busy/restarting/
+            # clock-jumped right at 22:00/00:00) is silently SKIPPED, not run
+            # late. An hour of slack means a scan still happens even if the
+            # process was mid-restart exactly at its cron time.
+            "misfire_grace_time": 3600,
+            "coalesce": True,
+        },
+    )
     sched.add_job(
         job_nightly_scan,
         # Mon-Fri only: holdings don't move over the closed-market weekend, so a
