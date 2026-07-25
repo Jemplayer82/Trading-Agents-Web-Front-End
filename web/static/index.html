@@ -10,6 +10,7 @@
          utils.js       shared globals ($, escapeHtml, fmtTs, renderMarkdown,
                         apiFetch, progressBar) — MUST stay the first /static/ script
          auth.js        login/setup overlay gate
+         schwab-alert.js  full-screen alert when Schwab is enabled but not connected
          app.js         Run Analysis tab (also defines applySchwabVisibility)
          bus.js         [ Agent Bus ] live feed panel
          portfolio.js   Portfolio tab + the main tab strip / "tab-shown" event
@@ -25,6 +26,7 @@
   <!-- DOMPurify sanitizes LLM-authored markdown before it reaches innerHTML. -->
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.7/dist/purify.min.js" defer></script>
   <script src="/static/auth.js" defer></script>
+  <script src="/static/schwab-alert.js" defer></script>
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js" defer></script>
   <script src="/static/app.js" defer></script>
   <script src="/static/bus.js" defer></script>
@@ -53,6 +55,23 @@
         <button id="auth-submit" type="submit" class="primary">Log in</button>
         <p id="auth-error" class="auth-error"></p>
       </form>
+    </div>
+  </div>
+  <!-- Schwab-down alert. schwab-alert.js shows this whenever /api/auth/schwab/status
+       reports enabled+not-connected — checked on load and every few minutes while
+       the tab stays open. Dismissible per-view; reappears next load/recheck until
+       actually reconnected (no permanent dismissal). -->
+  <div id="schwab-alert-overlay" hidden>
+    <div class="schwab-alert-card">
+      <div class="schwab-alert-icon">⚠️</div>
+      <div class="schwab-alert-title">SCHWAB NOT CONNECTED</div>
+      <p class="schwab-alert-body">
+        Nightly portfolio scans and live quotes are down until you re-authorize.
+      </p>
+      <div class="schwab-alert-actions">
+        <button id="schwab-alert-fix" type="button" class="primary schwab-alert-fix">Re-authorize now &rarr;</button>
+        <button id="schwab-alert-dismiss" type="button" class="ghost">Dismiss</button>
+      </div>
     </div>
   </div>
   <!-- Topbar: brand, the main tab strip (wired by portfolio.js setupTabs, which

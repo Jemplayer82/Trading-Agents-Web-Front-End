@@ -745,6 +745,40 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .auth-card input:focus { border-color: var(--accent-cyan); }
 .auth-error { color: var(--accent-red); font-size: 12px; min-height: 14px; margin: 0; }
 
+/* ----- Schwab-down alert (huge, unmissable, dismissible) ----- */
+#schwab-alert-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 999; /* just under #auth-overlay (1000) — login gate always wins */
+  background: rgba(20, 6, 6, 0.94);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#schwab-alert-overlay[hidden] { display: none; }
+.schwab-alert-card {
+  width: 460px;
+  max-width: 90vw;
+  border: 2px solid var(--accent-red);
+  background: var(--panel);
+  border-radius: 8px;
+  padding: 32px;
+  text-align: center;
+  box-shadow: 0 0 60px rgba(255, 124, 124, 0.25);
+}
+.schwab-alert-icon { font-size: 48px; line-height: 1; margin-bottom: 12px; }
+.schwab-alert-title {
+  color: var(--accent-red);
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  margin-bottom: 10px;
+}
+.schwab-alert-body { color: var(--text); font-size: 14px; margin: 0 0 22px; line-height: 1.5; }
+.schwab-alert-actions { display: flex; flex-direction: column; gap: 10px; align-items: stretch; }
+#schwab-alert-fix { padding: 10px 16px; font-size: 14px; }
+#schwab-alert-dismiss { padding: 8px 16px; font-size: 12px; }
+
 /* ----- Settings tab ----- */
 .settings-group-title {
   color: var(--accent-magenta);
