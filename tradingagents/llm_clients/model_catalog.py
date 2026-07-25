@@ -161,17 +161,25 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # cli.utils.confirm_ollama_endpoint() right after provider selection.
     # "Custom model ID" lets users pick any model they have pulled via
     # `ollama pull` beyond the three suggested defaults.
+    # Revalidate against the live list before editing — Ollama Cloud retires
+    # tags without notice and a stale entry here is a hard 404 at scan time,
+    # not a graceful fallback (the previous qwen3:latest / gpt-oss:latest /
+    # glm-4.7-flash:latest set all went dead this way). To refresh:
+    #   curl -sH "Authorization: Bearer $OLLAMA_API_KEY" \
+    #        https://ollama.com/v1/models | jq -r '.data[].id' | sort
+    # Last verified 2026-07-25 (every id below smoke-tested with a live
+    # chat.completions call, not just presence in the list).
     "ollama": {
         "quick": [
-            ("Qwen3:latest (8B)", "qwen3:latest"),
-            ("GPT-OSS:latest (20B)", "gpt-oss:latest"),
-            ("GLM-4.7-Flash:latest (30B)", "glm-4.7-flash:latest"),
+            ("GPT-OSS 20B", "gpt-oss:20b"),
+            ("GLM-5.2", "glm-5.2"),
+            ("DeepSeek V4 Flash", "deepseek-v4-flash"),
             ("Custom model ID", "custom"),
         ],
         "deep": [
-            ("GLM-4.7-Flash:latest (30B)", "glm-4.7-flash:latest"),
-            ("GPT-OSS:latest (20B)", "gpt-oss:latest"),
-            ("Qwen3:latest (8B)", "qwen3:latest"),
+            ("GPT-OSS 120B", "gpt-oss:120b"),
+            ("Qwen3.5 397B", "qwen3.5:397b"),
+            ("GLM-5.2", "glm-5.2"),
             ("Custom model ID", "custom"),
         ],
     },
