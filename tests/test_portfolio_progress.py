@@ -235,15 +235,19 @@ class TestRunScanProgress:
 
         monkeypatch.setattr(portfolio_main, "_mcp_positions", lambda: fake_positions)
 
-        def fake_run_single_ticker(ticker, trade_date, config, analysts):
-            return {
-                "final_state": {"trader_investment_plan": "", "final_trade_decision": ""},
-                "signal": "BUY",
-            }
+        # Same stub as the sibling test above — _run_scan uses
+        # SwitchboardOrchestrator, NOT portfolio_graph.run_single_ticker.
+        # Patching the wrong target leaves the real orchestrator in place and
+        # the test hangs on a live LLM call.
+        class FakeOrchestrator:
+            def __init__(self, config=None, selected_analysts=None):
+                self.memory_log = MagicMock()
+
+            def run(self, ticker, trade_date):
+                return ({"trader_investment_plan": "", "final_trade_decision": ""}, "BUY")
 
         monkeypatch.setattr(
-            "tradingagents.graph.portfolio_graph.run_single_ticker",
-            fake_run_single_ticker,
+            "tradingagents.orchestrator.SwitchboardOrchestrator", FakeOrchestrator
         )
         monkeypatch.setattr(
             portfolio_main.aggregator,

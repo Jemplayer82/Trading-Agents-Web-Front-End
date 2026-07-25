@@ -118,10 +118,17 @@ def _dte(expiration_date: str) -> int:
 
 
 def _mark(pos: dict[str, Any]) -> float:
-    """Best available per-share mark for an open position."""
+    """Best available per-share mark for an open position.
+
+    `>= 0`, not `> 0`: a contract really can be marked at 0.00 (deep OTM
+    decaying to worthless), and that is the single most important case the
+    stop-loss exists to catch. Treating a real 0.00 as "no data" fell through
+    to entry_premium, which made mark == entry, so the -60% stop-loss test
+    could never fire on a -100% position and P&L reported 0% instead.
+    """
     for key in ("current_premium", "entry_premium"):
         v = pos.get(key)
-        if isinstance(v, (int, float)) and v > 0:
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0:
             return float(v)
     return 0.0
 

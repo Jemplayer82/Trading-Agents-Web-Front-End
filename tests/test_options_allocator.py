@@ -74,6 +74,18 @@ def test_forced_close_stop_loss():
     assert [(p["id"], reason) for p, reason in forced] == [(1, "stop_loss")]
 
 
+def test_forced_close_stop_loss_at_zero_mark():
+    """A contract marked to 0.00 is a total loss and MUST stop out.
+
+    Regression: _mark() used `v > 0`, so a real 0.00 mark was treated as "no
+    quote" and fell through to entry_premium — mark == entry, so the stop-loss
+    comparison could never fire on the worst possible position.
+    """
+    positions = [_pos(1, "AAPL  X", entry=4.0, mark=0.0)]
+    forced = forced_closes(positions)
+    assert [(p["id"], reason) for p, reason in forced] == [(1, "stop_loss")]
+
+
 def test_forced_closes_precede_llm(monkeypatch):
     """A guardrail close happens even if the LLM says HOLD (its decision for a
     force-closed contract is simply an unknown symbol by then)."""

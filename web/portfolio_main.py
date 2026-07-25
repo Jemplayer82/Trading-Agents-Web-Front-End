@@ -67,7 +67,10 @@ app.middleware("http")(auth_app.auth_middleware)
 # in-memory lock is a belt-and-suspenders guard against race conditions; the
 # DB status is the authoritative queue state (survives restarts).
 
-_SCAN_LOCK = threading.Lock()
+# Reentrant: _advance_queue_if_idle() holds it across a _dequeue_next_scan()
+# call, and _dequeue_next_scan() acquires it on its own behalf for the callers
+# that reach it directly (each scan thread's `finally`).
+_SCAN_LOCK = threading.RLock()
 
 
 def _is_any_scan_running(conn) -> dict | None:  # type: ignore[type-arg]
@@ -93,36 +96,39 @@ def _is_any_scan_running(conn) -> dict | None:  # type: ignore[type-arg]
 def _dequeue_next_scan() -> None:
     """If anything is queued, start the oldest one. Called at the end of every
     scan thread. spy_scans rows carry kind: 'options' rows run the daily
-    options build, everything else the equity S&P pipeline."""
-    with db.connect() as conn:
-        # created_at must be IN the compound select — SQLite (correctly) refuses
-        # ORDER BY on a column absent from a UNION's result set.
-        row = conn.execute(
-            "SELECT 'portfolio' AS scan_type, id, trade_date, 'equity' AS kind, created_at"
-            " FROM portfolio_scans WHERE status = 'queued'"
-            " UNION SELECT 'spy', id, trade_date, kind, created_at"
-            " FROM spy_scans WHERE status = 'queued'"
-            " ORDER BY created_at LIMIT 1"
-        ).fetchone()
-    if not row:
-        return
-    scan_type, scan_id, trade_date = row["scan_type"], row["id"], row["trade_date"]
-    log.info("[queue] starting queued %s scan #%s", scan_type, scan_id)
-    if scan_type == "portfolio":
-        db.update_portfolio_scan(scan_id, status="running")
-        threading.Thread(
-            target=_run_scan_thread, args=(scan_id, trade_date), daemon=True
-        ).start()
-    elif row["kind"] == "options":
-        db.update_spy_scan(scan_id, status="running_quick")
-        threading.Thread(
-            target=_run_options_scan_thread, args=(scan_id, trade_date), daemon=True
-        ).start()
-    else:
-        db.update_spy_scan(scan_id, status="running_quick")
-        threading.Thread(
-            target=_run_spy_scan_thread, args=(scan_id, trade_date), daemon=True
-        ).start()
+    options build, everything else the equity S&P pipeline.
+
+    Holds _SCAN_LOCK across select-and-claim so two finishing scans (or a
+    finishing scan racing the reaper's advance-queue kick) can't both claim
+    the same queued row and start it twice."""
+    with _SCAN_LOCK:
+        with db.connect() as conn:
+            # created_at must be IN the compound select — SQLite (correctly) refuses
+            # ORDER BY on a column absent from a UNION's result set.
+            row = conn.execute(
+                "SELECT 'portfolio' AS scan_type, id, trade_date, 'equity' AS kind, created_at"
+                " FROM portfolio_scans WHERE status = 'queued'"
+                " UNION SELECT 'spy', id, trade_date, kind, created_at"
+                " FROM spy_scans WHERE status = 'queued'"
+                " ORDER BY created_at LIMIT 1"
+            ).fetchone()
+        if not row:
+            return
+        scan_type, scan_id, trade_date = row["scan_type"], row["id"], row["trade_date"]
+        log.info("[queue] starting queued %s scan #%s", scan_type, scan_id)
+        # The status write is the "claim" — it must happen under the same lock
+        # hold as the select, or a second caller can read the same 'queued' row
+        # before this one flips it to running.
+        if scan_type == "portfolio":
+            db.update_portfolio_scan(scan_id, status="running")
+            target = _run_scan_thread
+        elif row["kind"] == "options":
+            db.update_spy_scan(scan_id, status="running_quick")
+            target = _run_options_scan_thread
+        else:
+            db.update_spy_scan(scan_id, status="running_quick")
+            target = _run_spy_scan_thread
+    threading.Thread(target=target, args=(scan_id, trade_date), daemon=True).start()
 
 
 @app.on_event("startup")
@@ -193,14 +199,20 @@ async def start_scan(
     if not schwab_mcp.get_accounts(fields="positions"):
         raise HTTPException(status_code=400, detail="Schwab MCP not connected — re-authorize at https://schwab.txferguson.net/auth")
 
-    with db.connect() as conn:
-        busy = _is_any_scan_running(conn)
-    if busy:
-        scan_id = db.create_portfolio_scan(today, status="queued")
-        log.info("[queue] portfolio scan %s queued behind %s scan #%s", scan_id, busy["scan_type"], busy["id"])
-        return {"scan_id": scan_id, "status": "queued", "new": True, "queued_behind": busy}
+    # Lock spans the busy-check AND the create: db.connect() is autocommit with
+    # no transaction around the pair, so without it two near-simultaneous
+    # callers can both read "nothing running" and both start a scan — which
+    # puts two scans in the same 4g-capped container and reproduces the host
+    # OOM the queue exists to prevent.
+    with _SCAN_LOCK:
+        with db.connect() as conn:
+            busy = _is_any_scan_running(conn)
+        if busy:
+            scan_id = db.create_portfolio_scan(today, status="queued")
+            log.info("[queue] portfolio scan %s queued behind %s scan #%s", scan_id, busy["scan_type"], busy["id"])
+            return {"scan_id": scan_id, "status": "queued", "new": True, "queued_behind": busy}
 
-    scan_id = db.create_portfolio_scan(today)
+        scan_id = db.create_portfolio_scan(today)
     background_tasks.add_task(_run_scan_thread, scan_id, today, aggressiveness, bias)
     return {"scan_id": scan_id, "status": "running", "new": True}
 
@@ -269,12 +281,16 @@ def _advance_queue_if_idle() -> dict[str, Any] | None:
     _is_any_scan_running so it's a safe no-op while a scan is live and can't
     double-start one. Returns the now-running scan, or None if it stayed idle.
     """
-    with db.connect() as conn:
-        if _is_any_scan_running(conn):
-            return None
-    _dequeue_next_scan()
-    with db.connect() as conn:
-        running = _is_any_scan_running(conn)
+    # Lock spans idle-check + dequeue: a scan finishing naturally runs
+    # _dequeue_next_scan() from its own `finally` at the same time the reaper
+    # gets here, and without this both could start the same queued row.
+    with _SCAN_LOCK:
+        with db.connect() as conn:
+            if _is_any_scan_running(conn):
+                return None
+        _dequeue_next_scan()
+        with db.connect() as conn:
+            running = _is_any_scan_running(conn)
     return dict(running) if running else None
 
 
@@ -553,25 +569,26 @@ async def start_spy_scan(
     if row:
         return {"scan_id": int(row["id"]), "status": row["status"], "new": False}
 
-    with db.connect() as conn:
-        busy = _is_any_scan_running(conn)
-    if busy:
+    with _SCAN_LOCK:  # see start_scan — busy-check + create must be atomic
+        with db.connect() as conn:
+            busy = _is_any_scan_running(conn)
+        if busy:
+            scan_id = db.create_spy_scan(
+                today,
+                paper_account_id=account_id,
+                aggressiveness=aggressiveness,
+                bias=bias,
+                status="queued",
+            )
+            log.info("[queue] spy scan %s queued behind %s scan #%s", scan_id, busy["scan_type"], busy["id"])
+            return {"scan_id": scan_id, "status": "queued", "new": True, "queued_behind": busy}
+
         scan_id = db.create_spy_scan(
             today,
             paper_account_id=account_id,
             aggressiveness=aggressiveness,
             bias=bias,
-            status="queued",
         )
-        log.info("[queue] spy scan %s queued behind %s scan #%s", scan_id, busy["scan_type"], busy["id"])
-        return {"scan_id": scan_id, "status": "queued", "new": True, "queued_behind": busy}
-
-    scan_id = db.create_spy_scan(
-        today,
-        paper_account_id=account_id,
-        aggressiveness=aggressiveness,
-        bias=bias,
-    )
     background_tasks.add_task(_run_spy_scan_thread, scan_id, today)
     return {"scan_id": scan_id, "status": "running_quick", "new": True}
 
