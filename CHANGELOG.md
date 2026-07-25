@@ -106,6 +106,15 @@ Breaking changes within the 0.x line are called out explicitly.
 ### Changed
 
 - Shipped refactor plans archived under `docs/history/`.
+- ⚠️ **`memory_log_max_entries` now defaults to `300` (was `None` = unbounded).**
+  Resolved decision-log entries beyond the cap are pruned oldest-first on the
+  next write; pending entries are never pruned. This matters on upgrade: the
+  new nightly outcome sweep resolves the backlog that previously sat pending
+  forever, so the first sweep on a long-running deployment can cross the cap
+  and drop old history in one pass. Set `memory_log_max_entries: None` in the
+  config to keep the old unbounded behaviour (there is no env-var override for
+  this key), and back up `~/.tradingagents/memory/trading_memory.md` first if
+  that history matters to you.
 
 ## [1.2.0] — 2026-06-18
 
