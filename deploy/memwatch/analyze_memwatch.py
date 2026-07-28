@@ -34,6 +34,10 @@ from datetime import datetime, timedelta, timezone
 
 KB = 1024
 
+# Below this much data, refuse to state a trend. The leak being chased took six
+# days to matter; anything shorter is dominated by boot warmup or a burst of work.
+MIN_TREND_HOURS = 6.0
+
 # The report uses → and ⚠. On a console with a non-UTF-8 codepage (a Windows dev
 # box reading a copied-down CSV, say) printing those would raise and kill the
 # whole report. A diagnostic tool dying on its own output is unacceptable.
@@ -321,6 +325,17 @@ def main() -> int:
         print("  Not enough samples yet. Let it run at least a few hours.")
         return 0
 
+    # A short window is worse than no window: right after a boot, normal warmup
+    # (services starting, caches filling) looks like a steep leak, and
+    # extrapolating that slope produces confident nonsense like "1.3 TiB/week".
+    # Say so rather than printing a number that will be believed.
+    too_short = used.span_hours < MIN_TREND_HOURS
+    if too_short:
+        print(f"  ⚠ Only {used.span_hours:.1f}h of data. That is far too short to "
+              f"trend — a recent boot or a burst of work will dominate it.\n"
+              f"    Treat everything below as a snapshot, not a rate. Come back "
+              f"after {MIN_TREND_HOURS:.0f}h+.\n")
+
     host_delta = used.delta
     print(f"  host 'used'      {human(used.first)} → {human(used.last)}  "
           f"({human(host_delta)}, {human(used.slope_per_hour)}/hr)")
@@ -387,8 +402,13 @@ def main() -> int:
             print("\n  ✓ claude_stale flat at 0 — no orphaned claude processes. "
                   "The cleo grandchild theory is ruled out for this window.")
 
-    print(f"\n  Projected over 7 days at the current rate: "
-          f"{human(used.slope_per_hour * 24 * 7)}")
+    if too_short:
+        print(f"\n  (No 7-day projection: {used.span_hours:.1f}h of data would "
+              f"extrapolate to {human(used.slope_per_hour * 24 * 7)}, which is "
+              f"meaningless.)")
+    else:
+        print(f"\n  Projected over 7 days at the current rate: "
+              f"{human(used.slope_per_hour * 24 * 7)}")
     return 0
 
 
