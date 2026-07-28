@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -60,9 +61,34 @@ CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
 # gives up waiting.
 CLAUDE_CALL_TIMEOUT_S = float(os.environ.get("CLEO_CALL_TIMEOUT_S", "150"))
 
+# How long to let the CLI shut itself down at each escalation step (natural exit,
+# then SIGTERM, then SIGKILL). Short, because this runs after the reply has
+# already streamed — it only delays the final done-chunk.
+REAP_GRACE_S = float(os.environ.get("CLEO_REAP_GRACE_S", "5"))
+
+# Ceiling on requests in flight at once. ThreadPoolExecutor's queue is unbounded,
+# and each queued item holds a full conversation payload (megabytes for an
+# analyst run), so an unthrottled burst grows it without limit — which presents
+# exactly like a memory leak. Rejecting fast beats queueing forever: the
+# requester already gives up after its own 180s timeout.
+MAX_INFLIGHT = int(os.environ.get("CLEO_MAX_INFLIGHT", "16"))
+
+# Escalation ladder for shutting the CLI down. SIGKILL doesn't exist on Windows
+# (a dev box running the tests), so fall back to SIGTERM there.
+_SIG_ESCALATION = (signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM))
+
 # Holds the single-instance file lock for the life of the process. Kept at module
 # scope so the fd is never garbage-collected (which would release the lock).
 _INSTANCE_LOCK = None
+
+# One pooled HTTP client for the whole process. The previous code called the
+# module-level httpx.post(), which constructs and tears down an entire Client —
+# and a fresh TCP connection — on every call. bus_call runs once per streamed
+# text delta, so a single analyst report opened thousands of short-lived
+# connections. httpx.Client is safe to share across threads.
+_HTTP = httpx.Client(
+    limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
+)
 
 # Text protocol for tool calling. The CLI can't accept Anthropic tool schemas
 # (that's an API-only feature), so we teach the model an inline marker syntax in
@@ -92,7 +118,7 @@ def _parse_sse(resp: httpx.Response) -> dict:
 
 
 def bus_call(url: str, token: str, tool: str, args: dict, timeout: float = 35.0) -> dict:
-    resp = httpx.post(
+    resp = _HTTP.post(
         url.rstrip("/") + "/mcp",
         json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
               "params": {"name": tool, "arguments": args}},
@@ -352,6 +378,68 @@ class _ToolMarkerFilter:
 # Claude CLI invocation
 # ---------------------------------------------------------------------------
 
+def _signal_group(proc: subprocess.Popen, sig: int) -> None:
+    """Signal the CLI's whole process group, not just the CLI itself.
+
+    ``claude`` is a Node process that spawns children. Signalling only the direct
+    child leaves those grandchildren running; they reparent to PID 1 and survive
+    for the life of the box. Popen(start_new_session=True) puts the CLI in its
+    own process group precisely so the whole tree can be taken down here.
+    """
+    if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass  # already gone, or we lost the race with a normal exit
+    # Non-POSIX, or no group to signal. Fall back to the direct child so a
+    # missing group never means "no signal at all".
+    try:
+        proc.send_signal(sig)
+    except Exception:
+        pass
+
+
+def _reap(proc: subprocess.Popen) -> None:
+    """Shut the CLI down gracefully, escalating only if it refuses to go.
+
+    The read loop breaks the instant it sees the ``result`` event, at which point
+    the CLI is still running and about to exit on its own. The previous code
+    SIGKILLed it right there — on EVERY call, not just the rare timeout — and
+    SIGKILL cannot be caught, so Node never got the chance to reap its own
+    children. Over hundreds of calls a day that is a steady drip of orphans.
+
+    So: wait for a natural exit first, then SIGTERM the group (catchable, lets
+    Node clean up), and only then SIGKILL the group.
+    """
+    if proc.poll() is None:
+        try:
+            proc.wait(timeout=REAP_GRACE_S)
+        except subprocess.TimeoutExpired:
+            pass
+
+    for sig in _SIG_ESCALATION:
+        if proc.poll() is not None:
+            break
+        _signal_group(proc, sig)
+        try:
+            proc.wait(timeout=REAP_GRACE_S)
+        except subprocess.TimeoutExpired:
+            continue
+
+    if proc.poll() is None:
+        log.warning("claude CLI pid %s survived SIGKILL — likely orphaned", proc.pid)
+
+    # Close our ends last. Doing it earlier would hand the CLI an EPIPE and make
+    # it die abruptly, which is the very thing we are trying to avoid.
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        try:
+            if stream is not None:
+                stream.close()
+        except Exception:
+            pass
+
+
 def call_claude_streaming(model: str, system: str, messages: list, tools: list, max_tokens: int):
     """Drive ``claude -p`` in stream-json mode and yield text deltas + tool_calls.
 
@@ -382,6 +470,9 @@ def call_claude_streaming(model: str, system: str, messages: list, tools: list, 
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
+        # Own process group, so _signal_group can take down the CLI's children
+        # with it instead of leaving them to reparent to PID 1.
+        start_new_session=True,
     )
 
     # Feed the conversation on a thread so a large history can't deadlock against
@@ -448,10 +539,9 @@ def call_claude_streaming(model: str, system: str, messages: list, tools: list, 
         if not done_evt.wait(CLAUDE_CALL_TIMEOUT_S):
             timed_out.set()
             log.warning("claude CLI exceeded %.0fs deadline — killing", CLAUDE_CALL_TIMEOUT_S)
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            # Whole group: a wedged CLI is exactly the case where children are
+            # most likely to be left behind.
+            _signal_group(proc, _SIG_ESCALATION[-1])
 
     threading.Thread(target=_write_stdin, daemon=True).start()
     threading.Thread(target=_drain_stderr, daemon=True).start()
@@ -493,18 +583,9 @@ def call_claude_streaming(model: str, system: str, messages: list, tools: list, 
             yield {"delta": tail}
     finally:
         # Always stop the watchdog and reap the child — covers normal completion,
-        # an exception, and an abandoned generator (requester went away). Safe to
-        # kill even on success: we've already parsed the result event by here.
+        # an exception, and an abandoned generator (requester went away).
         done_evt.set()
-        if proc.poll() is None:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            pass
+        _reap(proc)
 
     if error_result is not None:
         raise RuntimeError(f"claude CLI error: {error_result}")
@@ -639,6 +720,10 @@ def main() -> None:
         log.debug("dup-registration check skipped: %s", exc)
 
     executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="cleo")
+    # Backpressure. Without this, every inbound request is submitted to an
+    # unbounded queue holding full conversation payloads; a TradingAgents analyst
+    # fan-out that outruns the workers grows it without limit.
+    inflight = threading.BoundedSemaphore(MAX_INFLIGHT)
 
     # Registration is retried inside the loop so Cleo recovers automatically if the
     # switchboard restarts (registration is lost on switchboard restart; the poll
@@ -668,25 +753,41 @@ def main() -> None:
         for msg in result.get("messages", []):
             if msg.get("type") != "llm_request":
                 continue
-            executor.submit(_dispatch, msg, url, token, agent_id)
+            if not inflight.acquire(blocking=False):
+                log.warning("at capacity (%d in flight) — rejecting message %s",
+                            MAX_INFLIGHT, msg.get("id"))
+                _send_error(msg, url, token, agent_id,
+                            f"Cleo is at capacity ({MAX_INFLIGHT} requests in "
+                            f"flight); try again shortly")
+                continue
+            executor.submit(_dispatch, msg, url, token, agent_id, inflight)
 
 
-def _dispatch(msg: dict, url: str, token: str, agent_id: str) -> None:
+def _send_error(msg: dict, url: str, token: str, agent_id: str, error: str) -> None:
+    """Best-effort llm_error reply. Never raises — the caller is a worker loop."""
+    try:
+        bus_call(url, token, "send_message", {
+            "from": agent_id,
+            "to": msg.get("from"),
+            "type": "llm_error",
+            "thread_id": msg.get("thread_id"),
+            "reply_to": msg.get("id"),
+            "content": json.dumps({"error": error}),
+        })
+    except Exception:
+        pass
+
+
+def _dispatch(msg: dict, url: str, token: str, agent_id: str,
+              inflight: threading.BoundedSemaphore | None = None) -> None:
     try:
         handle_request(msg, url, token, agent_id)
     except Exception as exc:
         log.exception("Error handling message %s", msg.get("id"))
-        try:
-            bus_call(url, token, "send_message", {
-                "from": agent_id,
-                "to": msg.get("from"),
-                "type": "llm_error",
-                "thread_id": msg.get("thread_id"),
-                "reply_to": msg.get("id"),
-                "content": json.dumps({"error": str(exc)}),
-            })
-        except Exception:
-            pass
+        _send_error(msg, url, token, agent_id, str(exc))
+    finally:
+        if inflight is not None:
+            inflight.release()
 
 
 if __name__ == "__main__":
