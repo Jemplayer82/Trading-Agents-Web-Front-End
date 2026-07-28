@@ -69,7 +69,9 @@ _INSTANCE_LOCK = None
 # the system prompt and parse it back out of the generated text.
 _TOOL_OPEN = "<tool_call"
 _TOOL_CLOSE = "</tool_call>"
-_TOOL_RE = re.compile(r'<tool_call\s+name="([^"]+)"\s*>([\s\S]*?)</tool_call>')
+_TOOL_RE = re.compile(
+    r'<tool_call\s+name="([^"]+)"(?:\s+id="([^"]*)")?\s*>([\s\S]*?)</tool_call>'
+)
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +120,7 @@ def bus_call(url: str, token: str, tool: str, args: dict, timeout: float = 35.0)
 # Message / tool conversion helpers
 # ---------------------------------------------------------------------------
 
-def _flatten_content(content) -> str:
+def _flatten_content(content, id_to_name: dict | None = None) -> str:
     """Collapse an Anthropic content value (str or block list) to plain text.
 
     tool_use / tool_result blocks are rendered as the inline text protocol so
@@ -139,7 +141,9 @@ def _flatten_content(content) -> str:
             parts.append(block.get("text", ""))
         elif btype == "tool_use":
             args = block.get("input", {})
-            parts.append(f'{_TOOL_OPEN} name="{block.get("name", "")}">'
+            call_id = block.get("id") or ""
+            id_attr = f' id="{call_id}"' if call_id else ""
+            parts.append(f'{_TOOL_OPEN} name="{block.get("name", "")}"{id_attr}>'
                          f'{json.dumps(args)}{_TOOL_CLOSE}')
         elif btype == "tool_result":
             inner = block.get("content", "")
@@ -147,8 +151,66 @@ def _flatten_content(content) -> str:
                 inner = "".join(
                     b.get("text", "") if isinstance(b, dict) else str(b) for b in inner
                 )
-            parts.append(f"[Tool result]\n{inner}")
+            call_id = block.get("tool_use_id") or ""
+            name = (id_to_name or {}).get(call_id, "")
+            bits = []
+            if name:
+                bits.append(f"for {name}")
+            if call_id:
+                bits.append(f"(id: {call_id})")
+            label = "[Tool result" + ((" " + " ".join(bits)) if bits else "") + "]"
+            parts.append(f"{label}\n{inner}")
     return "\n".join(p for p in parts if p)
+
+
+def _merge_consecutive(messages: list) -> list:
+    """Collapse runs of same-role messages into one turn.
+
+    `claude -p --input-format stream-json` answers EVERY user event as its own
+    turn. The app sends parallel tool results as one ToolMessage each, so 8
+    concurrent get_indicators calls arrived as 8 consecutive user events — the
+    CLI then produced 8 separate replies. _ToolMarkerFilter latches on the first
+    <tool_call> it sees and suppresses all later text, so the report the model
+    eventually wrote was discarded and only the early tool call survived, and
+    the analyst loop span until it exhausted its turns with an empty report.
+
+    Anthropic semantics put all parallel tool_results in a SINGLE user message;
+    this restores that shape, so the model sees every result at once and replies
+    exactly once.
+    """
+    merged: list = []
+    for m in messages or []:
+        role = m.get("role", "user")
+        if merged and merged[-1].get("role", "user") == role:
+            prev = merged[-1]
+            pc, mc = prev.get("content"), m.get("content")
+            if isinstance(pc, list) and isinstance(mc, list):
+                prev["content"] = pc + mc
+            else:
+                prev["content"] = f"{_flatten_content(pc)}\n\n{_flatten_content(mc)}"
+            continue
+        merged.append(dict(m))
+    return merged
+
+
+def _build_tool_id_map(messages: list) -> dict:
+    """Map every tool_use id -> tool name across the conversation.
+
+    tool_result blocks carry only ``tool_use_id``, never the name. Without this
+    the CLI saw a run of undifferentiated "[Tool result]" blobs and could not
+    tell which of several parallel calls each one answered — so it re-requested
+    data it already had, burned every allowed turn, and the analyst report came
+    back empty. Observed with 7 concurrent get_indicators calls.
+    """
+    out: dict = {}
+    for m in messages or []:
+        content = m.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id"):
+                out[block["id"]] = block.get("name", "")
+    return out
 
 
 def _augment_system_with_tools(system: str, tools: list) -> str:
@@ -180,6 +242,15 @@ def _augment_system_with_tools(system: str, tools: list) -> str:
         "  • Emit only the <tool_call> tag(s), then stop\n"
         "Tool results will be provided to you automatically. When you receive "
         "them, write your analysis. Do not invent results.\n\n"
+        "## READING TOOL RESULTS\n"
+        "Each result arrives as a user message headed:\n"
+        "  [Tool result for TOOL_NAME (id: CALL_ID)]\n"
+        "followed by that call's output. Match it to your call via TOOL_NAME "
+        "and CALL_ID. Once a result is present you ALREADY HAVE that data — do "
+        "NOT call the same tool with the same arguments again. Re-requesting "
+        "data you already received burns your limited turns and ends the run "
+        "with an EMPTY report. When every tool you need has returned, stop "
+        "calling tools and write the full report.\n\n"
         f"Available tools: {tool_names}\n\n"
         "Tool JSON schemas:\n"
         f"{json.dumps(tools, indent=2)}"
@@ -196,12 +267,16 @@ def _augment_system_with_tools(system: str, tools: list) -> str:
 def _parse_tool_calls(text: str) -> list[dict]:
     """Extract inline <tool_call> markers from generated text → bus tool_calls."""
     calls: list[dict] = []
-    for name, raw_args in _TOOL_RE.findall(text):
+    for name, call_id, raw_args in _TOOL_RE.findall(text):
         try:
             args = json.loads(raw_args.strip()) if raw_args.strip() else {}
         except json.JSONDecodeError:
             args = {}
-        calls.append({"id": f"toolu_{uuid4().hex[:16]}", "name": name, "args": args})
+        calls.append({
+            "id": call_id or f"toolu_{uuid4().hex[:16]}",
+            "name": name,
+            "args": args,
+        })
     return calls
 
 
@@ -311,6 +386,22 @@ def call_claude_streaming(model: str, system: str, messages: list, tools: list, 
 
     # Feed the conversation on a thread so a large history can't deadlock against
     # a full stdout pipe.
+    id_to_name = _build_tool_id_map(messages)
+    messages = _merge_consecutive(messages)
+
+    if os.environ.get("CLEO_DEBUG_DUMP"):
+        try:
+            with open("/tmp/cleo_dump.txt", "a", encoding="utf-8") as _fh:
+                _fh.write("\n\n########## REQUEST ##########\n")
+                _fh.write(f"[id_to_name] {id_to_name}\n")
+                _fh.write(f"[system len] {len(system)}\n")
+                for _m in messages:
+                    _r = _m.get("role", "user")
+                    _t = _flatten_content(_m.get("content", ""), id_to_name)
+                    _fh.write(f"\n--- {_r} ---\n{_t[:1200]}\n")
+        except Exception:
+            pass
+
     def _write_stdin() -> None:
         try:
             for m in messages:
@@ -320,7 +411,8 @@ def call_claude_streaming(model: str, system: str, messages: list, tools: list, 
                     "type": evt_type,
                     "message": {
                         "role": role,
-                        "content": [{"type": "text", "text": _flatten_content(m.get("content", ""))}],
+                        "content": [{"type": "text",
+                                     "text": _flatten_content(m.get("content", ""), id_to_name)}],
                     },
                 }
                 proc.stdin.write(json.dumps(event) + "\n")
