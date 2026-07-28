@@ -79,15 +79,32 @@ Cleo holds its presence on the switchboard through a **long-poll loop**:
 
 ## Deploy a code update
 
-Cleo ships in the repo, so updating it is a pull + restart:
+> ⚠️ **There is no repo checkout on the WebServer.** This section used to say
+> `cd /opt/TradingAgents && git pull`; that directory does not exist. The handler
+> lives as a **bare file** at `/home/landon/cleo_llm_handler.py`, which is why the
+> live copy silently drifted 99 lines ahead of the repo before anyone noticed.
+
+Until the host has git credentials for this repo, deployment is a copy:
 
 ```sh
-cd /opt/TradingAgents && git pull
-sudo systemctl restart cleo
+# From a machine with the repo, to the host:
+scp scripts/cleo_llm_handler.py landon@192.168.7.50:/home/landon/cleo_llm_handler.py
+ssh landon@192.168.7.50 'sudo systemctl restart cleo'
+```
+
+Always back up and verify the checksum matches what you intended to ship:
+
+```sh
+cp -a /home/landon/cleo_llm_handler.py /home/landon/cleo_llm_handler.py.bak-$(date +%Y%m%d)
+md5sum /home/landon/cleo_llm_handler.py
 ```
 
 The kernel releases the single-instance lock the moment the old process exits, so
 the restart re-acquires it immediately — no crash loop.
+
+**Worth fixing properly:** give the host a read-only deploy key or token and clone
+the repo there, so deployment becomes `git pull && systemctl restart` and drift
+cannot recur. That needs credentials set up by hand — it is not done yet.
 
 ## Knobs
 
@@ -102,6 +119,36 @@ All optional env vars are documented in [`cleo.env.example`](cleo.env.example).
 | `CLEO_CALL_TIMEOUT_S` | `150` | Hard per-call ceiling in seconds — keep below the client's 180s so Cleo fails itself first |
 | `CLAUDE_BIN` | `claude` | Full path to the `claude` binary if it isn't on `PATH` for the service user |
 | `CLEO_LOCK_FILE` | `/tmp/cleo-<agent_id>.lock` | Single-instance flock path — override if `/tmp` is on a tmpfs that's shared across hosts |
+| `CLEO_MAX_INFLIGHT` | `16` | Requests allowed in flight before Cleo replies `llm_error` instead of queueing. The executor queue is unbounded and each queued item holds a whole conversation, so a fan-out that outruns the workers would otherwise grow it without limit |
+| `CLEO_REAP_GRACE_S` | `5` | Seconds allowed at each shutdown step (natural exit → SIGTERM → SIGKILL) when reaping the CLI's process group |
+
+## 🧠 Memory behaviour
+
+Every `claude -p` subprocess runs **inside cleo's cgroup**, so `systemctl status cleo`
+reports the daemon *plus* all in-flight CLI calls. Measured on the WebServer:
+
+| State | Cgroup memory |
+|---|---|
+| Idle daemon | ~18 MB |
+| One call in flight | ~530 MB peak |
+| Four concurrent calls | ~1.2 GB peak |
+
+> ⚠️ That's why `MemoryMax` is set to **6G** and not something tight. A 1 GB ceiling
+> looks reasonable next to the 18 MB idle figure and would OOM-kill Cleo on an
+> ordinary four-way analyst fan-out. It's a runaway backstop, not a target.
+
+Cleo reaps the CLI's whole **process group** (`start_new_session=True` + `killpg`),
+escalating natural-exit → SIGTERM → SIGKILL. Previously it SIGKILLed the CLI alone
+on *every* call; SIGKILL can't be caught, so Node never reaped its own children and
+they reparented to PID 1 and accumulated. If you suspect that has regressed:
+
+```sh
+ps -eo pid,etimes,rss,args | grep [c]laude
+```
+
+Anything older than ~150 s (the per-call ceiling) is an orphan. The
+[memwatch](../memwatch/README.md) sampler tracks this continuously as
+`claude_stale` in `/var/log/memwatch/orphans.csv`.
 
 ## Troubleshooting
 
