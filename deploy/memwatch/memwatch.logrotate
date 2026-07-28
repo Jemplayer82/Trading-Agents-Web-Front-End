@@ -1,0 +1,20 @@
+# Install to /etc/logrotate.d/memwatch
+#
+# Rotate by SIZE, not daily. The whole point of these files is to hold a window
+# longer than the leak takes to show up — the last climb ran six days — and daily
+# rotation would chop the series into useless one-day fragments. At ~1 MB/day,
+# 20 MB is roughly three weeks in the live file.
+#
+# copytruncate keeps the appending sampler writing to the same inode. It leaves
+# the live file empty after a rotation, and memwatch.sh re-writes the CSV header
+# whenever it finds an empty file, so the columns survive.
+/var/log/memwatch/*.csv {
+    size 20M
+    rotate 6
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su root root
+}
