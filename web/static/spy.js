@@ -10,7 +10,8 @@
 // the prefix also catches /api/spy-scans and /api/spy-account, not just /api/spy:
 //   POST   /api/spy-scan                          start a scan (idempotent per day)
 //   GET    /api/spy-scans[?limit=N]               history list (DESC by id)
-//   GET    /api/spy-scans/{id}                    scan detail (polled while running)
+//   GET    /api/spy-scans/{id}                    scan detail (fetched on load + on real change)
+//   GET    /api/spy-scans/{id}/status             cheap poll target (see below)
 //   DELETE /api/spy-scans/{id}                    delete scan + results
 //   POST   /api/spy-scans/{id}/cancel             request cancel (deep dives finish)
 //   POST   /api/spy-scans/{id}/refresh-prices     re-price the paper portfolio
@@ -21,8 +22,14 @@
 // because renderSpyScan emits inline onclick="refreshSpyPrices(...)" handlers.
 //
 // Poll lifecycle: while the loaded scan's status starts with "running",
-// loadSpyScan polls the detail endpoint every 5s and re-renders. The timer is
-// cleared on completion / fetch failure, when another scan is loaded
+// loadSpyScan polls /status every 5s — a cheap O(1) row, not the full scan
+// (which carries up to ~500 quick-results rows and was a confirmed ~38 MiB/hr
+// leak on the server from being re-fetched every 5s for a scan's whole
+// duration). The full detail is only re-fetched and re-rendered when the
+// polled status actually differs from the last one seen (spyPollKey), so real
+// progress still shows up within one 5s tick — long unchanged stretches (a
+// multi-minute deep dive between updates) just stop paying for it. The timer
+// is cleared on completion / fetch failure, when another scan is loaded
 // (loadSpyScan calls stopSpyPoll first), on delete, and when the user leaves the
 // tab ("tab-shown" listener at the bottom).
 
@@ -342,15 +349,31 @@ async function loadSpyScan(id) {
     // Note: unlike portfolio.js there is no active-id guard inside this callback.
     // Switching scans clears the interval (stopSpyPoll above), but a response
     // already in flight can still paint the previous scan once after a switch.
+    let lastPollKey = spyPollKey(scan);
     spyPollTimer = setInterval(async () => {
-      const pr = await fetch("/api/spy-scans/" + id);
+      const pr = await fetch("/api/spy-scans/" + id + "/status");
       if (!pr.ok) { stopSpyPoll(); return; }
-      const updated = await pr.json();
+      const status = await pr.json();
+      const key = spyPollKey(status);
+      if (key === lastPollKey) return; // status string is part of the key, so
+      lastPollKey = key;               // a running -> terminal flip always differs
+
+      const fr = await fetch("/api/spy-scans/" + id);
+      if (!fr.ok) { stopSpyPoll(); return; }
+      const updated = await fr.json();
       renderSpyScan(updated);
       updateStopButton(updated);
       if (!updated.status || !updated.status.startsWith("running")) stopSpyPoll();
     }, 5000);
   }
+}
+
+// Key used to detect real progress between /status polls: status flips
+// (e.g. running_deep -> completed), a new quick/deep result lands, or a
+// cancel request comes in. Unchanged key + still running means the unchanged
+// full payload isn't worth re-fetching this tick.
+function spyPollKey(s) {
+  return [s.status, s.quick_count, s.deep_count, s.cancel_requested].join("|");
 }
 
 function stopSpyPoll() {

@@ -11,7 +11,8 @@
 // (options runs are spy_scans rows with kind='options'):
 //   POST   /api/options-scan                     {account_id} start today's build
 //   GET    /api/options-scans?account_id=        history (kind=options only)
-//   GET    /api/options-scans/{id}               scan detail (polled while running)
+//   GET    /api/options-scans/{id}               scan detail (fetched on load + on real change)
+//   GET    /api/options-scans/{id}/status        cheap poll target (see loadOptionsScan)
 //   GET    /api/options-positions?account_id=&status=   open / settled positions
 //   POST   /api/options-positions/refresh        settle + re-mark all contracts
 //   GET    /api/options-summary?account_id=      cash / value / realized P&L
@@ -441,16 +442,34 @@ async function loadOptionsScan(id) {
   if (r.ok) {
     const scan = await r.json();
     if (scan.status && scan.status.startsWith("running")) {
+      // Poll the cheap /status row every 5s, not the full scan detail (which
+      // carries positions + account summary and was a confirmed ~38 MiB/hr
+      // leak on the server from being re-fetched every 5s for the whole run).
+      // Only re-fetch + re-render the full payload when something in the
+      // status row actually changed — see spy.js's loadSpyScan for the
+      // identical pattern.
+      let lastPollKey = optionsPollKey(scan);
       optionsPollTimer = setInterval(async () => {
-        const pr = await fetch("/api/options-scans/" + id);
+        const pr = await fetch("/api/options-scans/" + id + "/status");
         if (!pr.ok) { stopOptionsPoll(); return; }
-        const updated = await pr.json();
+        const status = await pr.json();
+        const key = optionsPollKey(status);
+        if (key === lastPollKey) return;
+        lastPollKey = key;
+
+        const fr = await fetch("/api/options-scans/" + id);
+        if (!fr.ok) { stopOptionsPoll(); return; }
+        const updated = await fr.json();
         await renderOptionsView(id, updated);
         updateOptStopButton(updated);
         if (!updated.status || !updated.status.startsWith("running")) stopOptionsPoll();
       }, 5000);
     }
   }
+}
+
+function optionsPollKey(s) {
+  return [s.status, s.quick_count, s.deep_count, s.cancel_requested].join("|");
 }
 
 function stopOptionsPoll() {
@@ -523,9 +542,11 @@ function optProgressHtml(scan) {
   const qc = scan.quick_count || 0;
   const dt = scan.deep_total || 25;
   const dc = scan.deep_count || 0;
-  const gateNote = scan.status === "running_alloc"
-    ? "<p class=\"dim\" style=\"font-size:11px;margin:8px 0 0;\">Allocating — if the market hasn't opened yet, the build waits for 09:35 ET so entries fill at live quotes.</p>"
-    : "";
+  const gateNote = scan.status === "running_wait_market"
+    ? "<p class=\"dim\" style=\"font-size:11px;margin:8px 0 0;\">Waiting for market open (09:35 ET) so entries fill at live quotes.</p>"
+    : (scan.status === "running_alloc"
+        ? "<p class=\"dim\" style=\"font-size:11px;margin:8px 0 0;\">Allocating — vetting contracts and sizing positions.</p>"
+        : "");
   return (
     "<div class=\"panel\">" +
       "<div class=\"panel-title\">[ Progress ]</div>" +
