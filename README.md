@@ -234,6 +234,7 @@ Daily options paper trader — long single-leg calls and puts on S&P 500 movers,
 - **Contract selection** — deterministic, pre-LLM: ~21 DTE (10–45 window), ~0.45 delta via Schwab chains (near-ATM fallback on yfinance), liquidity gates against zero-bid / crossed / wide / illiquid quotes
 - **LLM allocator** decides open / hold / close daily under **hard guardrails**: force-close at DTE ≤ 3 or premium −60% (stop-loss), per-position and total-premium caps by aggressiveness, max 15 open positions, deterministic fallback if the LLM fails
 - **Hourly marks** (10:00–16:00 + 16:45 ET) and a **20:00 ET expiry settlement** sweep that models OCC auto-exercise (ITM ≥ $0.01 settles at intrinsic vs the last close on/before expiry)
+- **20:15 ET learning pass** — deep-dive directional calls are graded nightly against the underlying's forward alpha (the shared memory log), and every closed position gets a directional-vs-decay P&L attribution; once enough closes accumulate, a nightly batch reflection distills "watch for …" lessons that are injected into the next allocator run as context (hard risk limits are never relaxed by lessons)
 
 Unlike the S&P tab's weekly snapshot, options positions live in a real ledger — cash and realized P&L are tracked per contract through opens, closes, and expiries, with open/closed position tables, a daily decision log, and the allocator's report on the tab. Paper only: no order endpoints exist anywhere in the stack.
 
@@ -497,6 +498,11 @@ SMTP_USER=...
 SMTP_PASS=...
 NEWSLETTER_FROM=...
 NEWSLETTER_TO=...
+
+# Options learning loop (optional overrides; sensible defaults built in)
+TRADINGAGENTS_DEEP_DIVE_STORE_DECISIONS=true   # kill switch: scan deep dives feeding the memory log
+TRADINGAGENTS_OPTIONS_LESSONS_MIN_CLOSED=10    # min closed positions before stats reach the allocator
+TRADINGAGENTS_OPTIONS_REFLECT_MIN_NEW_CLOSED=5 # min NEW closes before a nightly reflection fires
 ```
 
 > [!IMPORTANT]

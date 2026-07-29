@@ -10,6 +10,34 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Options learning loop — the trader now learns from its own trades.** Two
+  layers, each grading what it can actually measure:
+  - *Layer 1 (System C):* scan deep dives (options weekdays + S&P Saturdays)
+    now `store_decision` their directional calls into the memory log, so the
+    nightly 23:30 outcome sweep grades them by forward alpha exactly like
+    interactive analyses — previously the highest-volume decision path
+    contributed nothing to calibration. Kill switch:
+    `TRADINGAGENTS_DEEP_DIVE_STORE_DECISIONS=false`.
+  - *Layer 2 (options ledger):* new `web/options_learning.py` grades every
+    closed/settled position with a directional-vs-decay P&L attribution
+    (`|entry_delta| × underlying move` vs the residual, honestly labelled
+    "time/vol decay — theta+IV, not separable"), aggregates a track record
+    (win rate by exit reason / DTE bucket / |delta| bucket, plus the
+    right-direction-but-lost decay toll), and a nightly 20:15 ET
+    `options_grade` job batch-reflects new closes in ONE quick-LLM call.
+    The latest lessons + stats are injected into the allocator prompt as
+    context (never rules — hard guardrails stay code-enforced). Gated behind
+    minimum sample sizes (10 closed for stats, 5 new closes per reflection)
+    with `[n<5 — ignore]` tags and a fixed small-sample caution.
+  - Closes now capture the underlying spot (`exit_underlying`, source
+    `live`/`eod_close`/`settlement`); missing spots backfill nightly.
+  - SPY self-benchmark fix: a ticker whose alpha benchmark resolves to itself
+    (SPY — deep-dived daily) now grades on absolute return instead of a
+    degenerate always-zero alpha.
+  - Memory-log writes are now serialized (thread lock + pid-unique temp file +
+    read-retry) — deep dives write from a thread pool.
+  - New CLI one-shot: `python -m web.scheduler --grade-options-now`.
+
 - **Daily options paper trading.** New "Options" dashboard tab paper-trades
   long single-leg calls/puts on S&P 500 movers, $100k per options paper
   account. Every weekday (07:30 ET): momentum/volume pre-screen ranks the
@@ -47,6 +75,13 @@ Breaking changes within the 0.x line are called out explicitly.
     behind a running portfolio/S&P scan and vice versa, and the dequeuer
     dispatches `kind='options'` rows to the options build (not the equity
     pipeline).
+
+### Changed
+
+- ⚠️ `memory_log_max_entries` default raised 300 → 1000: deep-dive volume
+  (~50 entries/weekday) churned the 300-entry rotation window in under 6
+  trading days, evicting all interactive/portfolio history. Revert by setting
+  the old value in `tradingagents/default_config.py` (or trim the log file).
 
 ### Fixed
 

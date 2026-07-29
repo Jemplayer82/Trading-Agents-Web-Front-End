@@ -145,6 +145,18 @@ class TestResolveBenchmark:
         assert resolve_benchmark("7203.T", cfg) == "^N225"
         assert resolve_benchmark("NVDA", cfg) == "SPY"
 
+    def test_self_benchmark_resolves_absolute(self):
+        """SPY is deep-dived daily by the options scan; SPY-vs-SPY alpha is
+        identically zero, so every entry would resolve as free NOISE and any
+        Hold rating would be a guaranteed calibration hit. Self-benchmarked
+        tickers must fall back to the absolute sentinel (alpha == raw)."""
+        assert resolve_benchmark("SPY", {}) == ABSOLUTE_BENCHMARK
+        assert resolve_benchmark("spy", {"benchmark_map": {"": "SPY"}}) == ABSOLUTE_BENCHMARK
+        # Explicit benchmark_ticker equal to the ticker is also degenerate.
+        assert resolve_benchmark("QQQ", {"benchmark_ticker": "QQQ"}) == ABSOLUTE_BENCHMARK
+        # A DIFFERENT explicit benchmark stays untouched.
+        assert resolve_benchmark("SPY", {"benchmark_ticker": "QQQ"}) == "QQQ"
+
 
 class TestNoiseBand:
 

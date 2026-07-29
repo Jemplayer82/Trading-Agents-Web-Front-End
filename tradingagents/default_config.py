@@ -22,6 +22,9 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_SWEEP_MAX_REFLECTIONS_PER_RUN": "sweep_max_reflections_per_run",
     "TRADINGAGENTS_SWEEP_CENSOR_AFTER_DAYS":       "sweep_censor_after_days",
     "TRADINGAGENTS_MEMORY_CONTEXT_MAX_AGE_DAYS":   "memory_context_max_age_days",
+    "TRADINGAGENTS_DEEP_DIVE_STORE_DECISIONS":     "deep_dive_store_decisions",
+    "TRADINGAGENTS_OPTIONS_LESSONS_MIN_CLOSED":    "options_lessons_min_closed",
+    "TRADINGAGENTS_OPTIONS_REFLECT_MIN_NEW_CLOSED": "options_reflect_min_new_closed",
 }
 
 
@@ -56,7 +59,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Pending entries are never pruned. None disables rotation entirely.
     # Capped by default so a nightly sweep + portfolio-scan decision volume
     # can't grow the log (and the injected context source) without bound.
-    "memory_log_max_entries": 300,
+    # 1000 (was 300): deep dives now store their decisions too (~50/weekday
+    # from the options scan + ~50/Saturday from the S&P scan) — at 300 the
+    # rotation window churned in under 6 trading days, evicting all
+    # interactive/portfolio history. 1000 ≈ 4 weeks (~1-3 MB file).
+    "memory_log_max_entries": 1000,
     # --- Outcome resolution / reflection (nightly sweep) ---
     # Forward-return window (trading days) a decision is graded over. The
     # maturity guard refuses to resolve an entry before this window has data.
@@ -81,6 +88,21 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Resolved entries older than this are excluded from injected context so
     # a dead regime's lessons expire. None disables the cutoff.
     "memory_context_max_age_days": 180,
+    # --- Options learning (web/options_learning.py) ---
+    # Kill switch for deep dives storing their decisions into the memory log
+    # (System C). Env-only rollback path: no redeploy needed to stop the flow.
+    "deep_dive_store_decisions": True,
+    # Below this many closed positions the allocator gets NO track-record
+    # block at all — a handful of trades is noise, and showing it invites
+    # overfitting a tiny sample.
+    "options_lessons_min_closed": 10,
+    # Nightly batch reflection fires only when at least this many positions
+    # closed since the last lessons row (lessons regenerate on new data only).
+    "options_reflect_min_new_closed": 5,
+    # Most recent closes included in the single nightly reflection call.
+    "options_reflect_batch_max": 20,
+    # Hard cap on the lessons block injected into the allocator prompt.
+    "options_lessons_max_chars": 1200,
     # LLM settings
     "llm_provider": "openai",
     "deep_think_llm": "gpt-5.4",

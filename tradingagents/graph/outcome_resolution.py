@@ -54,18 +54,30 @@ def resolve_benchmark(ticker: str, config: dict) -> str:
     trading calendar cannot be date-aligned with any equity index.
     Otherwise ``config["benchmark_ticker"]`` wins when set, then the suffix
     map, then the empty-suffix default (SPY).
+
+    A ticker that resolves to ITSELF (SPY vs SPY — the options scan deep-dives
+    SPY every day) also gets the ``absolute`` sentinel: self-benchmarked alpha
+    is identically zero, which would resolve every entry as free NOISE and
+    count any Hold rating as a guaranteed calibration hit.
     """
     ticker_upper = ticker.upper()
     if ticker_upper.endswith("-USD"):
         return ABSOLUTE_BENCHMARK
     explicit = config.get("benchmark_ticker")
     if explicit:
-        return explicit
-    benchmark_map = config.get("benchmark_map", {})
-    for suffix, benchmark in benchmark_map.items():
-        if suffix and ticker_upper.endswith(suffix.upper()):
-            return benchmark
-    return benchmark_map.get("", "SPY")
+        benchmark = explicit
+    else:
+        benchmark_map = config.get("benchmark_map", {})
+        benchmark = None
+        for suffix, mapped in benchmark_map.items():
+            if suffix and ticker_upper.endswith(suffix.upper()):
+                benchmark = mapped
+                break
+        if benchmark is None:
+            benchmark = benchmark_map.get("", "SPY")
+    if str(benchmark).upper() == ticker_upper:
+        return ABSOLUTE_BENCHMARK
+    return benchmark
 
 
 def _normalize_history(df: pd.DataFrame) -> pd.DataFrame:

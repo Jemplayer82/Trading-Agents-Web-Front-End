@@ -33,7 +33,7 @@ import yfinance as yf
 
 from tradingagents.dataflows import schwab_mcp
 
-from . import db, options_allocator, options_data, spy_scanner
+from . import db, options_allocator, options_data, options_learning, spy_scanner
 from .runner import build_config
 from .spy_tickers import get_sp500_tickers
 
@@ -531,12 +531,38 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
         for r in quick_results if r.get("ticker")
     }
 
+    # Learning loop, read side: latest batch-reflected lessons + mechanical
+    # track record for THIS account (options_learning). Pure Python + one DB
+    # read — zero LLM cost at scan time; "" until enough closes exist.
+    lessons_context = ""
+    try:
+        settled = db.list_options_positions(account_id, status="settled")
+        last_lesson = db.latest_options_lesson(account_id)
+        stats = options_learning.compute_options_stats(
+            settled, min_closed=int(config.get("options_lessons_min_closed", 10)))
+        lessons_context = options_learning.format_track_record(
+            stats, (last_lesson or {}).get("lessons_md"),
+            max_chars=int(config.get("options_lessons_max_chars", 1200)))
+        log.info("[options %s] lessons block: %d chars (%d closed)",
+                 scan_id, len(lessons_context), len(settled))
+    except Exception:
+        log.exception("[options %s] lessons context failed — allocating without it", scan_id)
+
     with _phase("Options allocation failed"):
         alloc = options_allocator.run(
             candidates, open_positions, trade_date, config,
             equity=eq["equity"], cash=eq["cash"], realized_pnl=realized,
             aggressiveness=aggressiveness, bias=bias, fresh_signals=fresh_signals,
+            lessons_context=lessons_context,
         )
+
+    # Learning loop, write side: today's chain data carries the underlying spot
+    # for every candidate — capture it on closes so attribution doesn't have to
+    # backfill with a less precise EOD close.
+    spot_by_underlying = {
+        c["underlying"]: c.get("underlying_price")
+        for c in candidates if c.get("underlying_price")
+    }
 
     # Phase 4: apply decisions through the transactional helpers.
     decisions_log: list[dict[str, Any]] = []
@@ -544,8 +570,11 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
         pos = db.get_options_position(int(c["position_id"])) or {}
         exit_premium = float(c.get("exit_premium") or pos.get("current_premium")
                              or pos.get("entry_premium") or 0)
+        exit_spot = spot_by_underlying.get(pos.get("underlying"))
         if db.close_options_position(int(c["position_id"]), exit_premium,
-                                     c["exit_reason"], close_scan_id=scan_id):
+                                     c["exit_reason"], close_scan_id=scan_id,
+                                     exit_underlying=exit_spot,
+                                     exit_underlying_source="live" if exit_spot else None):
             decisions_log.append({
                 "occ_symbol": c["occ_symbol"], "action": "CLOSE",
                 "exit_reason": c["exit_reason"], "exit_premium": exit_premium,

@@ -432,13 +432,19 @@ class TestDeferredReflection:
         assert msft["ticker"] == "MSFT" and msft["pending"] is True
 
     def test_update_atomic_write(self, tmp_path):
-        """A pre-existing .tmp file is overwritten; the log is correctly updated."""
+        """Stale temp files never corrupt the update, and the pid-unique temp
+        file is consumed by os.replace (no residue). The temp name embeds the
+        pid so concurrent containers on the shared volume can't collide on one
+        fixed '.tmp' path — a stale foreign '.tmp' is simply ignored."""
+        import os
+
         log = make_log(tmp_path)
         log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
-        stale_tmp = tmp_path / "trading_memory.tmp"
-        stale_tmp.write_text("GARBAGE CONTENT — should be overwritten", encoding="utf-8")
+        foreign_tmp = tmp_path / "trading_memory.tmp"
+        foreign_tmp.write_text("GARBAGE CONTENT — from another process", encoding="utf-8")
         log.update_with_outcome("NVDA", "2026-01-10", 0.042, 0.021, 5, "Correct.")
-        assert not stale_tmp.exists()
+        # Our own pid temp was consumed by os.replace.
+        assert not (tmp_path / f"trading_memory.tmp{os.getpid()}").exists()
         entries = log.load_entries()
         assert len(entries) == 1
         assert entries[0]["reflection"] == "Correct."
@@ -881,3 +887,78 @@ class TestLegacyRemoval:
         assert len(entries) == 1
         assert entries[0]["ticker"] == "NVDA"
         assert entries[0]["pending"] is True
+
+
+# ---------------------------------------------------------------------------
+# Concurrency — deep dives call store_decision from a ThreadPoolExecutor
+# (web/spy_scanner.py), which is what motivated the module _WRITE_LOCK.
+# ---------------------------------------------------------------------------
+
+class TestConcurrentWriters:
+    def test_parallel_store_decision_no_torn_blocks(self, tmp_path):
+        """8 threads × distinct tickers ⇒ 8 well-formed entries, no interleaving."""
+        import threading
+
+        log = make_log(tmp_path)
+        tickers = [f"TK{i}" for i in range(8)]
+
+        def _store(tk):
+            log.store_decision(tk, "2026-01-10", f"Rating: Buy\nThesis for {tk}.")
+
+        threads = [threading.Thread(target=_store, args=(t,)) for t in tickers]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        entries = log.load_entries()
+        assert sorted(e["ticker"] for e in entries) == sorted(tickers)
+        # Every block parsed cleanly (torn writes would drop or mangle blocks)
+        assert all(e["pending"] for e in entries)
+        assert all(e["rating"] == "Buy" for e in entries)
+
+    def test_parallel_same_key_stores_exactly_once(self, tmp_path):
+        """Racing threads on the SAME (ticker, date) produce exactly one entry —
+        the lock serializes the check-then-append so the idempotency guard holds."""
+        import threading
+
+        log = make_log(tmp_path)
+
+        def _store():
+            log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
+
+        threads = [threading.Thread(target=_store) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        entries = log.load_entries()
+        assert len(entries) == 1
+
+    def test_load_entries_retries_on_oserror(self, tmp_path, monkeypatch):
+        """A transient OSError (Windows os.replace race) is retried once; a
+        persistent one degrades to [] instead of crashing a worker thread."""
+        from pathlib import Path
+
+        log = make_log(tmp_path)
+        log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
+
+        real_read = Path.read_text
+        calls = {"n": 0}
+
+        def flaky_read(self, *a, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise PermissionError("mock os.replace race")
+            return real_read(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "read_text", flaky_read)
+        entries = log.load_entries()
+        assert len(entries) == 1  # retry succeeded
+
+        def always_fail(self, *a, **kw):
+            raise PermissionError("persistent")
+
+        monkeypatch.setattr(Path, "read_text", always_fail)
+        assert log.load_entries() == []  # degraded, not raised

@@ -183,3 +183,30 @@ def test_no_candidates_no_positions(monkeypatch):
     _mock_llm(monkeypatch, [])
     result = run([], [], "2026-07-17", {}, equity=100_000, cash=100_000)
     assert result["closes"] == [] and result["holds"] == [] and result["opens"] == []
+
+
+# ── Lessons injection (learning loop) ────────────────────────────────────────
+
+def test_lessons_context_reaches_system_prompt(monkeypatch):
+    llm = _mock_llm(monkeypatch, [])
+    block = "=== OPTIONS TRACK RECORD (this paper account, 12 closed) ===\n- watch for decay"
+    run([_cand("NVDA")], [], "2026-07-17", {}, equity=100_000, cash=100_000,
+        lessons_context=block)
+    system = llm.invoke.call_args[0][0][0]["content"]
+    assert "OPTIONS TRACK RECORD" in system
+    assert "watch for decay" in system
+
+
+def test_empty_lessons_leaves_prompt_byte_identical(monkeypatch):
+    """The '' default must not change the prompt at all — the contract that
+    keeps every pre-learning behavior (and test) intact."""
+    llm = _mock_llm(monkeypatch, [])
+    run([_cand("NVDA")], [], "2026-07-17", {}, equity=100_000, cash=100_000)
+    without_kwarg = llm.invoke.call_args[0][0][0]["content"]
+
+    llm2 = _mock_llm(monkeypatch, [])
+    run([_cand("NVDA")], [], "2026-07-17", {}, equity=100_000, cash=100_000,
+        lessons_context="")
+    with_empty = llm2.invoke.call_args[0][0][0]["content"]
+    assert without_kwarg == with_empty
+    assert "TRACK RECORD" not in with_empty

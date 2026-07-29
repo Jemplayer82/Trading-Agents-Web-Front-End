@@ -267,11 +267,32 @@ CREATE TABLE IF NOT EXISTS options_positions (
     last_marked_at TEXT,
     price_source TEXT,
     stale_count INTEGER DEFAULT 0,
-    data_source TEXT
+    data_source TEXT,
+    exit_underlying REAL,
+    exit_underlying_source TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_options_positions_acct
     ON options_positions (paper_account_id, status);
+
+-- Batch reflections over closed/settled options positions (the options-ledger
+-- analogue of System C's memory-log reflections). One row per nightly grading
+-- run that had enough NEW closes to reflect on; the latest row's lessons_md is
+-- what gets injected into the allocator prompt. stats_json snapshots the
+-- mechanical track-record stats the reflection saw.
+CREATE TABLE IF NOT EXISTS options_lessons (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    paper_account_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    n_closed_total INTEGER,
+    n_new INTEGER,
+    stats_json TEXT,
+    lessons_md TEXT,
+    model TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_options_lessons_acct
+    ON options_lessons (paper_account_id, id);
 
 -- Append-only cash ledger for options paper accounts; cash = SUM(amount).
 -- kind: deposit | open | close | expire. Opens are negative.
@@ -314,6 +335,10 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     # counters / cancel / reaper machinery), discriminated by kind.
     ("spy_scans", "kind", "TEXT NOT NULL DEFAULT 'equity'"),
     ("paper_accounts", "kind", "TEXT NOT NULL DEFAULT 'equity'"),
+    # Options learning loop: underlying spot at exit enables directional-vs-
+    # decay P&L attribution for closed rows (expiries carry settlement_close).
+    ("options_positions", "exit_underlying", "REAL"),
+    ("options_positions", "exit_underlying_source", "TEXT"),
 ]
 
 
@@ -1474,11 +1499,16 @@ def close_options_position(
     exit_premium: float,
     exit_reason: str,
     close_scan_id: int | None = None,
+    exit_underlying: float | None = None,
+    exit_underlying_source: str | None = None,
 ) -> bool:
     """Close an open position at exit_premium and credit proceeds atomically.
 
     Returns False (writing nothing) if the position is not open — safe to call
-    from concurrent paths.
+    from concurrent paths. exit_underlying (spot at exit, source 'live' when
+    captured from the scan's fresh chain data) feeds the learning loop's
+    directional-vs-decay attribution; NULL rows get a nightly 'eod_close'
+    backfill (web/options_learning.py).
     """
     now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     exit_premium = round(float(exit_premium), 4)
@@ -1499,10 +1529,13 @@ def close_options_position(
                 """UPDATE options_positions
                    SET status = 'closed', closed_at = ?, exit_premium = ?, exit_value = ?,
                        realized_pnl = ?, exit_reason = ?, close_scan_id = ?,
-                       current_premium = ?, current_value = ?, last_marked_at = ?
+                       current_premium = ?, current_value = ?, last_marked_at = ?,
+                       exit_underlying = ?, exit_underlying_source = ?
                    WHERE id = ? AND status = 'open'""",
                 (now, exit_premium, exit_value, realized, exit_reason, close_scan_id,
-                 exit_premium, exit_value, now, position_id),
+                 exit_premium, exit_value, now,
+                 exit_underlying, exit_underlying_source if exit_underlying is not None else None,
+                 position_id),
             )
             conn.execute(
                 "INSERT INTO options_cash_ledger (paper_account_id, ts, kind, amount, scan_id, position_id, note) "
@@ -1640,6 +1673,76 @@ def bump_options_position_stale(position_id: int) -> int:
             "SELECT stale_count FROM options_positions WHERE id = ?", (position_id,)
         ).fetchone()
     return int(row["stale_count"]) if row and row["stale_count"] is not None else 0
+
+
+# ---------- options lessons (learning loop) ----------
+# Written by the nightly grading job (web/scheduler.py::job_options_grade via
+# web/options_learning.py); read at scan time to inject the latest lessons +
+# track-record stats into the allocator prompt.
+
+
+def set_options_exit_underlying(position_id: int, value: float, source: str) -> None:
+    """Backfill the underlying spot at exit on a non-open position.
+
+    Guarded on exit_underlying IS NULL so a later backfill can never overwrite
+    a 'live' capture taken at close time with a less precise EOD close.
+    """
+    with connect() as conn:
+        conn.execute(
+            "UPDATE options_positions SET exit_underlying = ?, exit_underlying_source = ? "
+            "WHERE id = ? AND status != 'open' AND exit_underlying IS NULL",
+            (round(float(value), 4), source, position_id),
+        )
+
+
+def insert_options_lesson(
+    paper_account_id: int,
+    n_closed_total: int,
+    n_new: int,
+    stats_json: str,
+    lessons_md: str,
+    model: str | None = None,
+) -> int:
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO options_lessons (paper_account_id, created_at, n_closed_total, "
+            "n_new, stats_json, lessons_md, model) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (paper_account_id, now, n_closed_total, n_new, stats_json, lessons_md, model),
+        )
+        return int(cur.lastrowid)
+
+
+def latest_options_lesson(paper_account_id: int) -> dict[str, Any] | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM options_lessons WHERE paper_account_id = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (paper_account_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def count_closed_options_since(paper_account_id: int, closed_after_iso: str | None) -> int:
+    """Non-open positions closed after the given UTC ISO timestamp (all when None).
+
+    Drives the 'enough NEW closes to reflect on' gate — lessons regenerate only
+    when new outcomes exist, never by rewriting themselves over the same data.
+    """
+    with connect() as conn:
+        if closed_after_iso:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM options_positions "
+                "WHERE paper_account_id = ? AND status != 'open' AND closed_at > ?",
+                (paper_account_id, closed_after_iso),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM options_positions "
+                "WHERE paper_account_id = ? AND status != 'open'",
+                (paper_account_id,),
+            ).fetchone()
+    return int(row["n"]) if row else 0
 
 
 def _serialize(obj: Any) -> Any:

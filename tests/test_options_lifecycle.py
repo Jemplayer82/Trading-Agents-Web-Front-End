@@ -122,6 +122,53 @@ def test_status_endpoint_exposes_kind(tmp_db):
     }
 
 
+# ── Learning-loop schema (exit_underlying + options_lessons) ─────────────────
+
+def test_migration_adds_exit_underlying_columns(tmp_path, monkeypatch):
+    """A database created before the learning loop gains the exit columns."""
+    db_path = tmp_path / "web.db"
+    monkeypatch.setattr(db, "DB_PATH", db_path)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE options_positions (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "paper_account_id INTEGER NOT NULL, open_scan_id INTEGER NOT NULL, "
+        "occ_symbol TEXT NOT NULL, underlying TEXT NOT NULL, put_call TEXT NOT NULL, "
+        "strike REAL NOT NULL, expiration_date TEXT NOT NULL, contracts INTEGER NOT NULL, "
+        "entry_premium REAL NOT NULL, cost_basis REAL NOT NULL, "
+        "status TEXT NOT NULL DEFAULT 'open', opened_at TEXT NOT NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    db.init_db()
+
+    conn = sqlite3.connect(str(db_path))
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(options_positions)")}
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+    assert "exit_underlying" in cols
+    assert "exit_underlying_source" in cols
+    assert "options_lessons" in tables
+
+
+def test_close_with_exit_underlying_roundtrip(account_id):
+    scan = db.create_spy_scan("2026-07-29", paper_account_id=account_id, kind="options")
+    pid = db.open_options_position(account_id, scan, _pos_dict())
+    assert db.close_options_position(pid, 5.0, "llm_close", close_scan_id=scan,
+                                     exit_underlying=234.5,
+                                     exit_underlying_source="live")
+    row = db.get_options_position(pid)
+    assert row["exit_underlying"] == pytest.approx(234.5)
+    assert row["exit_underlying_source"] == "live"
+    # Plain close (no spot captured) leaves them NULL for the nightly backfill.
+    pid2 = db.open_options_position(account_id, scan, _pos_dict(
+        occ_symbol="AAPL  260821C00240000", strike=240.0))
+    assert db.close_options_position(pid2, 5.0, "stop_loss")
+    row2 = db.get_options_position(pid2)
+    assert row2["exit_underlying"] is None
+    assert row2["exit_underlying_source"] is None
+
+
 # ── Deep-dive target selection ───────────────────────────────────────────────
 
 def _q(ticker, signal="BUY", conviction=5):

@@ -455,6 +455,19 @@ def run_deep_dives(
                 conviction=c.get("conviction"), reasoning=c.get("reasoning"),
                 analysis_id=analysis_id,
             )
+            # Best-effort System C contribution (mirrors web/portfolio_main.py's
+            # position-scan store — never block or fail the dive on it). Without
+            # this, the highest-volume decision path contributed NOTHING to the
+            # nightly outcome grading: deep dives read past context but never
+            # recorded their own calls. Empty decisions are junk: skip them.
+            fd = final_state.get("final_trade_decision", "")
+            if fd and config.get("deep_dive_store_decisions", True):
+                try:
+                    orch.memory_log.store_decision(
+                        ticker=ticker, trade_date=trade_date, final_trade_decision=fd,
+                    )
+                except Exception:
+                    log.exception("[spy %s] memory-log store failed for %s", scan_id, ticker)
             return {
                 **c,
                 "signal": signal,

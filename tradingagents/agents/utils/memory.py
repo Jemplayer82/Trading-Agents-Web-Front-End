@@ -1,14 +1,34 @@
 """Append-only markdown decision log for TradingAgents."""
 
+import os
 import re
+import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from tradingagents.agents.utils.rating import parse_rating
 
+# Serializes all writers WITHIN one process. Deep dives call store_decision
+# from a ThreadPoolExecutor (web/spy_scanner.py), and the read-check-append /
+# read-mutate-replace bodies below are not atomic — without this, concurrent
+# threads can interleave multi-KB appends or drop each other's entries.
+# Module-level (not per-instance) because every orchestrator constructs its
+# own TradingMemoryLog over the same file.
+_WRITE_LOCK = threading.Lock()
+
 
 class TradingMemoryLog:
-    """Append-only markdown log of trading decisions and reflections."""
+    """Append-only markdown log of trading decisions and reflections.
+
+    Concurrency model: all writes are serialized per-process via _WRITE_LOCK,
+    and rewrites go through a pid-unique temp file + os.replace. CROSS-process
+    races (e.g. the api container appending while the scheduler's 23:30 sweep
+    rewrites) are NOT locked — the scheduled writers are temporally disjoint
+    (07:30 scans / Sat 00:00 / 23:30 sweep), and the idempotency guard makes a
+    duplicate entry, not corruption, the worst realistic outcome. Readers
+    retry once on OSError (Windows os.replace can momentarily deny reads).
+    """
 
     # HTML comment: cannot appear in LLM prose output, safe as a hard delimiter
     _SEPARATOR = "\n\n<!-- ENTRY_END -->\n\n"
@@ -27,6 +47,25 @@ class TradingMemoryLog:
         # Optional cap on resolved entries. None disables rotation.
         self._max_entries = cfg.get("memory_log_max_entries")
 
+    def _read_log_text(self) -> str | None:
+        """Read the log, retrying once on OSError.
+
+        On Windows, os.replace during a concurrent rewrite (the nightly sweep)
+        can momentarily deny reads with PermissionError; a missed read is
+        benign, an unhandled exception inside a deep-dive worker thread is not.
+        Returns None when the file is absent or unreadable after the retry.
+        """
+        if not self._log_path or not self._log_path.exists():
+            return None
+        for attempt in (0, 1):
+            try:
+                return self._log_path.read_text(encoding="utf-8")
+            except OSError:
+                if attempt:
+                    return None
+                time.sleep(0.05)
+        return None
+
     # --- Write path (Phase A) ---
 
     def store_decision(
@@ -38,30 +77,31 @@ class TradingMemoryLog:
         """Append pending entry at end of propagate(). No LLM call."""
         if not self._log_path:
             return
-        # Idempotency guard: fast raw-text scan instead of full parse.
-        # Matches pending AND resolved entries — re-running a (ticker, date)
-        # whose entry already resolved must not append a duplicate (it would
-        # double-count in calibration stats).
-        if self._log_path.exists():
-            raw = self._log_path.read_text(encoding="utf-8")
-            for line in raw.splitlines():
-                if line.startswith(f"[{trade_date} | {ticker} |"):
-                    return
-        # "Unrated" (not "Hold") on parse failure: a failed parse dumped into
-        # the Hold bucket would silently pollute Hold calibration stats.
-        rating = parse_rating(final_trade_decision, default="Unrated")
-        tag = f"[{trade_date} | {ticker} | {rating} | pending]"
-        entry = f"{tag}\n\nDECISION:\n{final_trade_decision}{self._SEPARATOR}"
-        with open(self._log_path, "a", encoding="utf-8") as f:
-            f.write(entry)
+        with _WRITE_LOCK:
+            # Idempotency guard: fast raw-text scan instead of full parse.
+            # Matches pending AND resolved entries — re-running a (ticker, date)
+            # whose entry already resolved must not append a duplicate (it would
+            # double-count in calibration stats).
+            raw = self._read_log_text()
+            if raw:
+                for line in raw.splitlines():
+                    if line.startswith(f"[{trade_date} | {ticker} |"):
+                        return
+            # "Unrated" (not "Hold") on parse failure: a failed parse dumped into
+            # the Hold bucket would silently pollute Hold calibration stats.
+            rating = parse_rating(final_trade_decision, default="Unrated")
+            tag = f"[{trade_date} | {ticker} | {rating} | pending]"
+            entry = f"{tag}\n\nDECISION:\n{final_trade_decision}{self._SEPARATOR}"
+            with open(self._log_path, "a", encoding="utf-8") as f:
+                f.write(entry)
 
     # --- Read path (Phase A) ---
 
     def load_entries(self) -> list[dict]:
         """Parse all entries from log. Returns list of dicts."""
-        if not self._log_path or not self._log_path.exists():
+        text = self._read_log_text()
+        if text is None:
             return []
-        text = self._log_path.read_text(encoding="utf-8")
         raw_entries = [e.strip() for e in text.split(self._SEPARATOR) if e.strip()]
         entries = []
         for raw in raw_entries:
@@ -162,10 +202,23 @@ class TradingMemoryLog:
         its tag with return figures, and appends a REFLECTION section.  Uses
         a temp-file + os.replace() so a crash mid-write never corrupts the log.
         """
-        if not self._log_path or not self._log_path.exists():
-            return
+        with _WRITE_LOCK:
+            self._update_with_outcome_locked(
+                ticker, trade_date, raw_return, alpha_return, holding_days, reflection
+            )
 
-        text = self._log_path.read_text(encoding="utf-8")
+    def _update_with_outcome_locked(
+        self,
+        ticker: str,
+        trade_date: str,
+        raw_return: float,
+        alpha_return: float,
+        holding_days: int,
+        reflection: str,
+    ) -> None:
+        text = self._read_log_text()
+        if text is None:
+            return
         blocks = text.split(self._SEPARATOR)
 
         pending_prefix = f"[{trade_date} | {ticker} |"
@@ -207,10 +260,7 @@ class TradingMemoryLog:
             return
 
         new_blocks = self._apply_rotation(new_blocks)
-        new_text = self._SEPARATOR.join(new_blocks)
-        tmp_path = self._log_path.with_suffix(".tmp")
-        tmp_path.write_text(new_text, encoding="utf-8")
-        tmp_path.replace(self._log_path)
+        self._atomic_rewrite(self._SEPARATOR.join(new_blocks))
 
     def batch_update_with_outcomes(self, updates: list[dict]) -> None:
         """Apply multiple outcome updates in a single read + atomic write.
@@ -218,10 +268,15 @@ class TradingMemoryLog:
         Each element of updates must have keys: ticker, trade_date,
         raw_return, alpha_return, holding_days, reflection.
         """
-        if not self._log_path or not self._log_path.exists() or not updates:
+        if not updates:
             return
+        with _WRITE_LOCK:
+            self._batch_update_locked(updates)
 
-        text = self._log_path.read_text(encoding="utf-8")
+    def _batch_update_locked(self, updates: list[dict]) -> None:
+        text = self._read_log_text()
+        if text is None:
+            return
         blocks = text.split(self._SEPARATOR)
 
         # Build lookup keyed by (trade_date, ticker) for O(1) dispatch
@@ -261,12 +316,20 @@ class TradingMemoryLog:
                 new_blocks.append(block)
 
         new_blocks = self._apply_rotation(new_blocks)
-        new_text = self._SEPARATOR.join(new_blocks)
-        tmp_path = self._log_path.with_suffix(".tmp")
-        tmp_path.write_text(new_text, encoding="utf-8")
-        tmp_path.replace(self._log_path)
+        self._atomic_rewrite(self._SEPARATOR.join(new_blocks))
 
     # --- Helpers ---
+
+    def _atomic_rewrite(self, new_text: str) -> None:
+        """Write via a pid-unique temp file + os.replace.
+
+        The temp name embeds the pid so two containers rewriting the shared
+        volume concurrently can't interleave on one fixed '.tmp' file (the old
+        with_suffix('.tmp') name was a cross-process collision).
+        """
+        tmp_path = self._log_path.with_suffix(f".tmp{os.getpid()}")
+        tmp_path.write_text(new_text, encoding="utf-8")
+        tmp_path.replace(self._log_path)
 
     def _apply_rotation(self, blocks: list[str]) -> list[str]:
         """Drop oldest resolved blocks when their count exceeds max_entries.

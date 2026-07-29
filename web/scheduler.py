@@ -295,6 +295,58 @@ def job_options_settle() -> None:
         log.exception("[options_settle] failed: %s", exc)
 
 
+def job_options_grade() -> None:
+    """Nightly options-ledger grading: backfill exit spots + batch-reflect.
+
+    In-process like job_outcome_sweep (same shared volume/DB rationale). Runs
+    AFTER the 20:00 settle so expired_* rows exist, BEFORE the 23:30 memory
+    sweep. Per options account: fill missing exit underlyings (enables the
+    directional-vs-decay attribution), then ONE quick-LLM reflection over
+    recent closes — gated inside run_batch_reflection on enough NEW closes,
+    so most nights this is a free no-op. LLM failure degrades to backfill-only
+    (positions stay unreflected and retry tomorrow).
+    """
+    log.info("[options_grade] starting")
+    _apply_db_config()
+    try:
+        from tradingagents.default_config import DEFAULT_CONFIG
+        from tradingagents.llm_clients import create_llm_client
+
+        from . import db as webdb
+        from . import options_learning
+
+        config = dict(DEFAULT_CONFIG)
+        if config.get("llm_provider", "openai").lower() == "openai" and not os.environ.get("OPENAI_API_KEY"):
+            # Same credential fallback as job_outcome_sweep below: this
+            # container carries no provider keys; route via the switchboard.
+            config["llm_provider"] = "switchboard"
+            config["quick_think_llm"] = "claude-haiku-4-5-20251001"
+        llm = None
+        try:
+            llm = create_llm_client(
+                provider=config["llm_provider"],
+                model=config["quick_think_llm"],
+                base_url=config.get("backend_url"),
+            ).get_llm()
+        except Exception:
+            log.exception("[options_grade] LLM client unavailable — backfill only")
+
+        accounts = webdb.list_paper_accounts(kind="options")
+        for acct in accounts:
+            aid = int(acct["id"])
+            try:
+                filled = options_learning.backfill_exit_underlyings(aid)
+                reflected = options_learning.run_batch_reflection(aid, llm, config)
+                log.info("[options_grade] account %s: backfilled=%d reflected=%s",
+                         aid, filled, reflected)
+            except Exception:
+                log.exception("[options_grade] account %s failed", aid)
+        if not accounts:
+            log.info("[options_grade] no options accounts — nothing to grade")
+    except Exception:
+        log.exception("[options_grade] crashed")
+
+
 def job_outcome_sweep() -> None:
     """Resolve ALL matured pending memory-log decisions (every ticker).
 
@@ -351,6 +403,14 @@ def job_outcome_sweep() -> None:
             max_reflections=config.get("sweep_max_reflections_per_run", 50),
         )
         log.info("[outcome_sweep] done: %s", summary)
+        try:
+            # Backlog visibility: deep dives now feed ~50 pendings/day into this
+            # queue; a growing number here means the reflection budget is
+            # starving (relief valve: TRADINGAGENTS_SWEEP_MAX_REFLECTIONS_PER_RUN).
+            log.info("[outcome_sweep] pending backlog now: %d",
+                     len(memory_log.get_pending_entries()))
+        except Exception:
+            pass
         if summary["errors"]:
             log.warning("[outcome_sweep] %d entries errored — see log above", summary["errors"])
     except Exception:
@@ -419,6 +479,7 @@ def main() -> None:
     parser.add_argument("--run-options-scan-now", action="store_true", help="Trigger daily options scan once and exit")
     parser.add_argument("--refresh-options-now", action="store_true", help="Refresh option marks once and exit")
     parser.add_argument("--settle-options-now", action="store_true", help="Run options expiry settlement once and exit")
+    parser.add_argument("--grade-options-now", action="store_true", help="Run options-ledger grading/reflection once and exit")
     args = parser.parse_args()
 
     _apply_db_config()  # pull UI-saved SMTP/notifier/credentials onto env
@@ -446,6 +507,9 @@ def main() -> None:
         return
     if args.settle_options_now:
         job_options_settle()
+        return
+    if args.grade_options_now:
+        job_options_grade()
         return
 
     sched = BlockingScheduler(
@@ -509,9 +573,9 @@ def main() -> None:
     )
     sched.add_job(
         job_options_scan,
-        # 07:30 ET: quick scan + 25 deep dives run pre-market; the build's own
-        # market-open gate holds allocation until 09:35 so entries fill at
-        # live mids.
+        # 07:30 ET: quick scan + deep dives (top DEEP_TOP + SPY) run pre-market;
+        # the build's own market-open gate holds allocation until 09:35 so
+        # entries fill at live mids.
         CronTrigger(day_of_week="mon-fri", hour=7, minute=30, timezone=TIMEZONE),
         id="options_scan",
         replace_existing=True,
@@ -537,6 +601,14 @@ def main() -> None:
         id="options_settle",
         replace_existing=True,
     )
+    sched.add_job(
+        job_options_grade,
+        # 20:15 ET: after the settle writes expired_* rows, before the 23:30
+        # memory sweep — the learning loop grades a complete day.
+        CronTrigger(day_of_week="mon-fri", hour=20, minute=15, timezone=TIMEZONE),
+        id="options_grade",
+        replace_existing=True,
+    )
     # Sweep once at startup too — a crash that happened while the scheduler was
     # down should be caught and alerted immediately, not up to 20 min later.
     job_reap_stuck_runs()
@@ -552,6 +624,7 @@ def main() -> None:
     log.info(" - options_scan       cron 07:30 Mon-Fri %s", TIMEZONE)
     log.info(" - options_refresh    cron hourly Mon-Fri 10:00-16:00 + 16:45 %s", TIMEZONE)
     log.info(" - options_settle     cron 20:00 Mon-Fri %s", TIMEZONE)
+    log.info(" - options_grade      cron 20:15 Mon-Fri %s", TIMEZONE)
     try:
         sched.start()
     except (KeyboardInterrupt, SystemExit):

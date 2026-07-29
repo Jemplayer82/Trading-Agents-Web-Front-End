@@ -11,9 +11,14 @@ guardrails on both sides:
              deterministic conviction-ranked fallback if the call or its JSON
              parse fails, so a build never finishes without a decision set.
 
-Deliberately excluded from the memory-log / outcome-grading system (System C):
-the deep dives that feed this already grade the underlying directional calls;
-contract-level sizing decisions are graded by the options ledger itself.
+Two-layer learning (each layer grades what it can actually measure):
+  Layer 1 (System C) — the deep dives that feed this store their directional
+  calls in the memory log, graded nightly by forward alpha on the underlying.
+  Layer 2 (options ledger) — closed positions are graded by P&L attribution
+  (web/options_learning.py: directional vs time/vol-decay split), batch-
+  reflected nightly, and the resulting lessons + track-record stats arrive
+  here via ``lessons_context``. Lessons are context, never rules: the hard
+  guardrails below are code-enforced and are never relaxed by lessons.
 """
 from __future__ import annotations
 
@@ -55,7 +60,7 @@ _SYSTEM_TEMPLATE = """You are a disciplined options trader managing a paper acco
 buys LONG single-leg calls and puts only (no spreads, no short options). Positions may
 be held from a day to several weeks — wherever there is money to be made. Long premium
 decays: every position must earn its theta.
-{bias_context}
+{bias_context}{lessons_context}
 You will receive the account state, currently OPEN positions (with fresh marks and
 today's signal on the underlying where available), and NEW pre-vetted contract
 candidates from today's scan.
@@ -201,15 +206,23 @@ def run(
     aggressiveness: int = 5,
     bias: str = "neutral",
     fresh_signals: dict[str, dict[str, Any]] | None = None,
+    lessons_context: str = "",
 ) -> dict[str, Any]:
     """Decide closes/holds/opens for one options account.
 
     open_positions: db rows (already marked to market). fresh_signals: today's
     quick/deep signal per underlying ({ticker: {signal, conviction}}).
+    lessons_context: optional track-record + lessons block from
+    options_learning.format_track_record — "" keeps the prompt byte-identical
+    to the lesson-less version.
     Returns {closes, holds, opens, report_md} where closes carry exit_reason,
     and opens carry the full candidate contract + contracts count.
     """
     fresh_signals = fresh_signals or {}
+    # Mirror _BIAS_CONTEXT's newline convention so an empty block changes
+    # nothing and a real one gets clean line separation.
+    if lessons_context and not lessons_context.startswith("\n"):
+        lessons_context = f"\n{lessons_context}\n"
     per_pct, total_pct = position_caps(aggressiveness)
     equity = max(0.0, float(equity))
     per_cap = per_pct * equity
@@ -268,6 +281,7 @@ def run(
 
     system = _SYSTEM_TEMPLATE.format(
         bias_context=_BIAS_CONTEXT.get(bias, ""),
+        lessons_context=lessons_context,
         per_cap=per_cap, per_pct=per_pct * 100,
         total_cap=total_cap, total_pct=total_pct * 100,
         max_positions=MAX_OPEN_POSITIONS,
