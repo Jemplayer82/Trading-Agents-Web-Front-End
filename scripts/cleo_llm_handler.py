@@ -386,6 +386,14 @@ def _signal_group(proc: subprocess.Popen, sig: int) -> None:
     for the life of the box. Popen(start_new_session=True) puts the CLI in its
     own process group precisely so the whole tree can be taken down here.
     """
+    # Never signal a PID we have already reaped. Popen.send_signal() has this
+    # guard built in; raw killpg does not, and the watchdog can fire at the same
+    # moment _reap() collects the child — at which point the PID may already
+    # belong to something else. Signalling a recycled PID's whole group would
+    # take out unrelated processes owned by this user.
+    if proc.returncode is not None:
+        return
+
     if hasattr(os, "killpg") and hasattr(os, "getpgid"):
         try:
             os.killpg(os.getpgid(proc.pid), sig)
