@@ -123,11 +123,20 @@ def grade_position(row: dict[str, Any]) -> dict[str, Any]:
         direction = "down"
     else:
         direction = "flat"
-    correct = direction == ("up" if is_call else "down")
+    # Three-valued on purpose: a flat underlying is neither a right nor a wrong
+    # directional call — flat+lost is the PURE-theta loss, and lumping it into
+    # "wrong" would blame direction for what decay did.
+    correct: bool | None
+    if direction == "flat":
+        correct = None
+    else:
+        correct = direction == ("up" if is_call else "down")
 
     won = out["won"]
     if won is None:
         quadrant = None
+    elif correct is None:
+        quadrant = "flat_won" if won else "flat_lost"  # pure theta/vol outcome
     elif correct and won:
         quadrant = "right_won"
     elif correct and not won:
@@ -209,8 +218,12 @@ def compute_options_stats(rows: list[dict[str, Any]], min_closed: int = 10) -> d
             by_delta.setdefault(b, []).append(g)
 
     attributed = [g for g in grades if g.get("attributed")]
-    losers = [g for g in grades if g.get("won") is False]
-    right_lost = [g for g in attributed if g.get("quadrant") == "right_lost"]
+    # Denominator matches the numerator's population: only ATTRIBUTED losers
+    # can be classified right/flat/wrong, so unattributed losers must not
+    # dilute the share (they'd understate the decay toll).
+    attributed_losers = [g for g in attributed if g.get("won") is False]
+    decay_lost = [g for g in attributed_losers
+                  if g.get("quadrant") in ("right_lost", "flat_lost")]
 
     return {
         "n": len(closed),
@@ -222,7 +235,10 @@ def compute_options_stats(rows: list[dict[str, Any]], min_closed: int = 10) -> d
         "by_dte_entry": {k: _rate_line(by_dte[k]) for k in ("<=7d", "8-21d", ">21d") if k in by_dte},
         "by_delta": {k: _rate_line(by_delta[k]) for k in ("<0.35", "0.35-0.60", ">0.60") if k in by_delta},
         "n_attributed": len(attributed),
-        "right_but_lost_share_of_losers": (len(right_lost) / len(losers)) if losers else None,
+        "n_attributed_losers": len(attributed_losers),
+        # right_lost + flat_lost: direction didn't fail, decay did.
+        "decay_lost_share_of_losers": (len(decay_lost) / len(attributed_losers))
+        if attributed_losers else None,
     }
 
 
@@ -246,11 +262,12 @@ def format_track_record(stats: dict[str, Any], lessons_md: str | None,
         lines.append("By DTE at entry: " + " | ".join(f"{k} {v}" for k, v in stats["by_dte_entry"].items()))
     if stats.get("by_delta"):
         lines.append("By |delta|: " + " | ".join(f"{k} {v}" for k, v in stats["by_delta"].items()))
-    if stats.get("right_but_lost_share_of_losers") is not None and stats.get("n_attributed"):
+    if stats.get("decay_lost_share_of_losers") is not None:
         lines.append(
-            f"Direction right but still lost premium: {stats['right_but_lost_share_of_losers']:.0%} "
-            f"of losers (time/vol decay toll — theta+IV, not separable; "
-            f"{stats['n_attributed']}/{stats['n']} attributable)"
+            f"Losses where direction did NOT fail (right or flat underlying): "
+            f"{stats['decay_lost_share_of_losers']:.0%} of attributable losers "
+            f"(time/vol decay toll — theta+IV, not separable; "
+            f"{stats['n_attributed_losers']} attributable losers of {stats['n']} closed)"
         )
     if lessons_md and lessons_md.strip():
         lines.append("LESSONS from past closes (watch-fors, not rules):")
@@ -258,7 +275,13 @@ def format_track_record(stats: dict[str, Any], lessons_md: str | None,
     lines.append(_CAUTION)
     block = "\n".join(lines)
     if len(block) > max_chars:
-        block = block[: max_chars - len(_CAUTION) - 2].rstrip() + "\n" + _CAUTION
+        # Trim at a line boundary, never into negative slice territory, and
+        # always keep the CAUTION footer (worst tiny-cap case: footer only).
+        keep = max(0, max_chars - len(_CAUTION) - 1)
+        truncated = block[:keep]
+        if "\n" in truncated:
+            truncated = truncated.rsplit("\n", 1)[0]
+        block = (truncated.rstrip() + "\n" + _CAUTION) if truncated.strip() else _CAUTION
     return block
 
 
@@ -308,9 +331,11 @@ def _grade_line(row: dict[str, Any], g: dict[str, Any]) -> str:
     ret = g.get("return_pct")
     base += f" | total {ret:+.0%}" if ret is not None else " | total n/a"
     if g.get("attributed"):
+        dc = g["direction_correct"]
+        label = "FLAT" if dc is None else ("RIGHT" if dc else "WRONG")
         base += (
             f" (dir {g['directional_points']:+.2f}pt, decay {g['residual_points']:+.2f}pt)"
-            f" | direction {'RIGHT' if g['direction_correct'] else 'WRONG'}"
+            f" | direction {label}"
         )
     return base
 

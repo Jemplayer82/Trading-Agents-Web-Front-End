@@ -96,3 +96,26 @@ def test_unknown_env_var_is_ignored(monkeypatch):
         TRADINGAGENTS_NONEXISTENT_KEY="oops",
     )
     assert "nonexistent_key" not in dc.DEFAULT_CONFIG
+
+
+def test_options_learning_overrides(monkeypatch):
+    """The learning loop's operational knobs — including the documented kill
+    switch — must actually be wired through _ENV_OVERRIDES with correct types."""
+    dc = _reload_with_env(
+        monkeypatch,
+        TRADINGAGENTS_DEEP_DIVE_STORE_DECISIONS="false",
+        TRADINGAGENTS_OPTIONS_LESSONS_MIN_CLOSED="25",
+        TRADINGAGENTS_OPTIONS_REFLECT_MIN_NEW_CLOSED="9",
+    )
+    assert dc.DEFAULT_CONFIG["deep_dive_store_decisions"] is False
+    assert dc.DEFAULT_CONFIG["options_lessons_min_closed"] == 25
+    assert isinstance(dc.DEFAULT_CONFIG["options_lessons_min_closed"], int)
+    assert dc.DEFAULT_CONFIG["options_reflect_min_new_closed"] == 9
+
+
+def test_options_learning_defaults(monkeypatch):
+    dc = _reload_with_env(monkeypatch)
+    assert dc.DEFAULT_CONFIG["deep_dive_store_decisions"] is True
+    assert dc.DEFAULT_CONFIG["options_lessons_min_closed"] == 10
+    assert dc.DEFAULT_CONFIG["options_reflect_min_new_closed"] == 5
+    assert dc.DEFAULT_CONFIG["memory_log_max_entries"] == 1000

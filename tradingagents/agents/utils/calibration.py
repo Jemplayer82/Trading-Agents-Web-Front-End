@@ -55,8 +55,11 @@ def compute_calibration(entries: list[dict], config: dict | None = None) -> dict
     tickers: set[str] = set()
     n_scored_total = 0
     n_crypto = 0
+    n_absolute = 0
     n_unrated = 0
     n_censored = 0
+    # Benchmark resolution per unique ticker (cached — the log repeats tickers).
+    absolute_cache: dict[str, bool] = {}
 
     today = datetime.now()
     n_stale_pending = 0
@@ -88,6 +91,24 @@ def compute_calibration(entries: list[dict], config: dict | None = None) -> dict
             n_crypto += 1
             continue
 
+        # Same corruption applies to any SELF-benchmarked ticker (SPY — deep-
+        # dived daily by the options scan — resolves vs itself, so the sweep
+        # records alpha == raw market return, i.e. beta, not alpha). The
+        # resolved tag doesn't store the benchmark, so re-resolve it here.
+        tkr = e["ticker"].upper()
+        if tkr not in absolute_cache:
+            try:
+                from tradingagents.graph.outcome_resolution import (
+                    ABSOLUTE_BENCHMARK,
+                    resolve_benchmark,
+                )
+                absolute_cache[tkr] = resolve_benchmark(tkr, config) == ABSOLUTE_BENCHMARK
+            except Exception:
+                absolute_cache[tkr] = False
+        if absolute_cache[tkr]:
+            n_absolute += 1
+            continue
+
         rating = e.get("rating") or "Unrated"
         alpha = _parse_pct(e.get("alpha"))
         if rating not in per_rating or alpha is None:
@@ -114,6 +135,7 @@ def compute_calibration(entries: list[dict], config: dict | None = None) -> dict
         "n_total": n_scored_total,
         "n_tickers": len(tickers),
         "n_crypto": n_crypto,
+        "n_absolute": n_absolute,
         "n_unrated": n_unrated,
         "n_censored": n_censored + n_stale_pending,
         "band": band,
@@ -181,6 +203,10 @@ def format_calibration(stats: dict) -> str:
         excluded.append(f"{stats['n_unrated']} unrated")
     if stats["n_crypto"]:
         excluded.append(f"{stats['n_crypto']} crypto (absolute-return, scored separately)")
+    if stats.get("n_absolute"):
+        excluded.append(
+            f"{stats['n_absolute']} self-benchmarked (SPY-style absolute-return, excluded)"
+        )
     if excluded:
         lines.append(f"  Excluded from the rates above: {', '.join(excluded)}.")
 

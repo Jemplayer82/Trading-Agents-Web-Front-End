@@ -197,16 +197,22 @@ def test_lessons_context_reaches_system_prompt(monkeypatch):
     assert "watch for decay" in system
 
 
-def test_empty_lessons_leaves_prompt_byte_identical(monkeypatch):
-    """The '' default must not change the prompt at all — the contract that
-    keeps every pre-learning behavior (and test) intact."""
+def test_empty_lessons_renders_the_pre_learning_prompt(monkeypatch):
+    """With no lessons the {lessons_context} placeholder must vanish without a
+    trace — the exact byte sequence the pre-learning template produced around
+    it (neutral bias renders '' too, leaving one blank line) must survive."""
     llm = _mock_llm(monkeypatch, [])
     run([_cand("NVDA")], [], "2026-07-17", {}, equity=100_000, cash=100_000)
-    without_kwarg = llm.invoke.call_args[0][0][0]["content"]
+    system = llm.invoke.call_args[0][0][0]["content"]
+    # Pre-learning byte sequence across the placeholder site (neutral bias):
+    assert "must earn its theta.\n\nYou will receive" in system
+    assert "TRACK RECORD" not in system
+    assert "{lessons_context}" not in system  # placeholder actually substituted
 
+    # And a non-empty block gets clean newline separation, not concatenation.
     llm2 = _mock_llm(monkeypatch, [])
     run([_cand("NVDA")], [], "2026-07-17", {}, equity=100_000, cash=100_000,
-        lessons_context="")
-    with_empty = llm2.invoke.call_args[0][0][0]["content"]
-    assert without_kwarg == with_empty
-    assert "TRACK RECORD" not in with_empty
+        lessons_context="=== OPTIONS TRACK RECORD (this paper account, 12 closed) ===")
+    system2 = llm2.invoke.call_args[0][0][0]["content"]
+    assert "theta.\n\n=== OPTIONS TRACK RECORD" in system2
+    assert "===\n\nYou will receive" in system2

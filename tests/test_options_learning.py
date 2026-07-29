@@ -81,9 +81,29 @@ def test_right_but_lost_is_the_decay_quadrant():
     assert g["residual_points"] < 0  # decay ate more than direction gave
 
 
-def test_flat_move_is_not_direction_correct():
+def test_flat_move_is_neither_right_nor_wrong():
+    """A flat underlying is a PURE-theta outcome, not a wrong directional call —
+    blaming direction for what decay did would poison the lessons."""
     g = options_learning.grade_position(_row(exit_underlying=200.5))  # +0.25% < 0.5%
-    assert g["direction_correct"] is False
+    assert g["direction_correct"] is None
+    g_lost = options_learning.grade_position(_row(
+        exit_underlying=200.5, exit_premium=2.0, realized_pnl=-400.0))
+    assert g_lost["quadrant"] == "flat_lost"
+
+
+def test_decay_share_uses_attributed_losers_denominator():
+    """Numerator and denominator must cover the same population: unattributed
+    losers (no delta / no exit spot) can't be classified, so they must not
+    dilute the decay-toll share."""
+    rows = (
+        _many(2, exit_premium=2.0, realized_pnl=-400.0,
+              entry_underlying=200.0, exit_underlying=204.0)  # right_lost
+        + _many(2, exit_premium=2.0, realized_pnl=-400.0, entry_delta=None)  # unattributable losers
+        + _many(8)  # winners
+    )
+    stats = options_learning.compute_options_stats(rows, min_closed=10)
+    assert stats["n_attributed_losers"] == 2
+    assert stats["decay_lost_share_of_losers"] == pytest.approx(1.0)
 
 
 def test_null_delta_skips_attribution_keeps_stats():

@@ -23,11 +23,14 @@ class TradingMemoryLog:
 
     Concurrency model: all writes are serialized per-process via _WRITE_LOCK,
     and rewrites go through a pid-unique temp file + os.replace. CROSS-process
-    races (e.g. the api container appending while the scheduler's 23:30 sweep
-    rewrites) are NOT locked — the scheduled writers are temporally disjoint
-    (07:30 scans / Sat 00:00 / 23:30 sweep), and the idempotency guard makes a
-    duplicate entry, not corruption, the worst realistic outcome. Readers
-    retry once on OSError (Windows os.replace can momentarily deny reads).
+    races are NOT locked: the 22:00 nightly portfolio scan (api/portfolio
+    container) can still be storing decisions when the scheduler's 23:30 sweep
+    rewrites the file, so an append landing inside the sweep's read->replace
+    window (sub-second) can be lost. Accepted: the worst case is ONE dropped
+    pending entry, which the next scan of that ticker re-stores; never
+    corruption (the replace is atomic). Readers retry once on OSError
+    (Windows os.replace can momentarily deny reads); write paths treat an
+    unreadable-but-existing log as a hard error rather than guessing.
     """
 
     # HTML comment: cannot appear in LLM prose output, safe as a hard delimiter
@@ -83,6 +86,11 @@ class TradingMemoryLog:
             # whose entry already resolved must not append a duplicate (it would
             # double-count in calibration stats).
             raw = self._read_log_text()
+            if raw is None and self._log_path.exists():
+                # Log exists but is unreadable even after the retry: appending
+                # blind would bypass the dedup guard and could double-count a
+                # decision in calibration. No write beats a wrong write.
+                raise OSError(f"memory log unreadable, store aborted: {self._log_path}")
             if raw:
                 for line in raw.splitlines():
                     if line.startswith(f"[{trade_date} | {ticker} |"):
@@ -218,6 +226,12 @@ class TradingMemoryLog:
     ) -> None:
         text = self._read_log_text()
         if text is None:
+            if self._log_path and self._log_path.exists():
+                # Unreadable-but-existing log: silently dropping the outcome
+                # would leave the entry pending while the sweep reports success
+                # (and re-bills its LLM reflection nightly). Fail loud instead —
+                # the sweep's exception handler logs it.
+                raise OSError(f"memory log unreadable, outcome write aborted: {self._log_path}")
             return
         blocks = text.split(self._SEPARATOR)
 
@@ -276,6 +290,10 @@ class TradingMemoryLog:
     def _batch_update_locked(self, updates: list[dict]) -> None:
         text = self._read_log_text()
         if text is None:
+            if self._log_path and self._log_path.exists():
+                # Same rationale as _update_with_outcome_locked: a silent drop
+                # here loses a whole sweep's outcome batch invisibly.
+                raise OSError(f"memory log unreadable, batch write aborted: {self._log_path}")
             return
         blocks = text.split(self._SEPARATOR)
 
