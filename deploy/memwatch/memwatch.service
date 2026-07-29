@@ -1,0 +1,21 @@
+[Unit]
+Description=memwatch — sample host memory into CSVs
+Documentation=https://github.com/Jemplayer82/Trading-Agents-Web-Front-End/blob/master/deploy/memwatch/README.md
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/memwatch.sh
+
+# This runs on a box that is already under memory investigation. It gets the
+# lowest possible priority and a hard ceiling so it can never become the thing
+# it is supposed to be diagnosing.
+Nice=19
+IOSchedulingClass=idle
+MemoryMax=128M
+
+# docker stats already has its own 60s timeout inside the script; this is the
+# backstop for the whole sample.
+TimeoutStartSec=120
+
+# Needs to read every process's stat and talk to the docker socket.
+User=root

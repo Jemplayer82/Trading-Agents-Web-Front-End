@@ -32,5 +32,18 @@ TimeoutStopSec=15
 # Light hardening (optional; relax if it interferes with the claude CLI).
 NoNewPrivileges=true
 
+# Memory visibility + a runaway backstop.
+#
+# Every `claude -p` subprocess Cleo spawns lives in THIS cgroup, so the figure
+# covers the daemon plus all in-flight CLI calls, not just the Python process
+# (the daemon alone idles around 40 MB).
+#
+# Size this ABOVE a legitimate peak. With 8 executor workers each driving a CLI
+# at a few hundred MB, a normal busy moment is comfortably over 1 GB — a tight
+# ceiling here would OOM-kill healthy work rather than catch a leak. 6G is a
+# runaway backstop, not a target. Restart=always brings Cleo back if it trips.
+MemoryAccounting=yes
+MemoryMax=6G
+
 [Install]
 WantedBy=multi-user.target

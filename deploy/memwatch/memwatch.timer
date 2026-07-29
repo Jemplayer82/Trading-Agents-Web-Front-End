@@ -1,0 +1,14 @@
+[Unit]
+Description=Run memwatch every 5 minutes
+
+[Timer]
+# Wall-clock every 5 minutes. OnCalendar (rather than OnUnitActiveSec) because
+# Persistent= only works with calendar timers.
+OnCalendar=*:0/5
+# Fire once after downtime so a gap in the CSVs reads as a gap, not as silence.
+Persistent=true
+AccuracySec=30s
+Unit=memwatch.service
+
+[Install]
+WantedBy=timers.target
