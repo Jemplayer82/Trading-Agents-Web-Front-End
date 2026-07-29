@@ -10,6 +10,17 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Intraday stop-loss enforcement (standing-stop emulation).** The −60%
+  stop used to be checked only once a day at the 09:35 allocation, filled at
+  that moment's price — a breach at 10:30 rode a full day past the stop. The
+  hourly mark refresh now closes freshly-quoted positions that breach the
+  stop: filled AT the stop level when the mark crossed it this interval (what
+  a working stop order would have gotten), or at the observed quote when it
+  gapped through (no pretending we caught a level the market never traded).
+  Carried/intrinsic (stale) marks never trigger a stop. The daily allocator's
+  forced-close remains as backstop. Kill switch:
+  `TRADINGAGENTS_OPTIONS_INTRADAY_STOP=false`.
+
 - **On-demand ticker recommendation.** New "[ Ticker Recommendation ]" panel on
   the Options tab (`POST /api/options-recommend`): type any ticker and get a
   specific contract recommendation with confidence — momentum quick-read, then

@@ -328,6 +328,8 @@ def refresh_positions(paper_account_id: int | None = None) -> dict[str, Any]:
             db.mark_options_position(p["id"], price, price * 100 * int(p["contracts"]), source)
             marked += 1
 
+    stopped = _apply_intraday_stops(positions, priced)
+
     # Roll fresh equity onto each affected account's latest completed scan.
     accounts = ([db.get_paper_account(paper_account_id)] if paper_account_id
                 else db.list_paper_accounts(kind="options"))
@@ -341,8 +343,71 @@ def refresh_positions(paper_account_id: int | None = None) -> dict[str, Any]:
         if latest:
             db.update_spy_scan(latest["id"], current_value=equity,
                                last_price_check=datetime.utcnow().isoformat(timespec="seconds") + "Z")
-    return {"marked": marked, "open": len(positions),
+    return {"marked": marked, "open": len(positions), "stopped": stopped,
             "settle": settle_summary, "account_values": account_values}
+
+
+def _apply_intraday_stops(
+    positions: list[dict[str, Any]],
+    priced: dict[int, tuple[float, str]],
+) -> int:
+    """Emulate a standing stop order between daily allocations.
+
+    The -60% stop used to be enforced only once a day, at the 09:35 allocation,
+    filled at THAT moment's price — a position could crash through the stop at
+    10:30 and ride a full day past it. Now every hourly refresh checks freshly
+    quoted positions and closes breaches immediately.
+
+    Fill convention (standard backtest rule):
+      - previous mark ABOVE the stop, new quote at/below it -> the price
+        crossed the level sometime this interval, so fill AT the stop level,
+        like a working stop order would have;
+      - first observation already below the stop (overnight gap / never
+        marked) -> fill at the observed quote, because a real stop order gaps
+        through too. No pretending we caught a level the market never traded.
+
+    Only fresh quotes (schwab/yfinance) can trigger — a carried or intrinsic
+    mark is a guess, and a guess must never realize a loss. Positions the
+    refresh couldn't price simply wait for the next refresh or the daily
+    allocator's forced_closes, which stays as the backstop. Kill switch:
+    options_intraday_stop / TRADINGAGENTS_OPTIONS_INTRADAY_STOP.
+    """
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    if not DEFAULT_CONFIG.get("options_intraday_stop", True):
+        return 0
+    stopped = 0
+    spot_cache: dict[str, float | None] = {}
+    for p in positions:
+        got = priced.get(p["id"])
+        if not got:
+            continue
+        price, _source = got
+        entry = float(p.get("entry_premium") or 0)
+        if entry <= 0:
+            continue
+        stop_level = round(entry * (1.0 - options_allocator.STOP_LOSS_PCT), 4)
+        if price > stop_level:
+            continue
+        prev_mark = p.get("current_premium")  # pre-refresh mark (row loaded before marking)
+        crossed_this_interval = prev_mark is not None and float(prev_mark) > stop_level
+        fill = stop_level if crossed_this_interval else price
+        if p["underlying"] not in spot_cache:
+            try:
+                spot_cache.update(_underlying_prices([p["underlying"]]))
+            except Exception:
+                spot_cache[p["underlying"]] = None
+        ok = db.close_options_position(
+            int(p["id"]), exit_premium=fill, exit_reason="stop_loss",
+            exit_underlying=spot_cache.get(p["underlying"]),
+            exit_underlying_source="live" if spot_cache.get(p["underlying"]) else None,
+        )
+        if ok:
+            stopped += 1
+            log.info("[options] intraday stop: %s filled $%.2f (stop $%.2f, mark $%.2f, %s)",
+                     p["occ_symbol"], fill, stop_level, price,
+                     "crossed this interval" if crossed_this_interval else "gapped through")
+    return stopped
 
 
 # ── Account math ─────────────────────────────────────────────────────────────

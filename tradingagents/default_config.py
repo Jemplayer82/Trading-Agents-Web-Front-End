@@ -25,6 +25,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_DEEP_DIVE_STORE_DECISIONS":     "deep_dive_store_decisions",
     "TRADINGAGENTS_OPTIONS_LESSONS_MIN_CLOSED":    "options_lessons_min_closed",
     "TRADINGAGENTS_OPTIONS_REFLECT_MIN_NEW_CLOSED": "options_reflect_min_new_closed",
+    "TRADINGAGENTS_OPTIONS_INTRADAY_STOP":         "options_intraday_stop",
 }
 
 
@@ -99,6 +100,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Nightly batch reflection fires only when at least this many positions
     # closed since the last lessons row (lessons regenerate on new data only).
     "options_reflect_min_new_closed": 5,
+    # Hourly refresh closes positions that breach the -60% stop between daily
+    # allocations, filled at the stop level when the mark crossed it this
+    # interval (standing-stop emulation) or at the observed quote on a gap.
+    "options_intraday_stop": True,
     # Most recent closes included in the single nightly reflection call.
     "options_reflect_batch_max": 20,
     # Hard cap on the lessons block injected into the allocator prompt.

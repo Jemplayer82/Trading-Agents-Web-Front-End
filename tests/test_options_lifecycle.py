@@ -463,3 +463,81 @@ def test_mover_score_direction_agnostic():
     quiet = options_engine._mover_score(flat, vols)
     assert up > quiet and down > quiet   # losers are put candidates, not noise
     assert options_engine._mover_score([100, 101], vols) is None  # too short
+
+
+# ── Intraday stop-loss emulation (options_engine._apply_intraday_stops) ─────
+
+def _open_marked(account_id, entry=10.0, prev_mark=None, **over):
+    """Open a position and optionally set a pre-refresh mark."""
+    scan = db.create_spy_scan("2026-07-29", paper_account_id=account_id, kind="options")
+    pid = db.open_options_position(account_id, scan, _pos_dict(entry_premium=entry, **over))
+    if prev_mark is not None:
+        db.mark_options_position(pid, prev_mark, prev_mark * 100 * 2, "schwab")
+    return pid
+
+
+def test_intraday_stop_fills_at_stop_level_when_crossed(account_id, monkeypatch):
+    """Prev mark above the stop, fresh quote below it -> the level was crossed
+    this interval, so the fill is AT the stop (standing-stop emulation), not at
+    the (worse) observed quote."""
+    monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {s: 230.0 for s in syms})
+    pid = _open_marked(account_id, entry=10.0, prev_mark=5.0)  # stop = 4.00
+    pos = db.get_options_position(pid)
+    stopped = options_engine._apply_intraday_stops([pos], {pid: (3.0, "schwab")})
+    assert stopped == 1
+    row = db.get_options_position(pid)
+    assert row["status"] == "closed"
+    assert row["exit_reason"] == "stop_loss"
+    assert row["exit_premium"] == pytest.approx(4.0)
+    assert row["exit_underlying"] == pytest.approx(230.0)
+
+
+def test_intraday_stop_gap_fills_at_observed_quote(account_id, monkeypatch):
+    """Previous mark ALREADY below the stop (e.g. stop was disabled or marks
+    were stale while it slid) -> the level wasn't crossed this interval, so
+    fill at the observed quote; pretending we caught $4.00 would be fiction.
+    Note a never-marked position counts as crossed-from-above: open seeds
+    current_premium = entry_premium, which sits above the stop by definition."""
+    monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
+    pid = _open_marked(account_id, entry=10.0, prev_mark=3.9)  # already < 4.00 stop
+    pos = db.get_options_position(pid)
+    stopped = options_engine._apply_intraday_stops([pos], {pid: (2.5, "yfinance")})
+    assert stopped == 1
+    row = db.get_options_position(pid)
+    assert row["exit_premium"] == pytest.approx(2.5)
+    assert row["exit_underlying"] is None  # spot lookup failed -> nightly backfill
+
+
+def test_intraday_stop_ignores_unpriced_and_healthy(account_id, monkeypatch):
+    """No fresh quote (carried/intrinsic mark) must never realize a loss, and
+    healthy marks above the stop are untouched."""
+    monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
+    pid_stale = _open_marked(account_id, entry=10.0, prev_mark=3.0)   # below stop but stale
+    pid_ok = _open_marked(account_id, entry=10.0, prev_mark=9.0)      # healthy
+    rows = [db.get_options_position(pid_stale), db.get_options_position(pid_ok)]
+    stopped = options_engine._apply_intraday_stops(rows, {pid_ok: (8.5, "schwab")})
+    assert stopped == 0
+    assert db.get_options_position(pid_stale)["status"] == "open"
+    assert db.get_options_position(pid_ok)["status"] == "open"
+
+
+def test_intraday_stop_kill_switch(account_id, monkeypatch):
+    from tradingagents.default_config import DEFAULT_CONFIG
+    monkeypatch.setitem(DEFAULT_CONFIG, "options_intraday_stop", False)
+    monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
+    pid = _open_marked(account_id, entry=10.0, prev_mark=5.0)
+    pos = db.get_options_position(pid)
+    assert options_engine._apply_intraday_stops([pos], {pid: (3.0, "schwab")}) == 0
+    assert db.get_options_position(pid)["status"] == "open"
+
+
+def test_intraday_stop_credits_ledger_at_fill(account_id, monkeypatch):
+    """Cash must reflect the STOP-level fill, not the observed quote."""
+    monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
+    before = db.options_cash_balance(account_id)
+    pid = _open_marked(account_id, entry=10.0, prev_mark=5.0)  # debit 10*100*2 = 2000
+    pos = db.get_options_position(pid)
+    options_engine._apply_intraday_stops([pos], {pid: (3.0, "schwab")})
+    after = db.options_cash_balance(account_id)
+    # net: -2000 open + 4.00*100*2 = 800 close
+    assert after - before == pytest.approx(-2000 + 800)
