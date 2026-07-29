@@ -230,6 +230,117 @@ function optDte(p) {
   return Math.round((exp - Date.now()) / 86400000);
 }
 
+// ===== On-demand ticker recommendation =====
+
+let optRecTimer = null;
+
+function _premiumCell(label, v, contracts100) {
+  if (v == null) return "";
+  const per = Number(v);
+  return (
+    "<div style=\"min-width:110px;\"><span class=\"dim\" style=\"font-size:10px;text-transform:uppercase;letter-spacing:.5px;\">" + label + "</span><br>" +
+    "<strong>$" + per.toFixed(2) + "</strong>" +
+    "<span class=\"dim\" style=\"font-size:10px;\"> ($" + Math.round(per * 100).toLocaleString() + "/ct)</span></div>"
+  );
+}
+
+function renderOptRecommendation(data) {
+  const box = $("opt-rec-result");
+  if (!box) return;
+  const rec = data.recommendation || {};
+  const act = (rec.action || "NO_TRADE").toUpperCase();
+  const actColor = act === "CALL" ? "var(--accent-green)" : (act === "PUT" ? "var(--accent-red)" : "var(--dim)");
+  const conf = rec.confidence != null ? rec.confidence : "?";
+  const q = data.quick || {};
+  const contractHtml = data.contract ? optContractLabel(data.contract) : "";
+  const c = data.contract || {};
+  const deltaTxt = c.delta != null ? "delta " + Math.abs(Number(c.delta)).toFixed(2) : "";
+  const statsBits = [
+    c.dte != null ? c.dte + "d to expiry" : "",
+    deltaTxt,
+    c.mid != null ? "mid $" + Number(c.mid).toFixed(2) : "",
+    c.open_interest != null ? "OI " + c.open_interest : "",
+  ].filter(Boolean).join(" · ");
+  const risks = (rec.risks || []).map((r) =>
+    "<li style=\"margin:2px 0;\">" + escapeHtml(String(r)) + "</li>").join("");
+  const ctx = data.context_used || {};
+  const ctxBits = [
+    ctx.history ? "graded decision history" : null,
+    ctx.lessons ? "its own options lessons" : null,
+  ].filter(Boolean).join(" + ");
+
+  box.innerHTML = (
+    "<div style=\"border:1px solid var(--panel-border);border-radius:4px;padding:14px;\">" +
+      "<div style=\"display:flex;align-items:center;gap:14px;flex-wrap:wrap;\">" +
+        "<span style=\"font-size:18px;font-weight:800;color:" + actColor + ";\">" +
+          (act === "NO_TRADE" ? "NO TRADE" : "BUY " + act) + "</span>" +
+        (contractHtml ? "<span style=\"font-size:15px;\">" + contractHtml + "</span>" : "") +
+        "<span style=\"margin-left:auto;font-size:13px;\">confidence <strong style=\"font-size:16px;\">" +
+          escapeHtml(String(conf)) + "/10</strong></span>" +
+      "</div>" +
+      (statsBits ? "<div class=\"dim\" style=\"font-size:11px;margin-top:4px;\">" + escapeHtml(statsBits) + "</div>" : "") +
+      (act !== "NO_TRADE" ? (
+        "<div style=\"display:flex;gap:18px;flex-wrap:wrap;margin-top:12px;\">" +
+          _premiumCell("Entry", rec.entry_premium) +
+          _premiumCell("Target", rec.target_premium) +
+          _premiumCell("Stop", rec.stop_premium) +
+          (rec.horizon_days != null ?
+            "<div><span class=\"dim\" style=\"font-size:10px;text-transform:uppercase;letter-spacing:.5px;\">Horizon</span><br><strong>" +
+            escapeHtml(String(rec.horizon_days)) + "d</strong></div>" : "") +
+        "</div>") : "") +
+      "<p style=\"margin:12px 0 0;font-size:13px;line-height:1.5;\">" + escapeHtml(rec.thesis || "") + "</p>" +
+      (risks ? "<div style=\"margin-top:8px;\"><span class=\"dim\" style=\"font-size:10px;text-transform:uppercase;letter-spacing:.5px;\">Risks</span>" +
+        "<ul style=\"margin:4px 0 0 18px;font-size:12px;color:var(--dim);\">" + risks + "</ul></div>" : "") +
+      "<div class=\"dim\" style=\"font-size:11px;margin-top:10px;border-top:1px solid var(--panel-border);padding-top:8px;\">" +
+        "Momentum quick-read: <strong>" + escapeHtml(q.signal || "?") + " " + escapeHtml(String(q.conviction ?? "?")) + "/10</strong>" +
+        (q.reasoning ? " — " + escapeHtml(String(q.reasoning).slice(0, 160)) : "") +
+        (ctxBits ? "<br>Informed by " + ctxBits + "." : "") +
+        " · spot $" + Number(data.spot || 0).toFixed(2) +
+        " · advisory only, nothing was traded. This call is stored and graded by the nightly learning sweep." +
+      "</div>" +
+    "</div>"
+  );
+}
+
+async function recommendTicker() {
+  const input = $("opt-rec-ticker");
+  const btn = $("btn-opt-recommend");
+  const status = $("opt-rec-status");
+  const box = $("opt-rec-result");
+  const ticker = (input?.value || "").trim().toUpperCase();
+  if (!ticker) { if (status) status.textContent = "Enter a ticker."; return; }
+  if (btn) btn.disabled = true;
+  if (box) box.innerHTML = "";
+  const started = Date.now();
+  if (optRecTimer) clearInterval(optRecTimer);
+  optRecTimer = setInterval(() => {
+    if (status) status.textContent =
+      "Analyzing " + ticker + "… quick-read, chain vetting, advisor (" +
+      Math.round((Date.now() - started) / 1000) + "s — typically 30-90s)";
+  }, 1000);
+  try {
+    const r = await fetch("/api/options-recommend", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || ("HTTP " + r.status));
+    }
+    renderOptRecommendation(await r.json());
+    if (status) status.textContent = "";
+  } catch (e) {
+    if (status) status.textContent = "";
+    if (box) box.innerHTML =
+      "<p style=\"color:var(--accent-red);font-size:13px;\">" + escapeHtml(String(e.message || e)) + "</p>";
+  } finally {
+    clearInterval(optRecTimer);
+    optRecTimer = null;
+    if (btn) btn.disabled = false;
+  }
+}
+
 // ===== Queue + History sidebar =====
 
 function _setupOptionsStabs() {
@@ -737,6 +848,13 @@ document.addEventListener("DOMContentLoaded", () => {
   const clearBtn = $("options-history-clear-btn");
   if (clearBtn) clearBtn.addEventListener("click", clearOptionsHistory);
   _setupOptionsStabs();
+
+  const recBtn = $("btn-opt-recommend");
+  if (recBtn) recBtn.addEventListener("click", recommendTicker);
+  const recInput = $("opt-rec-ticker");
+  if (recInput) recInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") recommendTicker();
+  });
 
   const sel = $("opt-account-sel");
   if (sel) {

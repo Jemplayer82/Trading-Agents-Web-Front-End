@@ -10,6 +10,18 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **On-demand ticker recommendation.** New "[ Ticker Recommendation ]" panel on
+  the Options tab (`POST /api/options-recommend`): type any ticker and get a
+  specific contract recommendation with confidence — momentum quick-read, then
+  BOTH the call and the put are vetted through the same Schwab-greeks/liquidity
+  pipeline the daily scan uses, then one deep-LLM advisor call picks
+  CALL / PUT / NO_TRADE with entry/target/stop premiums, horizon, thesis and
+  risks. The advisor sees the ticker's graded decision history + global
+  calibration and the account's own options lessons, and its directional call
+  is stored in the memory log so the nightly sweep grades every recommendation.
+  Hallucination-pinned (a rec can only reference an actually-vetted contract),
+  deterministic fallback on LLM failure, advisory only — nothing is traded.
+
 - **Options learning loop — the trader now learns from its own trades.** Two
   layers, each grading what it can actually measure:
   - *Layer 1 (System C):* scan deep dives (options weekdays + S&P Saturdays)

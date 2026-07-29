@@ -238,6 +238,8 @@ Daily options paper trader — long single-leg calls and puts on S&P 500 movers,
 
 Unlike the S&P tab's weekly snapshot, options positions live in a real ledger — cash and realized P&L are tracked per contract through opens, closes, and expiries, with open/closed position tables, a daily decision log, and the allocator's report on the tab. Paper only: no order endpoints exist anywhere in the stack.
 
+The tab also has an on-demand **Ticker Recommendation** box: type any ticker and get a specific contract pick with confidence (1–10), entry/target/stop premiums, horizon, thesis and risks. It runs the same momentum quick-read and contract-vetting pipeline as the daily scan, vets **both** the call and the put, and the advisor is briefed with the system's graded decision history and its own options lessons — every recommendation is itself stored and graded by the nightly learning sweep. Advisory only; nothing is traded.
+
 ### Credentials Tab
 
 Two distinct things live here — they are **not** duplicates:

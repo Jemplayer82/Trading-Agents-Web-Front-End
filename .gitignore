@@ -222,3 +222,6 @@ __marimo__/
 *.db
 *.db-wal
 *.db-shm
+
+# Local Claude Code settings (machine-specific)
+.claude/settings.json

@@ -43,7 +43,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from tradingagents.constants import SIGNALS
 from tradingagents.dataflows import schwab_mcp
 
-from . import alerts, auth_app, brokerages, db, options_engine, spy_allocator, spy_scanner
+from . import alerts, auth_app, brokerages, db, options_engine, options_recommend, spy_allocator, spy_scanner
 from . import credentials as creds
 from ._logging import configure_logging
 from .portfolio import aggregator
@@ -808,6 +808,30 @@ def options_summary(account_id: int) -> dict[str, Any]:
     if not db.get_paper_account(account_id):
         raise HTTPException(status_code=404, detail="paper account not found")
     return options_engine.account_summary(account_id)
+
+
+@app.post("/api/options-recommend")
+def options_recommend_endpoint(body: dict[str, Any]) -> dict[str, Any]:
+    """On-demand options recommendation for one ticker (advisory only).
+
+    Sync def on purpose: FastAPI runs it in the threadpool, and the flow makes
+    two LLM calls + a chain fetch (~30-90s). nginx's /api/options prefix block
+    routes this here with scan-grade timeouts. Applies DB-stored credentials
+    first, same as the scan worker paths.
+    """
+    ticker = options_recommend.valid_ticker(str((body or {}).get("ticker") or ""))
+    if not ticker:
+        raise HTTPException(status_code=400, detail="invalid ticker")
+    _refresh_creds_from_db()
+    prefs = db.get_preferences()
+    config = build_config(dict(prefs))
+    try:
+        return options_recommend.recommend(ticker, config)
+    except ValueError as exc:  # no price data / bad symbol
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        log.exception("[recommend] failed for %s", ticker)
+        raise HTTPException(status_code=502, detail=f"recommendation failed: {exc}") from exc
 
 
 # ---------- Live Schwab account (read-only, via Schwab MCP) ----------

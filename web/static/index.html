@@ -396,6 +396,19 @@
         </div>
       </div>
 
+      <!-- On-demand single-ticker recommendation (options.js: recommendTicker) -->
+      <div class="panel">
+        <div class="panel-title">[ Ticker Recommendation ]</div>
+        <p class="dim" style="margin:0 0 10px;">Ask for a specific contract on any ticker: momentum quick-read → vet the call AND the put → advisor pick with confidence, informed by the system's graded history and its own options lessons. Advisory only — nothing is traded.</p>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <input type="text" id="opt-rec-ticker" placeholder="e.g. AAPL" maxlength="10"
+                 style="width:130px;background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:6px 10px;font-family:inherit;font-size:13px;border-radius:3px;text-transform:uppercase;">
+          <button id="btn-opt-recommend" type="button" class="primary">Get Recommendation</button>
+          <span id="opt-rec-status" class="dim" style="font-size:12px;"></span>
+        </div>
+        <div id="opt-rec-result" style="margin-top:12px;"></div>
+      </div>
+
       <!-- Options paper accounts management modal -->
       <div id="opt-accounts-modal" hidden style="position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:100;display:none;align-items:center;justify-content:center;">
         <div style="background:var(--panel);border:1px solid var(--panel-border);border-radius:6px;padding:24px;width:480px;max-width:90vw;max-height:80vh;overflow-y:auto;">
