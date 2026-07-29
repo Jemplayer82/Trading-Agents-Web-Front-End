@@ -100,6 +100,15 @@ services:
       SCHEDULER_TIMEZONE: America/New_York
       TRADINGAGENTS_API_URL: http://tradingagents-api:8000
       TRADINGAGENTS_PORTFOLIO_URL: http://tradingagents-portfolio:8000
+      # Switchboard access for the in-process LLM jobs (outcome_sweep 23:30,
+      # options_grade 20:15). Without these, create_llm_client('switchboard')
+      # constructs fine but every invoke raises — the sweep's reflections were
+      # silently degrading to canned-only per entry. Mirrors the portfolio
+      # service's block above.
+      SWITCHBOARD_URL: http://switchboard:3107
+      SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN}
+      SWITCHBOARD_TARGET_AGENT: ${SWITCHBOARD_TARGET_AGENT:-llm-router}
+      SWITCHBOARD_PROVIDER: ${SWITCHBOARD_PROVIDER:-}
     volumes:
       - tradingagents_data:/home/appuser/.tradingagents
     restart: unless-stopped
