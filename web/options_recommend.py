@@ -212,15 +212,24 @@ def recommend(ticker: str, config: dict[str, Any] | None = None) -> dict[str, An
             "risks": ["Illiquid or unavailable option chain."],
         }
     else:
-        try:
-            llm = llm_for(config, deep=True, temperature=0.2)
-            resp = llm.invoke([
-                {"role": "system", "content": _SYSTEM},
-                {"role": "user", "content": user},
-            ])
-            rec = _parse_rec(resp.content if hasattr(resp, "content") else str(resp))
-        except Exception:
-            log.exception("[recommend] advisor LLM failed for %s — deterministic fallback", t)
+        # Two attempts: the deep path routes through the switchboard bus, where
+        # a busy router can time out one call (observed live: "claude CLI timed
+        # out after 150s"). A single retry rescues the interactive UX; only
+        # then degrade to the deterministic fallback.
+        rec = None
+        for attempt in (1, 2):
+            try:
+                llm = llm_for(config, deep=True, temperature=0.2)
+                resp = llm.invoke([
+                    {"role": "system", "content": _SYSTEM},
+                    {"role": "user", "content": user},
+                ])
+                rec = _parse_rec(resp.content if hasattr(resp, "content") else str(resp))
+                break
+            except Exception:
+                log.exception("[recommend] advisor attempt %d failed for %s", attempt, t)
+        if rec is None:
+            log.warning("[recommend] advisor unavailable for %s — deterministic fallback", t)
             rec = _fallback(quick, call, put)
 
     # Pin the recommendation to the actually-vetted contract for its side; an
