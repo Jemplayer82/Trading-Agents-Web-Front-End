@@ -482,6 +482,7 @@ function optOpenPositionsHtml(positions) {
         "<td>$" + entry.toFixed(2) + "</td>" +
         "<td>" + (mark != null ? "$" + mark.toFixed(2) + stale : "<span class=\"dim\">—</span>") + "</td>" +
         "<td>" + optPctCell(pnlPct) + (stopFlag || "") + "</td>" +
+        "<td>" + optMoneyCell(cost) + "</td>" +
         "<td>" + optMoneyCell(value != null ? value : cost) + "</td>" +
         "<td style=\"color:var(--dim);font-size:11px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;\">" + escapeHtml((p.rationale || "").slice(0, 100)) + "</td>" +
       "</tr>"
@@ -492,7 +493,7 @@ function optOpenPositionsHtml(positions) {
       "<div class=\"panel-title\">[ Open Positions — " + positions.length + " contracts ]</div>" +
       "<div style=\"overflow-x:auto;\">" +
         "<table class=\"spy-table\">" +
-          "<thead><tr><th>Contract</th><th>Signal</th><th>DTE</th><th>Qty</th><th>Entry</th><th>Mark</th><th>P&amp;L</th><th>Value</th><th>Rationale</th></tr></thead>" +
+          "<thead><tr><th>Contract</th><th>Signal</th><th>DTE</th><th>Qty</th><th>Entry</th><th>Mark</th><th>P&amp;L</th><th title=\"Total cost at entry\">Start</th><th title=\"Current total value\">End</th><th>Rationale</th></tr></thead>" +
           "<tbody>" + rows + "</tbody>" +
         "</table>" +
       "</div>" +
@@ -510,13 +511,19 @@ function optClosedPositionsHtml(positions) {
     const reasonColor = p.exit_reason === "stop_loss" ? "var(--accent-red)"
       : (p.status === "expired_worthless" ? "var(--accent-red)" : "var(--dim)");
     const pnl = p.realized_pnl != null ? Number(p.realized_pnl) : null;
-    const pnlPct = pnl != null && Number(p.cost_basis) > 0 ? (pnl / Number(p.cost_basis)) * 100 : null;
+    const cost = Number(p.cost_basis) || 0;
+    const pnlPct = pnl != null && cost > 0 ? (pnl / cost) * 100 : null;
+    // Total proceeds at exit: exit_value if recorded, else derived from cost + realized P&L.
+    const endVal = p.exit_value != null ? Number(p.exit_value)
+      : (pnl != null ? cost + pnl : null);
     return (
       "<tr style=\"opacity:0.85;\">" +
         "<td>" + optContractLabel(p) + "</td>" +
         "<td>" + p.contracts + "</td>" +
         "<td>$" + (Number(p.entry_premium) || 0).toFixed(2) + "</td>" +
         "<td>" + (p.exit_premium != null ? "$" + Number(p.exit_premium).toFixed(2) : "—") + "</td>" +
+        "<td>" + optMoneyCell(cost) + "</td>" +
+        "<td>" + (endVal != null ? optMoneyCell(endVal) : "<span class=\"dim\">—</span>") + "</td>" +
         "<td>" + optMoneyCell(pnl, { signed: true }) + "</td>" +
         "<td>" + optPctCell(pnlPct) + "</td>" +
         "<td><span style=\"font-size:10px;font-weight:700;text-transform:uppercase;color:" + reasonColor + ";\">" + escapeHtml(exitReason) + "</span></td>" +
@@ -529,7 +536,7 @@ function optClosedPositionsHtml(positions) {
       "<div class=\"panel-title\">[ Closed / Expired — last " + Math.min(positions.length, 30) + " ]</div>" +
       "<div style=\"overflow-x:auto;\">" +
         "<table class=\"spy-table\">" +
-          "<thead><tr><th>Contract</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>P&amp;L %</th><th>Reason</th><th>When</th></tr></thead>" +
+          "<thead><tr><th>Contract</th><th>Qty</th><th>Entry</th><th>Exit</th><th title=\"Total cost at entry\">Start</th><th title=\"Total proceeds at exit\">End</th><th>P&amp;L</th><th>P&amp;L %</th><th>Reason</th><th>When</th></tr></thead>" +
           "<tbody>" + rows + "</tbody>" +
         "</table>" +
       "</div>" +
