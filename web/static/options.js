@@ -293,7 +293,7 @@ function renderOptRecommendation(data) {
         "<ul style=\"margin:4px 0 0 18px;font-size:12px;color:var(--dim);\">" + risks + "</ul></div>" : "") +
       "<div class=\"dim\" style=\"font-size:11px;margin-top:10px;border-top:1px solid var(--panel-border);padding-top:8px;\">" +
         "Momentum quick-read: <strong>" + escapeHtml(q.signal || "?") + " " + escapeHtml(String(q.conviction ?? "?")) + "/10</strong>" +
-        (q.reasoning ? " — " + escapeHtml(String(q.reasoning).slice(0, 160)) : "") +
+        (q.reasoning ? " — <span class=\"clamp-cell\" title=\"Click to expand\" style=\"display:inline-block;max-width:420px;vertical-align:bottom;\">" + escapeHtml(String(q.reasoning)) + "</span>" : "") +
         (ctxBits ? "<br>Informed by " + ctxBits + "." : "") +
         " · spot $" + Number(data.spot || 0).toFixed(2) +
         " · advisory only, nothing was traded. This call is stored and graded by the nightly learning sweep." +
@@ -595,7 +595,7 @@ function optOpenPositionsHtml(positions) {
         "<td>" + optPctCell(pnlPct) + (stopFlag || "") + "</td>" +
         "<td>" + optMoneyCell(cost) + "</td>" +
         "<td>" + optMoneyCell(value != null ? value : cost) + "</td>" +
-        "<td style=\"color:var(--dim);font-size:11px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;\">" + escapeHtml((p.rationale || "").slice(0, 100)) + "</td>" +
+        "<td class=\"clamp-cell\" title=\"Click to expand\" style=\"color:var(--dim);font-size:11px;\">" + escapeHtml(p.rationale || "") + "</td>" +
       "</tr>"
     );
   }).join("");
@@ -685,7 +685,7 @@ function optDecisionsHtml(scan) {
         "<td style=\"font-size:11px;font-weight:600;color:var(--accent-cyan);\">" + contractStr + "</td>" +
         "<td><span style=\"font-size:10px;font-weight:700;color:" + (actionColor[act] || "var(--dim)") + ";\">" + act + "</span></td>" +
         "<td class=\"dim\" style=\"font-size:11px;\">" + detail + "</td>" +
-        "<td class=\"dim\" style=\"font-size:11px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;\">" + escapeHtml((d.rationale || "").slice(0, 110)) + "</td>" +
+        "<td class=\"clamp-cell dim\" title=\"Click to expand\" style=\"font-size:11px;\">" + escapeHtml(d.rationale || "") + "</td>" +
       "</tr>"
     );
   }).join("");
@@ -854,6 +854,13 @@ document.addEventListener("DOMContentLoaded", () => {
   const recInput = $("opt-rec-ticker");
   if (recInput) recInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") recommendTicker();
+  });
+
+  // Click-to-expand for clamped rationale cells. Delegated on document because
+  // every table here is re-rendered wholesale via innerHTML on each poll.
+  document.addEventListener("click", (e) => {
+    const cell = e.target.closest(".clamp-cell");
+    if (cell) cell.classList.toggle("open");
   });
 
   const sel = $("opt-account-sel");

@@ -1021,3 +1021,18 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
   cursor: pointer;
   letter-spacing: 0.4px;
 }
+
+/* Click-to-expand text cells (options rationale columns, rec quick-read).
+   Full text always lives in the DOM; .open just releases the CSS clamp. */
+.clamp-cell {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.clamp-cell.open {
+  white-space: normal;
+  overflow: visible;
+  word-break: break-word;
+}
