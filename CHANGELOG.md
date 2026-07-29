@@ -17,9 +17,14 @@ Breaking changes within the 0.x line are called out explicitly.
   stop: filled AT the stop level when the mark crossed it this interval (what
   a working stop order would have gotten), or at the observed quote when it
   gapped through (no pretending we caught a level the market never traded).
-  Carried/intrinsic (stale) marks never trigger a stop. The daily allocator's
-  forced-close remains as backstop. Kill switch:
-  `TRADINGAGENTS_OPTIONS_INTRADAY_STOP=false`.
+  The sale is BOOKED at the minute the level was crossed, not at the top of
+  the hour the refresh noticed: the stop premium is mapped to an implied
+  underlying level (linear between the two observed marks) and the underlying's
+  1-minute bars are walked for the first adverse crossing — minute precision,
+  because no intraday history exists for the option contract itself.
+  `exit_underlying_source='backtracked'` marks these fills. Carried/intrinsic
+  (stale) marks never trigger a stop. The daily allocator's forced-close
+  remains as backstop. Kill switch: `TRADINGAGENTS_OPTIONS_INTRADAY_STOP=false`.
 
 - **On-demand ticker recommendation.** New "[ Ticker Recommendation ]" panel on
   the Options tab (`POST /api/options-recommend`): type any ticker and get a

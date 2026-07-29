@@ -347,6 +347,66 @@ def refresh_positions(paper_account_id: int | None = None) -> dict[str, Any]:
             "settle": settle_summary, "account_values": account_values}
 
 
+def _backtrack_stop_crossing(
+    pos: dict[str, Any],
+    prev_mark: float,
+    stop_level: float,
+    new_price: float,
+) -> tuple[str, float] | None:
+    """Find the minute the premium crossed the stop inside the last interval.
+
+    There is NO intraday price history for the option contract itself (neither
+    Schwab nor yfinance serve it), so this is the finest honest reconstruction
+    available: map the stop premium to an implied UNDERLYING level by linear
+    interpolation between the two observed (premium, underlying-time) points,
+    then walk the underlying's 1-minute bars and take the FIRST bar that
+    crossed that level on the adverse side (below for calls, above for puts).
+    Returns (closed_at UTC ISO, implied underlying at the stop) — minute
+    precision, because minute bars are the smallest unit the market data has.
+    None on any gap in data; the caller keeps refresh-time behavior.
+    """
+    import pandas as pd
+
+    t0_raw = pos.get("last_marked_at") or pos.get("opened_at")
+    if not t0_raw:
+        return None
+    try:
+        t0 = pd.Timestamp(str(t0_raw).replace("Z", "+00:00"))
+        t1 = pd.Timestamp.now(tz="UTC")
+        underlying = pos["underlying"]
+        bars = yf.Ticker(underlying).history(period="2d", interval="1m")
+        if bars is None or bars.empty:
+            return None
+        idx = bars.index.tz_convert("UTC")
+        window = bars[(idx > t0) & (idx <= t1)]
+        if window.empty:
+            return None
+        u0 = float(bars[idx <= t0]["Close"].iloc[-1]) if (idx <= t0).any() \
+            else float(window["Open"].iloc[0])
+        u1 = float(window["Close"].iloc[-1])
+        if prev_mark == new_price or u0 == u1:
+            return None
+        # Premium -> underlying, linear between the two observations. Crude
+        # (ignores gamma/theta inside the hour) but directionally sound over
+        # a single mark interval, and clamped to the observed range so a bad
+        # slope can't invent a level the underlying never traded.
+        u_star = u0 + (stop_level - float(prev_mark)) * (u1 - u0) / (new_price - float(prev_mark))
+        lo, hi = min(u0, u1), max(u0, u1)
+        u_star = max(lo, min(hi, u_star))
+        is_call = str(pos.get("put_call") or "").upper().startswith("C")
+        if is_call:
+            crossed = window[window["Low"] <= u_star]
+        else:
+            crossed = window[window["High"] >= u_star]
+        if crossed.empty:
+            return None
+        ts = crossed.index[0].tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+        return ts, round(u_star, 4)
+    except Exception:
+        log.exception("[options] stop backtrack failed for %s", pos.get("occ_symbol"))
+        return None
+
+
 def _apply_intraday_stops(
     positions: list[dict[str, Any]],
     priced: dict[int, tuple[float, str]],
@@ -392,21 +452,36 @@ def _apply_intraday_stops(
         prev_mark = p.get("current_premium")  # pre-refresh mark (row loaded before marking)
         crossed_this_interval = prev_mark is not None and float(prev_mark) > stop_level
         fill = stop_level if crossed_this_interval else price
-        if p["underlying"] not in spot_cache:
-            try:
-                spot_cache.update(_underlying_prices([p["underlying"]]))
-            except Exception:
-                spot_cache[p["underlying"]] = None
+
+        # Book the sale at the minute the level was actually crossed, not at
+        # the top of the hour the refresh happened to notice it.
+        closed_at = None
+        exit_u: float | None = None
+        exit_src: str | None = None
+        if crossed_this_interval:
+            back = _backtrack_stop_crossing(p, float(prev_mark), stop_level, price)
+            if back:
+                closed_at, exit_u = back
+                exit_src = "backtracked"
+        if exit_u is None:
+            if p["underlying"] not in spot_cache:
+                try:
+                    spot_cache.update(_underlying_prices([p["underlying"]]))
+                except Exception:
+                    spot_cache[p["underlying"]] = None
+            exit_u = spot_cache.get(p["underlying"])
+            exit_src = "live" if exit_u else None
         ok = db.close_options_position(
             int(p["id"]), exit_premium=fill, exit_reason="stop_loss",
-            exit_underlying=spot_cache.get(p["underlying"]),
-            exit_underlying_source="live" if spot_cache.get(p["underlying"]) else None,
+            exit_underlying=exit_u, exit_underlying_source=exit_src,
+            closed_at=closed_at,
         )
         if ok:
             stopped += 1
-            log.info("[options] intraday stop: %s filled $%.2f (stop $%.2f, mark $%.2f, %s)",
+            log.info("[options] intraday stop: %s filled $%.2f (stop $%.2f, mark $%.2f, %s%s)",
                      p["occ_symbol"], fill, stop_level, price,
-                     "crossed this interval" if crossed_this_interval else "gapped through")
+                     "crossed this interval" if crossed_this_interval else "gapped through",
+                     f", crossing at {closed_at}" if closed_at else "")
     return stopped
 
 

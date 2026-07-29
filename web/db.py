@@ -1501,6 +1501,7 @@ def close_options_position(
     close_scan_id: int | None = None,
     exit_underlying: float | None = None,
     exit_underlying_source: str | None = None,
+    closed_at: str | None = None,
 ) -> bool:
     """Close an open position at exit_premium and credit proceeds atomically.
 
@@ -1509,8 +1510,14 @@ def close_options_position(
     captured from the scan's fresh chain data) feeds the learning loop's
     directional-vs-decay attribution; NULL rows get a nightly 'eod_close'
     backfill (web/options_learning.py).
+
+    closed_at: optional backdated exit time (UTC ISO ...Z) — the intraday stop
+    backtracks to the minute the premium crossed the stop level. The LEDGER
+    row always stamps wall-clock now: books record when the entry was made,
+    the position records when the fill happened.
     """
     now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    closed_at = closed_at or now
     exit_premium = round(float(exit_premium), 4)
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -1532,7 +1539,7 @@ def close_options_position(
                        current_premium = ?, current_value = ?, last_marked_at = ?,
                        exit_underlying = ?, exit_underlying_source = ?
                    WHERE id = ? AND status = 'open'""",
-                (now, exit_premium, exit_value, realized, exit_reason, close_scan_id,
+                (closed_at, exit_premium, exit_value, realized, exit_reason, close_scan_id,
                  exit_premium, exit_value, now,
                  exit_underlying, exit_underlying_source if exit_underlying is not None else None,
                  position_id),

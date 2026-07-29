@@ -541,3 +541,84 @@ def test_intraday_stop_credits_ledger_at_fill(account_id, monkeypatch):
     after = db.options_cash_balance(account_id)
     # net: -2000 open + 4.00*100*2 = 800 close
     assert after - before == pytest.approx(-2000 + 800)
+
+
+# ── Stop backtracking: book the sale at the minute the level was crossed ────
+
+def _fake_bars(monkeypatch, closes_start, closes_end, minutes=40):
+    """Install a fake yf.Ticker serving 1-min bars ending now, linear path."""
+    import pandas as pd
+
+    end = pd.Timestamp.now(tz="America/New_York").floor("min")
+    idx = pd.date_range(end=end, periods=minutes, freq="1min")
+    step = (closes_end - closes_start) / (minutes - 1)
+    closes = [closes_start + i * step for i in range(minutes)]
+    bars = pd.DataFrame({
+        "Open": closes, "Close": closes,
+        "Low": [c - 0.05 for c in closes], "High": [c + 0.05 for c in closes],
+    }, index=idx)
+
+    class FakeTicker:
+        def __init__(self, sym):
+            pass
+        def history(self, period=None, interval=None):
+            return bars
+
+    monkeypatch.setattr(options_engine.yf, "Ticker", FakeTicker)
+    return idx
+
+
+def _iso_utc(ts):
+    return ts.tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%S") + "Z"
+
+
+def test_backtrack_finds_call_crossing_minute(monkeypatch):
+    """CALL: underlying slid 100 -> 90 over the interval; premium 5 -> 3 with
+    stop 4 implies the cross at underlying ~95, i.e. mid-interval — the booked
+    minute must be that bar, not refresh time."""
+    idx = _fake_bars(monkeypatch, 100.0, 90.0, minutes=41)
+    pos = {"underlying": "AAPL", "put_call": "CALL", "occ_symbol": "X",
+           "last_marked_at": _iso_utc(idx[0]), "opened_at": _iso_utc(idx[0])}
+    out = options_engine._backtrack_stop_crossing(pos, prev_mark=5.0, stop_level=4.0, new_price=3.0)
+    assert out is not None
+    closed_at, u_star = out
+    assert u_star == pytest.approx(95.0, abs=0.6)
+    # The crossing bar sits strictly inside the interval (~minute 20 of 41).
+    import pandas as pd
+    t = pd.Timestamp(closed_at.replace("Z", "+00:00"))
+    assert idx[5].tz_convert("UTC") < t < idx[-5].tz_convert("UTC")
+
+
+def test_backtrack_put_uses_adverse_high(monkeypatch):
+    """PUT loses as the underlying RISES — crossing is the first bar whose
+    High reached the implied level on the way up."""
+    idx = _fake_bars(monkeypatch, 90.0, 100.0, minutes=41)
+    pos = {"underlying": "AAPL", "put_call": "PUT", "occ_symbol": "X",
+           "last_marked_at": _iso_utc(idx[0]), "opened_at": _iso_utc(idx[0])}
+    out = options_engine._backtrack_stop_crossing(pos, prev_mark=5.0, stop_level=4.0, new_price=3.0)
+    assert out is not None
+    _closed_at, u_star = out
+    assert u_star == pytest.approx(95.0, abs=0.6)
+
+
+def test_backtrack_degenerate_returns_none(monkeypatch):
+    idx = _fake_bars(monkeypatch, 100.0, 100.0, minutes=10)  # flat underlying
+    pos = {"underlying": "AAPL", "put_call": "CALL", "occ_symbol": "X",
+           "last_marked_at": _iso_utc(idx[0]), "opened_at": _iso_utc(idx[0])}
+    assert options_engine._backtrack_stop_crossing(pos, 5.0, 4.0, 3.0) is None
+
+
+def test_stop_books_backtracked_time_and_spot(account_id, monkeypatch):
+    """End to end through _apply_intraday_stops: closed_at is the crossing
+    minute, exit_underlying the implied level, source 'backtracked'."""
+    monkeypatch.setattr(options_engine, "_backtrack_stop_crossing",
+                        lambda *a, **k: ("2026-07-29T14:32:00Z", 95.0))
+    monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
+    pid = _open_marked(account_id, entry=10.0, prev_mark=5.0)
+    pos = db.get_options_position(pid)
+    assert options_engine._apply_intraday_stops([pos], {pid: (3.0, "schwab")}) == 1
+    row = db.get_options_position(pid)
+    assert row["closed_at"] == "2026-07-29T14:32:00Z"
+    assert row["exit_underlying"] == pytest.approx(95.0)
+    assert row["exit_underlying_source"] == "backtracked"
+    assert row["exit_premium"] == pytest.approx(4.0)
