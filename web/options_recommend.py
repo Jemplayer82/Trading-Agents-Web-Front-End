@@ -212,14 +212,16 @@ def recommend(ticker: str, config: dict[str, Any] | None = None) -> dict[str, An
             "risks": ["Illiquid or unavailable option chain."],
         }
     else:
-        # Two attempts: the deep path routes through the switchboard bus, where
-        # a busy router can time out one call (observed live: "claude CLI timed
-        # out after 150s"). A single retry rescues the interactive UX; only
-        # then degrade to the deterministic fallback.
+        # Degradation ladder: deep advisor -> quick-model advisor -> mechanical
+        # fallback. The deep role can route through the switchboard bus to a
+        # claude-CLI agent with a hard 150s budget that a long prompt can blow
+        # (observed live, twice in a row) — the quick model (direct provider)
+        # answers this JSON-picking task fast and reliably, and a model-graded
+        # rec beats the mechanical formula every time.
         rec = None
-        for attempt in (1, 2):
+        for deep in (True, False):
             try:
-                llm = llm_for(config, deep=True, temperature=0.2)
+                llm = llm_for(config, deep=deep, temperature=0.2)
                 resp = llm.invoke([
                     {"role": "system", "content": _SYSTEM},
                     {"role": "user", "content": user},
@@ -227,7 +229,8 @@ def recommend(ticker: str, config: dict[str, Any] | None = None) -> dict[str, An
                 rec = _parse_rec(resp.content if hasattr(resp, "content") else str(resp))
                 break
             except Exception:
-                log.exception("[recommend] advisor attempt %d failed for %s", attempt, t)
+                log.exception("[recommend] %s advisor failed for %s",
+                              "deep" if deep else "quick", t)
         if rec is None:
             log.warning("[recommend] advisor unavailable for %s — deterministic fallback", t)
             rec = _fallback(quick, call, put)
