@@ -1104,6 +1104,18 @@ def update_spy_scan_prices(
             )
 
 
+# Cap the free-text fields on a quick-result row. GET /api/spy-scans/{id} (and
+# the options equivalent) return up to ~500 of these rows in one payload,
+# polled every 5s for a running scan's full duration — a confirmed ~38 MiB/hr
+# leak was traced to that endpoint. The polling fix (get_spy_scan_status)
+# addresses the poll cadence; this bounds the worst case at write time so a
+# terminal full-fetch, or any other future reader, can't reintroduce the same
+# shape. Matches the existing truncate-free-text convention (alerts.py's
+# _ERROR_MAX, scheduler.py's _ALERT_DETAIL_MAX), applied here at the DB layer
+# instead of at each call site since every reader benefits.
+_QUICK_RESULT_TEXT_MAX = 500
+
+
 def upsert_spy_quick_result(
     scan_id: int,
     ticker: str,
@@ -1119,6 +1131,10 @@ def upsert_spy_quick_result(
     analysis_id) fills just the fields it passes and never nulls out earlier
     ones. Consequence: a field cannot be reset to NULL through this helper.
     """
+    if reasoning is not None:
+        reasoning = reasoning[:_QUICK_RESULT_TEXT_MAX]
+    if error is not None:
+        error = error[:_QUICK_RESULT_TEXT_MAX]
     with connect() as conn:
         conn.execute(
             """
@@ -1167,6 +1183,24 @@ def list_spy_scans(
             params,
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_spy_scan_status(scan_id: int) -> dict[str, Any] | None:
+    """Cheap poll target: just the mutable progress fields, no join.
+
+    get_spy_scan does `SELECT *` plus a full spy_quick_results join (up to
+    ~500 rows, each with reasoning/error text) and is polled every 5s for a
+    running scan's full duration — that's the confirmed ~38 MiB/hr leak. This
+    is O(1) regardless of row count; the frontend polls it instead and only
+    fetches the full payload when something in here actually changed.
+    """
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT id, status, kind, quick_count, quick_total, deep_count,"
+            " deep_total, cancel_requested, updated_at FROM spy_scans WHERE id = ?",
+            (scan_id,),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def get_spy_scan(scan_id: int) -> dict[str, Any] | None:

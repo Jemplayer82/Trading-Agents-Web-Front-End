@@ -381,6 +381,14 @@ def run_quick_scan(
         with ThreadPoolExecutor(max_workers=budget) as pool:
             futures = {pool.submit(_scan_one, t): t for t in tickers}
             for fut in as_completed(futures):
+                # Drop the entry as soon as this result is consumed. Left in
+                # place, every completed Future (holding its full result dict —
+                # reasoning/error text included) stays referenced for the rest
+                # of the scan even after nothing needs it, pinning up to 500
+                # results in memory that GC can't reclaim. Same shape as the
+                # cleo fix in scripts/cleo_llm_handler.py (commit 15f3a2a):
+                # never hold more than necessary once it's been consumed.
+                del futures[fut]
                 result = fut.result()
                 if result.get("skipped"):
                     continue
@@ -483,6 +491,10 @@ def run_deep_dives(
         with ThreadPoolExecutor(max_workers=budget) as pool:
             futures = {pool.submit(_dive, c, gate): c["ticker"] for c in candidates}
             for fut in as_completed(futures):
+                # See run_quick_scan's identical del — drop the entry once
+                # consumed so a completed dive's full result (analysis state,
+                # decision text) doesn't stay pinned for the rest of the scan.
+                del futures[fut]
                 result = fut.result()
                 if result.get("skipped"):
                     continue

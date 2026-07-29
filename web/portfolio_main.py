@@ -87,7 +87,8 @@ def _is_any_scan_running(conn) -> dict | None:  # type: ignore[type-arg]
         "SELECT 'portfolio' AS scan_type, id, trade_date, 'equity' AS kind, created_at"
         " FROM portfolio_scans WHERE status = 'running'"
         " UNION SELECT 'spy', id, trade_date, kind, created_at FROM spy_scans"
-        " WHERE status IN ('pending','running_quick','running_deep','running_alloc')"
+        " WHERE status IN ('pending','running_quick','running_deep','running_alloc',"
+        " 'running_wait_market')"
         " LIMIT 1"
     ).fetchone()
     return dict(row) if row else None
@@ -603,6 +604,15 @@ def list_spy_scans(
     return {"scans": db.list_spy_scans(limit=limit, paper_account_id=account_id, statuses=status, kind=kind)}
 
 
+@app.get("/api/spy-scans/{scan_id}/status")
+def get_spy_scan_status(scan_id: int) -> dict[str, Any]:
+    """Cheap poll target — see db.get_spy_scan_status for why this exists."""
+    status = db.get_spy_scan_status(scan_id)
+    if not status:
+        raise HTTPException(status_code=404, detail="not found")
+    return status
+
+
 @app.get("/api/spy-scans/{scan_id}")
 def get_spy_scan(scan_id: int) -> dict[str, Any]:
     scan = db.get_spy_scan(scan_id)
@@ -768,6 +778,15 @@ async def start_options_scan(
 @app.get("/api/options-scans")
 def list_options_scans(limit: int = 50, account_id: int | None = None) -> dict[str, Any]:
     return {"scans": db.list_spy_scans(limit=limit, paper_account_id=account_id, kind="options")}
+
+
+@app.get("/api/options-scans/{scan_id}/status")
+def get_options_scan_status(scan_id: int) -> dict[str, Any]:
+    """Cheap poll target — see db.get_spy_scan_status for why this exists."""
+    status = db.get_spy_scan_status(scan_id)
+    if not status or status.get("kind") != "options":
+        raise HTTPException(status_code=404, detail="not found")
+    return status
 
 
 @app.get("/api/options-scans/{scan_id}")

@@ -526,7 +526,15 @@ def _wait_for_market_open(scan_id: int) -> None:
     """Block until MARKET_OPEN_ET on trading days so entries fill at live mids.
     Weekend manual runs proceed immediately (weekday check only). Heartbeats
     updated_at every few minutes so the stuck-run reaper doesn't mistake the
-    wait for a crashed worker."""
+    wait for a crashed worker.
+
+    Status is "running_wait_market", distinct from "running_alloc" (real
+    vetting/allocation work). This wait runs 07:30-09:35 ET daily doing
+    nothing but sleeping — with a single "running_alloc" label the frontend
+    couldn't tell "blocked" from "working" and polled the full scan payload
+    every 5s for up to 2 hours a day for zero new information. See
+    run_options_build for where the label flips back once real work starts.
+    """
     ticks = 0
     while True:
         now = options_data.now_et()
@@ -535,7 +543,7 @@ def _wait_for_market_open(scan_id: int) -> None:
         if db.is_spy_scan_cancelled(scan_id):
             raise spy_scanner.ScanCancelled()
         if ticks % 6 == 0:  # every ~3 minutes
-            db.update_spy_scan(scan_id, status="running_alloc")
+            db.update_spy_scan(scan_id, status="running_wait_market")
         ticks += 1
         time_mod.sleep(30)
 
@@ -643,8 +651,15 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
         raise spy_scanner.ScanCancelled()
 
     # Phase 3: wait for live quotes, then vet contracts and allocate.
-    db.update_spy_scan(scan_id, status="running_alloc")
+    #
+    # Set to running_wait_market first — _wait_for_market_open owns the label
+    # while it's actually blocked, and only flips back to running_alloc the
+    # moment real work resumes below. A run outside the wait window (weekend,
+    # already past open) returns immediately and this line is a no-op status
+    # bounce, not an extra poll cycle.
+    db.update_spy_scan(scan_id, status="running_wait_market")
     _wait_for_market_open(scan_id)
+    db.update_spy_scan(scan_id, status="running_alloc")
     with _phase("Position mark-to-market failed"):
         refresh_positions(account_id)
 
