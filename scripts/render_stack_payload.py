@@ -41,7 +41,15 @@ def render_compose() -> str:
     """Resolve docker-compose.yml against .env into a literal compose string."""
     if not ENV_FILE.exists():
         sys.exit(f"render: {ENV_FILE} not found — create it (gitignored secret source).")
-    cmd = ["docker", "compose", "-f", str(COMPOSE), "--env-file", str(ENV_FILE), "config"]
+    # -p tradingagents is LOAD-BEARING: without it, `docker compose config`
+    # derives the project name from the CURRENT DIRECTORY and bakes it into
+    # every volume's `name:` (e.g. rendering from a git worktree named
+    # "options-trailing-stop" produced `options-trailing-stop_tradingagents_data`)
+    # — deploying that pointed the whole stack at a fresh EMPTY volume and
+    # "lost" the production DB until redeployed with the right name. The
+    # project name must always match the Portainer stack name.
+    cmd = ["docker", "compose", "-p", "tradingagents",
+           "-f", str(COMPOSE), "--env-file", str(ENV_FILE), "config"]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         sys.exit(f"render: `docker compose config` failed:\n{proc.stderr.strip()}")
