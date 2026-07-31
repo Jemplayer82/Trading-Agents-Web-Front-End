@@ -435,21 +435,24 @@ def run(
         f"**Decisions:** {len(opens)} new / {len(holds)} hold / {len(closes)} close",
         "",
     ]
+    # Friendly labels ('KLAC 174C 2026-08-21') so the report mirrors the
+    # dashboard's decisions table instead of raw OCC symbols.
+    _disp = {p["occ_symbol"]: _display(p) for p in open_positions}
     if closes:
         lines += ["## Closes", "| Contract | Reason | Exit mid | Rationale |", "|---|---|---|---|"]
         for cdec in closes:
-            lines.append(f"| {cdec['occ_symbol']} | {cdec['exit_reason']} "
+            lines.append(f"| {_disp.get(cdec['occ_symbol'], cdec['occ_symbol'])} | {cdec['exit_reason']} "
                          f"| ${cdec.get('exit_premium') or 0:.2f} | {(cdec.get('rationale') or '')[:80]} |")
         lines.append("")
     if opens:
         lines += ["## New positions", "| Contract | Contracts | Mid | Cost | Conviction | Rationale |", "|---|---|---|---|---|---|"]
         for o in opens:
             c = o["contract"]
-            lines.append(f"| {c['occ_symbol']} | {o['contracts']} | ${float(c.get('mid') or 0):.2f} "
+            lines.append(f"| {_display(c)} | {o['contracts']} | ${float(c.get('mid') or 0):.2f} "
                          f"| ${o['cost']:,.0f} | {c.get('conviction')}/10 | {(o.get('rationale') or '')[:80]} |")
         lines.append("")
     if holds:
-        lines += ["## Holds", ", ".join(h["occ_symbol"] for h in holds), ""]
+        lines += ["## Holds", ", ".join(_disp.get(h["occ_symbol"], h["occ_symbol"]) for h in holds), ""]
     if clamped_notes:
         lines += ["## Cap clamps", *[f"- {n}" for n in clamped_notes], ""]
 
