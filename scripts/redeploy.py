@@ -67,6 +67,42 @@ def req(method, path, body=None, timeout=180):
             return None
 
 
+# -1. pre-flight: refuse to deploy over a LIVE scan. Every redeploy recreates
+# the portfolio container, killing any in-flight worker — the scan then sits
+# 'running' with a dead worker until the reaper flags it "abandoned" an hour
+# later (bitten three times: S&P scan 17 on 07-18, options 35 + portfolio 11
+# on 07-31). Override deliberately with REDEPLOY_FORCE=1.
+def _scan_running() -> dict | None:
+    tok = None
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("INTERNAL_API_TOKEN="):
+                tok = line.split("=", 1)[1].strip()
+    if not tok:
+        print("pre-flight: no INTERNAL_API_TOKEN in .env — skipping scan check")
+        return None
+    for base in ("http://192.168.7.50:8080", "https://trading.txferguson.net"):
+        try:
+            r = urllib.request.Request(base + "/api/portfolio/status",
+                                       headers={"X-Internal-Token": tok})
+            with urllib.request.urlopen(r, context=ctx, timeout=10) as resp:
+                return (json.loads(resp.read()) or {}).get("running")
+        except Exception:
+            continue
+    print("pre-flight: status endpoint unreachable — proceeding (can't confirm idle)")
+    return None
+
+
+_running = _scan_running()
+if _running and os.environ.get("REDEPLOY_FORCE") != "1":
+    sys.exit(
+        f"ABORT: a scan is RUNNING ({_running.get('scan_type')} #{_running.get('id')}, "
+        f"kind {_running.get('kind')}) — deploying now would kill its worker and the "
+        "reaper would flag it 'abandoned' an hour later. Wait for it to finish, or "
+        "rerun with REDEPLOY_FORCE=1 if you accept killing it."
+    )
+
 # 0. render payload from the repo compose (+ .env secrets)
 print("rendering payload from docker-compose.yml ...")
 proc = subprocess.run([sys.executable, str(RENDER)], env={**os.environ, "STACK_PAYLOAD_OUT": PAYLOAD_OUT})
