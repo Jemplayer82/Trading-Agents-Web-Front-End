@@ -736,6 +736,11 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
                 "occ_symbol": c["occ_symbol"], "action": "CLOSE",
                 "exit_reason": c["exit_reason"], "exit_premium": exit_premium,
                 "contracts": pos.get("contracts"), "rationale": c.get("rationale"),
+                # Contract identity for the dashboard's decisions table — without
+                # these the row renders as "? $0?" (the display can't name the
+                # contract from an OCC symbol alone on old browsers/rows).
+                "underlying": pos.get("underlying"), "put_call": pos.get("put_call"),
+                "strike": pos.get("strike"), "expiration_date": pos.get("expiration_date"),
             })
     skipped_opens: list[str] = []
     for o in alloc["opens"]:
@@ -766,10 +771,17 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
             "occ_symbol": contract["occ_symbol"], "action": "NEW",
             "contracts": o["contracts"], "entry_premium": contract["mid"],
             "cost": o["cost"], "rationale": o.get("rationale"),
+            "underlying": contract["underlying"], "put_call": contract["put_call"],
+            "strike": contract["strike"], "expiration_date": contract["expiration_date"],
         })
     for h in alloc["holds"]:
+        hp = db.get_options_position(int(h["position_id"])) if h.get("position_id") else None
+        hp = hp or {}
         decisions_log.append({"occ_symbol": h["occ_symbol"], "action": "HOLD",
-                              "rationale": h.get("rationale")})
+                              "rationale": h.get("rationale"),
+                              "underlying": hp.get("underlying"), "put_call": hp.get("put_call"),
+                              "strike": hp.get("strike"),
+                              "expiration_date": hp.get("expiration_date")})
 
     report = alloc["report_md"]
     reason = _zero_candidate_reason(quick_results, top, enriched, usable, candidates)

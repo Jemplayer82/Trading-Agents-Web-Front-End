@@ -676,6 +676,20 @@ function optClosedPositionsHtml(positions) {
   );
 }
 
+// OCC option symbol -> contract identity. Fallback for decision-log rows
+// stored before the engine enriched them with explicit fields: "PYPL  260814P00055000"
+// -> {underlying, expiration_date, put_call, strike}. Returns null on no-match.
+function parseOccSymbol(occ) {
+  const m = /^([A-Z][A-Z0-9.\-]{0,5})\s*(\d{2})(\d{2})(\d{2})([CP])(\d{8})$/.exec(String(occ || "").trim());
+  if (!m) return null;
+  return {
+    underlying: m[1],
+    expiration_date: "20" + m[2] + "-" + m[3] + "-" + m[4],
+    put_call: m[5] === "C" ? "CALL" : "PUT",
+    strike: parseInt(m[6], 10) / 1000,
+  };
+}
+
 // Today's decision log (scan.portfolio_json holds NEW/CLOSE/HOLD entries).
 function optDecisionsHtml(scan) {
   if (!scan || !scan.portfolio_json || !scan.portfolio_json.length) return "";
@@ -691,13 +705,14 @@ function optDecisionsHtml(scan) {
   };
   const rows = scan.portfolio_json.map((d) => {
     const act = (d.action || "—").toUpperCase();
-    const ticker = d.underlying || "?";
+    const cid = d.underlying ? d : (parseOccSymbol(d.occ_symbol) || {});
+    const ticker = cid.underlying || "?";
     const company = companies[ticker] || "";
     const contractLabel = company ? ticker + " (" + company + ")" : ticker;
-    const cp = (d.put_call || "?")[0];
-    const strike = d.strike != null ? Number(d.strike) : 0;
+    const cp = (cid.put_call || "?")[0];
+    const strike = cid.strike != null ? Number(cid.strike) : 0;
     const strikeTxt = Number.isInteger(strike) ? strike : strike.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
-    const contractStr = escapeHtml(contractLabel) + " $" + strikeTxt + cp + " " + escapeHtml(d.expiration_date || "");
+    const contractStr = escapeHtml(contractLabel) + " $" + strikeTxt + cp + " " + escapeHtml(cid.expiration_date || "");
     const detail = act === "NEW"
       ? d.contracts + "x @ $" + (Number(d.entry_premium) || 0).toFixed(2) + " ($" + Math.round(d.cost || 0).toLocaleString() + ")"
       : (act === "CLOSE" ? "exit @ $" + (Number(d.exit_premium) || 0).toFixed(2) + " (" + escapeHtml(d.exit_reason || "") + ")" : "—");
