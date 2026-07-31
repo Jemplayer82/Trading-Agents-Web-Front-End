@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime
 from typing import Any
 
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -76,6 +77,11 @@ Hard limits (enforced in code — exceeding them just gets clamped):
 
 Judgment guidance:
 - Close losers whose thesis is broken; let winners run while the signal holds.
+- WINNERS RIDE: do not take profit in the first day or two just because a
+  position is green — a trailing stop already protects gains mechanically
+  (arms at +{trail_arm:.0f}%, then gives back {trail_give:.0f}% from the peak
+  before force-closing). Close a winner early only on a thesis break, a signal
+  flip, or DTE burning down toward the floor.
 - A position whose underlying flipped signal (e.g. long calls, now SELL) is a strong close.
 - Prefer fewer, higher-conviction positions over many small ones.
 
@@ -138,6 +144,32 @@ def _mark(pos: dict[str, Any]) -> float:
     return 0.0
 
 
+def effective_stop_level(pos: dict[str, Any]) -> tuple[float, str]:
+    """The stop that currently protects this position: (level, exit_reason).
+
+    Base: entry * (1 - STOP_LOSS_PCT) — caps the loss on every position.
+    Trailing: once the peak mark has ARMED (peak >= entry * (1 + arm_pct)),
+    the stop ratchets up to peak * (1 - give_back), LOCKING gains — "let it
+    ride" means winners hold for days while healthy, not that a +80% win is
+    allowed to round-trip back to -60%. The trail only ever raises the level
+    (max with base); peak_premium is ratcheted by every mark and never falls.
+    """
+    entry = float(pos.get("entry_premium") or 0)
+    if entry <= 0:
+        return 0.0, "stop_loss"
+    base = entry * (1 - STOP_LOSS_PCT)
+    cfg = DEFAULT_CONFIG
+    if cfg.get("options_trailing_stop", True):
+        peak = max(float(pos.get("peak_premium") or 0), entry)
+        arm = float(cfg.get("options_trail_arm_pct", 0.50))
+        give = float(cfg.get("options_trail_give_back", 0.30))
+        if peak >= entry * (1 + arm):
+            trail = peak * (1 - give)
+            if trail > base:
+                return round(trail, 4), "trail_stop"
+    return round(base, 4), "stop_loss"
+
+
 def forced_closes(open_positions: list[dict[str, Any]]) -> list[tuple[dict[str, Any], str]]:
     """(position, exit_reason) pairs the risk rules close regardless of the LLM."""
     out: list[tuple[dict[str, Any], str]] = []
@@ -145,11 +177,19 @@ def forced_closes(open_positions: list[dict[str, Any]]) -> list[tuple[dict[str, 
         if _dte(pos.get("expiration_date") or "") <= DTE_FLOOR:
             out.append((pos, "dte_floor"))
             continue
-        entry = float(pos.get("entry_premium") or 0)
-        mark = _mark(pos)
-        if entry > 0 and mark <= entry * (1 - STOP_LOSS_PCT):
-            out.append((pos, "stop_loss"))
+        level, reason = effective_stop_level(pos)
+        if level > 0 and _mark(pos) <= level:
+            out.append((pos, reason))
     return out
+
+
+def _days_held(pos: dict[str, Any]) -> int:
+    """Calendar days since opened_at (0 for same-day)."""
+    try:
+        opened = datetime.strptime(str(pos.get("opened_at"))[:10], "%Y-%m-%d").date()
+        return max(0, (datetime.utcnow().date() - opened).days)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _pnl_pct(pos: dict[str, Any]) -> float:
@@ -238,6 +278,8 @@ def run(
          "ticker": p.get("underlying"), "exit_reason": reason,
          "exit_premium": _mark(p),
          "rationale": ("DTE floor" if reason == "dte_floor"
+                       else "Trailing stop: locked gains after giving back from peak"
+                       if reason == "trail_stop"
                        else f"Stop-loss: premium down {-_pnl_pct(p):.0f}% from entry")}
         for p, reason in forced
     ]
@@ -264,7 +306,8 @@ def run(
         sig_txt = f"today's signal: {fs['signal']} {fs.get('conviction', '?')}/10" if fs else "not scanned today"
         user += (
             f"{p['occ_symbol']} | {_display(p)} | x{p.get('contracts')} | "
-            f"{_dte(p.get('expiration_date') or '')}d left | entry ${float(p.get('entry_premium') or 0):.2f} | "
+            f"held {_days_held(p)}d | {_dte(p.get('expiration_date') or '')}d left | "
+            f"entry ${float(p.get('entry_premium') or 0):.2f} | "
             f"mark ${_mark(p):.2f} | P&L {_pnl_pct(p):+.0f}% | {sig_txt}\n"
         )
     user += _CAND_HEADER.format(n=len(candidates))
@@ -285,6 +328,8 @@ def run(
         per_cap=per_cap, per_pct=per_pct * 100,
         total_cap=total_cap, total_pct=total_pct * 100,
         max_positions=MAX_OPEN_POSITIONS,
+        trail_arm=float(DEFAULT_CONFIG.get("options_trail_arm_pct", 0.50)) * 100,
+        trail_give=float(DEFAULT_CONFIG.get("options_trail_give_back", 0.30)) * 100,
     )
 
     # ── LLM call (deterministic fallback on any failure) ─────────────────────

@@ -26,6 +26,9 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_OPTIONS_LESSONS_MIN_CLOSED":    "options_lessons_min_closed",
     "TRADINGAGENTS_OPTIONS_REFLECT_MIN_NEW_CLOSED": "options_reflect_min_new_closed",
     "TRADINGAGENTS_OPTIONS_INTRADAY_STOP":         "options_intraday_stop",
+    "TRADINGAGENTS_OPTIONS_TRAILING_STOP":         "options_trailing_stop",
+    "TRADINGAGENTS_OPTIONS_TRAIL_ARM_PCT":         "options_trail_arm_pct",
+    "TRADINGAGENTS_OPTIONS_TRAIL_GIVE_BACK":       "options_trail_give_back",
 }
 
 
@@ -104,6 +107,13 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # allocations, filled at the stop level when the mark crossed it this
     # interval (standing-stop emulation) or at the observed quote on a gap.
     "options_intraday_stop": True,
+    # Trailing stop: once the peak mark reaches entry*(1+arm_pct), the stop
+    # ratchets to peak*(1-give_back) — winners ride for days but can't
+    # round-trip a big gain back to the -60% floor. Peak is ratcheted by
+    # every mark (peak_premium column, seeded at entry).
+    "options_trailing_stop": True,
+    "options_trail_arm_pct": 0.50,
+    "options_trail_give_back": 0.30,
     # Most recent closes included in the single nightly reflection call.
     "options_reflect_batch_max": 20,
     # Hard cap on the lessons block injected into the allocator prompt.

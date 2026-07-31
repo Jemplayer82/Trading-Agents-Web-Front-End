@@ -446,8 +446,10 @@ def _apply_intraday_stops(
         entry = float(p.get("entry_premium") or 0)
         if entry <= 0:
             continue
-        stop_level = round(entry * (1.0 - options_allocator.STOP_LOSS_PCT), 4)
-        if price > stop_level:
+        # Base -60% stop OR the trailing stop once armed (locks gains) —
+        # whichever is higher. Same math the daily allocator backstop uses.
+        stop_level, stop_reason = options_allocator.effective_stop_level(p)
+        if stop_level <= 0 or price > stop_level:
             continue
         prev_mark = p.get("current_premium")  # pre-refresh mark (row loaded before marking)
         crossed_this_interval = prev_mark is not None and float(prev_mark) > stop_level
@@ -472,14 +474,14 @@ def _apply_intraday_stops(
             exit_u = spot_cache.get(p["underlying"])
             exit_src = "live" if exit_u else None
         ok = db.close_options_position(
-            int(p["id"]), exit_premium=fill, exit_reason="stop_loss",
+            int(p["id"]), exit_premium=fill, exit_reason=stop_reason,
             exit_underlying=exit_u, exit_underlying_source=exit_src,
             closed_at=closed_at,
         )
         if ok:
             stopped += 1
-            log.info("[options] intraday stop: %s filled $%.2f (stop $%.2f, mark $%.2f, %s%s)",
-                     p["occ_symbol"], fill, stop_level, price,
+            log.info("[options] intraday %s: %s filled $%.2f (stop $%.2f, mark $%.2f, %s%s)",
+                     stop_reason, p["occ_symbol"], fill, stop_level, price,
                      "crossed this interval" if crossed_this_interval else "gapped through",
                      f", crossing at {closed_at}" if closed_at else "")
     return stopped

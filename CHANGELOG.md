@@ -10,6 +10,18 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Added
 
+- **Trailing stop — winners ride, gains lock.** "Let it ride" now means what
+  it should: no forced same-day profit-taking and no end-of-day exits, but a
+  big win can't round-trip to the −60% floor. Every mark ratchets a
+  `peak_premium` (seeded at entry); once the peak reaches entry × 1.5 the stop
+  trails at peak × 0.7 (`exit_reason='trail_stop'`, "TRAIL" in the closed
+  table). Enforced by both the hourly intraday pass (crossing-minute fills)
+  and the daily allocator backstop. The allocator prompt now shows per-position
+  **days held** and explicit WINNERS-RIDE guidance so the LLM stops cashing
+  out green positions on day one. Knobs: `options_trailing_stop`,
+  `options_trail_arm_pct` (0.50), `options_trail_give_back` (0.30), env
+  `TRADINGAGENTS_OPTIONS_TRAILING_STOP` etc.
+
 - **Intraday stop-loss enforcement (standing-stop emulation).** The −60%
   stop used to be checked only once a day at the 09:35 allocation, filled at
   that moment's price — a breach at 10:30 rode a full day past the stop. The

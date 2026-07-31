@@ -636,7 +636,7 @@ function optOpenPositionsHtml(positions) {
 function optClosedPositionsHtml(positions) {
   if (!positions.length) return "";
   const reasonLabel = {
-    llm_close: "closed", stop_loss: "STOP", dte_floor: "DTE", expiry: "expired",
+    llm_close: "closed", stop_loss: "STOP", trail_stop: "TRAIL", dte_floor: "DTE", expiry: "expired",
   };
   const rows = positions.slice(0, 30).map((p) => {
     const exitReason = reasonLabel[p.exit_reason] || p.exit_reason || "—";

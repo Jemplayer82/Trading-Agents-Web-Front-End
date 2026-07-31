@@ -263,6 +263,7 @@ CREATE TABLE IF NOT EXISTS options_positions (
     exit_reason TEXT,
     settlement_close REAL,
     current_premium REAL,
+    peak_premium REAL,
     current_value REAL,
     last_marked_at TEXT,
     price_source TEXT,
@@ -339,6 +340,9 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     # decay P&L attribution for closed rows (expiries carry settlement_close).
     ("options_positions", "exit_underlying", "REAL"),
     ("options_positions", "exit_underlying_source", "TEXT"),
+    # Trailing stop: highest premium ever marked (seeded at entry). Enables
+    # "lock gains once armed" without a full mark-history table.
+    ("options_positions", "peak_premium", "REAL"),
 ]
 
 
@@ -1505,14 +1509,16 @@ def open_options_position(paper_account_id: int, scan_id: int, pos: dict[str, An
                        strike, expiration_date, contracts, entry_premium, cost_basis,
                        entry_underlying, entry_delta, entry_bid, entry_ask, entry_oi,
                        signal, conviction, rationale, status, opened_at,
-                       current_premium, current_value, last_marked_at, price_source, data_source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)""",
+                       current_premium, current_value, last_marked_at, price_source, data_source,
+                       peak_premium)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?)""",
                 (paper_account_id, scan_id, pos["occ_symbol"], pos["underlying"], pos["put_call"],
                  float(pos["strike"]), pos["expiration_date"], contracts, entry_premium, cost_basis,
                  pos.get("entry_underlying"), pos.get("entry_delta"), pos.get("entry_bid"),
                  pos.get("entry_ask"), pos.get("entry_oi"),
                  pos.get("signal"), pos.get("conviction"), pos.get("rationale"), now,
-                 entry_premium, cost_basis, now, pos.get("data_source"), pos.get("data_source")),
+                 entry_premium, cost_basis, now, pos.get("data_source"), pos.get("data_source"),
+                 entry_premium),
             )
             position_id = int(cur.lastrowid)
             conn.execute(
@@ -1697,8 +1703,10 @@ def mark_options_position(
     with connect() as conn:
         conn.execute(
             "UPDATE options_positions SET current_premium = ?, current_value = ?, "
+            "peak_premium = MAX(COALESCE(peak_premium, entry_premium), ?), "
             "last_marked_at = ?, price_source = ?" + stale_sql + " WHERE id = ? AND status = 'open'",
-            (round(float(premium), 4), round(float(value), 2), now, price_source, position_id),
+            (round(float(premium), 4), round(float(value), 2), round(float(premium), 4),
+             now, price_source, position_id),
         )
 
 

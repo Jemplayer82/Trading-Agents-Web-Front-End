@@ -622,3 +622,81 @@ def test_stop_books_backtracked_time_and_spot(account_id, monkeypatch):
     assert row["exit_underlying"] == pytest.approx(95.0)
     assert row["exit_underlying_source"] == "backtracked"
     assert row["exit_premium"] == pytest.approx(4.0)
+
+
+# ── Trailing stop: winners ride, but gains lock once armed ───────────────────
+
+def test_peak_premium_seeded_and_ratchets(account_id):
+    scan = db.create_spy_scan("2026-07-30", paper_account_id=account_id, kind="options")
+    pid = db.open_options_position(account_id, scan, _pos_dict(entry_premium=10.0))
+    assert db.get_options_position(pid)["peak_premium"] == pytest.approx(10.0)  # seeded at entry
+    db.mark_options_position(pid, 14.0, 2800, "schwab")
+    assert db.get_options_position(pid)["peak_premium"] == pytest.approx(14.0)  # ratchets up
+    db.mark_options_position(pid, 11.0, 2200, "schwab")
+    assert db.get_options_position(pid)["peak_premium"] == pytest.approx(14.0)  # never down
+
+
+def test_effective_stop_unarmed_is_base():
+    from web import options_allocator as oa
+    level, reason = oa.effective_stop_level({"entry_premium": 10.0, "peak_premium": 14.9})
+    assert (level, reason) == (pytest.approx(4.0), "stop_loss")  # peak < +50% arm
+
+
+def test_effective_stop_armed_locks_gains():
+    from web import options_allocator as oa
+    level, reason = oa.effective_stop_level({"entry_premium": 10.0, "peak_premium": 20.0})
+    assert reason == "trail_stop"
+    assert level == pytest.approx(14.0)  # 20 * (1-0.30) — profit locked above entry
+
+
+def test_effective_stop_kill_switch(monkeypatch):
+    from web import options_allocator as oa
+    # Patch the dict the allocator MODULE holds — test_env_overrides reloads
+    # tradingagents.default_config, so a freshly imported DEFAULT_CONFIG can be
+    # a different object than oa's module-level binding (order-dependent flake).
+    monkeypatch.setitem(oa.DEFAULT_CONFIG, "options_trailing_stop", False)
+    level, reason = oa.effective_stop_level({"entry_premium": 10.0, "peak_premium": 30.0})
+    assert (level, reason) == (pytest.approx(4.0), "stop_loss")
+
+
+def test_intraday_trail_closes_winner_at_trail_level(account_id, monkeypatch):
+    """Winner peaked +100% then fell through the trail -> closed at the trail
+    level with exit_reason trail_stop; a big win can't round-trip to -60%."""
+    monkeypatch.setattr(options_engine, "_backtrack_stop_crossing", lambda *a, **k: None)
+    monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
+    pid = _open_marked(account_id, entry=10.0, prev_mark=20.0)  # peak ratchets to 20
+    pos = db.get_options_position(pid)
+    # fresh quote 13.5 < trail 14.0 but far above base 4.0
+    assert options_engine._apply_intraday_stops([pos], {pid: (13.5, "schwab")}) == 1
+    row = db.get_options_position(pid)
+    assert row["exit_reason"] == "trail_stop"
+    assert row["exit_premium"] == pytest.approx(14.0)
+    assert row["realized_pnl"] == pytest.approx((14.0 - 10.0) * 100 * 2)  # profit kept
+
+
+def test_forced_closes_trail(monkeypatch):
+    from web import options_allocator as oa
+    pos = {"id": 1, "occ_symbol": "X", "underlying": "AAPL", "entry_premium": 10.0,
+           "peak_premium": 20.0, "current_premium": 13.0, "contracts": 2,
+           "expiration_date": "2099-01-15", "cost_basis": 2000.0}
+    out = oa.forced_closes([pos])
+    assert len(out) == 1 and out[0][1] == "trail_stop"
+    healthy = dict(pos, current_premium=15.0)  # above trail 14.0
+    assert oa.forced_closes([healthy]) == []
+
+
+def test_prompt_shows_days_held_and_ride_guidance(monkeypatch):
+    from unittest.mock import MagicMock
+    from web import options_allocator as oa
+    llm = MagicMock()
+    llm.invoke.return_value = MagicMock(content="[]")
+    monkeypatch.setattr(oa, "llm_for", lambda *a, **k: llm)
+    pos = {"id": 1, "occ_symbol": "AAPL  260821C00230000", "underlying": "AAPL",
+           "put_call": "CALL", "strike": 230.0, "expiration_date": "2099-01-15",
+           "entry_premium": 10.0, "current_premium": 12.0, "peak_premium": 12.0,
+           "contracts": 2, "cost_basis": 2000.0, "opened_at": "2026-07-27T14:00:00Z"}
+    oa.run([], [pos], "2026-07-30", {}, equity=100_000, cash=50_000)
+    system = llm.invoke.call_args[0][0][0]["content"]
+    user = llm.invoke.call_args[0][0][1]["content"]
+    assert "WINNERS RIDE" in system and "trailing stop" in system.lower()
+    assert "held " in user and "d left" in user  # days-held now in every open line
