@@ -2,8 +2,9 @@
 
 Dashboard backend: single-ticker analysis (streamed over the /api/analyze
 WebSocket), dashboard login/users, app settings + LLM credential management,
-saved-analysis Q&A and charting, Schwab OAuth, and the /api/bus Agent Bus
-bridge.
+saved-analysis Q&A and charting, and the /api/bus Agent Bus bridge. Schwab
+OAuth (web/schwab_routes.py) mounts here too, but only when the "schwab"
+feature is on (see web/features.py) — the tier-1 app has no brokerage.
 
 Routing contract (web/nginx.conf): nginx sends /api/spy*, /api/accounts and
 /api/portfolio* to a SEPARATE app — web/portfolio_main.py, running in its own
@@ -33,7 +34,6 @@ import logging
 import os
 import queue
 import re
-import secrets
 import sqlite3
 import threading
 import time
@@ -42,13 +42,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import auth_app, bus, db
+from . import auth_app, bus, db, features
 from . import credentials as creds
-from .auth import schwab as schwab_auth
-from .auth import token_store
 from .llm_helpers import llm_for
 from .providers import ANALYSTS, DEPTH_PRESETS, LANGUAGES, get_providers
 from .runner import run_analysis_sync
@@ -79,6 +77,10 @@ app = FastAPI(title="TradingAgents Web")
 # Gate every /api/ route behind a login session (allowlist + internal-token
 # bypass live in auth_app). Registered before route handlers run.
 app.middleware("http")(auth_app.auth_middleware)
+
+if features.enabled("schwab"):
+    from .schwab_routes import router as schwab_router
+    app.include_router(schwab_router)
 
 
 @app.on_event("startup")
@@ -610,95 +612,6 @@ def _build_chart_data(ticker: str, trade_date: str, lookback_days: int) -> dict[
         "candles": candles,
         "indicators": indicators,
     }
-
-
-# ---------- Schwab OAuth ----------
-
-# Short-lived cookie carrying the OAuth anti-CSRF state nonce between the
-# /api/auth/schwab redirect and the Schwab callback. SameSite=lax (not strict)
-# so it survives the top-level cross-site redirect back from Schwab.
-_SCHWAB_STATE_COOKIE = "schwab_oauth_state"
-
-
-@app.get("/api/auth/schwab")
-def schwab_login() -> RedirectResponse:
-    """Start the Schwab OAuth flow: mint an anti-CSRF state nonce, stash it in
-    the short-lived cookie above, and redirect to Schwab's authorize page."""
-    state = secrets.token_urlsafe(32)
-    resp = RedirectResponse(url=schwab_auth.build_auth_url(state), status_code=302)
-    resp.set_cookie(
-        _SCHWAB_STATE_COOKIE, state,
-        max_age=600, httponly=True, samesite="lax", secure=True, path="/api/auth/schwab",
-    )
-    return resp
-
-
-@app.get("/api/auth/schwab/callback")
-def schwab_callback(
-    request: Request, code: str | None = None, error: str | None = None, state: str | None = None
-) -> HTMLResponse:
-    """Schwab OAuth redirect target (public — listed in auth_app.PUBLIC_API_PATHS;
-    the state nonce is its own gate).
-
-    Every failure branch deliberately returns a generic message to the browser
-    and logs the specifics server-side, so upstream error details are never
-    reflected to whoever drove the redirect.
-    """
-    # Verify the anti-CSRF state matches the nonce we set when starting the flow.
-    expected_state = request.cookies.get(_SCHWAB_STATE_COOKIE)
-    if not expected_state or not state or not hmac.compare_digest(state, expected_state):
-        log.warning("Schwab callback rejected: missing or mismatched OAuth state")
-        return HTMLResponse("<h1>Invalid or expired authorization request</h1>", status_code=400)
-    if error:
-        # Don't echo the raw upstream error back to the browser; log it instead.
-        log.warning("Schwab auth returned error: %s", error)
-        return HTMLResponse("<h1>Schwab authorization failed</h1>", status_code=400)
-    if not code:
-        return HTMLResponse("<h1>Missing ?code= parameter</h1>", status_code=400)
-    try:
-        bundle = schwab_auth.exchange_code(code)
-        token_store.save(bundle)
-    except Exception:
-        log.exception("Schwab code exchange failed")
-        return HTMLResponse("<h1>Authorization failed. Please try again.</h1>", status_code=500)
-    resp = HTMLResponse(
-        """
-        <html><body style='background:#0b0f14;color:#d6e1ea;font-family:monospace;padding:48px;text-align:center;'>
-          <h2 style='color:#7be38c;'>✅ Schwab connected.</h2>
-          <p>You can close this tab. The dashboard now has access.</p>
-          <script>setTimeout(() => window.close(), 1500);</script>
-        </body></html>
-        """.strip()
-    )
-    # One-time nonce; drop it now that the flow is complete.
-    resp.delete_cookie(_SCHWAB_STATE_COOKIE, path="/api/auth/schwab")
-    return resp
-
-
-@app.get("/api/auth/schwab/status")
-def schwab_status() -> dict[str, Any]:
-    """Schwab connectivity via the MCP server. `enabled` is the master switch;
-    `connected` reflects whether the MCP's Schwab session currently returns data."""
-    from tradingagents.dataflows import schwab_mcp
-    if not schwab_mcp.schwab_enabled():
-        return {"enabled": False, "connected": False, "source": "mcp"}
-    accounts = None
-    try:
-        accounts = schwab_mcp.get_accounts(fields="positions")
-    except Exception:
-        log.debug("[schwab_status] MCP read failed", exc_info=True)
-    return {
-        "enabled": True,
-        "connected": bool(accounts),
-        "num_accounts": len(accounts) if isinstance(accounts, list) else 0,
-        "source": "mcp",
-    }
-
-
-@app.delete("/api/auth/schwab")
-def schwab_disconnect() -> dict[str, str]:
-    token_store.clear()
-    return {"status": "disconnected"}
 
 
 # ---------- single-ticker analysis WebSocket (existing) ----------
