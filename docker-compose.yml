@@ -62,8 +62,13 @@ services:
     environment:
       LLM_PROVIDER: ollama
       TRADINGAGENTS_LLM_PROVIDER: ollama
-      # Fewer concurrent scan workers → lower peak memory on the tight host.
-      OLLAMA_MAX_CONCURRENCY: "3"
+      # Caps concurrent deep-dive worker threads (web/spy_scanner.py
+      # _total_budget) regardless of LLM backend. Dropped to 3 during the
+      # host OOM crisis (WebServer had ~424MB free); raised back to 8 once
+      # the host recovered (~14GB free) -- 8 also matches Cleo's own
+      # ThreadPoolExecutor(max_workers=8) ceiling (scripts/cleo_llm_handler.py),
+      # so the scan-side gate no longer throttles below what Cleo can serve.
+      OLLAMA_MAX_CONCURRENCY: "8"
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY}
       SCHWAB_APP_KEY: ${SCHWAB_APP_KEY}
