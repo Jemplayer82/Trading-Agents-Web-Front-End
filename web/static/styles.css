@@ -457,10 +457,6 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 
 .dim { color: var(--dim); }
 
-/* ----- Schwab tab ----- */
-.schwab-status p { margin: 4px 0; }
-.schwab-status strong { color: var(--accent-cyan); }
-
 /* ----- Portfolio Scan tab ----- */
 .ticker-grid-web {
   display: grid;
@@ -571,25 +567,6 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
 .scan-activity-link { color: var(--accent-cyan); text-decoration: none; }
 .scan-activity-link:hover { text-decoration: underline; }
 
-.spy-progress-grid { display: flex; flex-direction: column; gap: 8px; }
-.spy-progress-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 12px;
-}
-.spy-progress-label { width: 90px; color: var(--dim); text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
-.spy-progress-count { width: 70px; text-align: right; }
-
-.spy-perf-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 10px;
-}
-.spy-perf-item { display: flex; flex-direction: column; gap: 3px; }
-.spy-perf-label { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
-.spy-perf-value { font-size: 15px; font-weight: 600; color: var(--text); }
-
 .spy-table {
   width: 100%;
   border-collapse: collapse;
@@ -620,24 +597,6 @@ button[disabled] { opacity: 0.4; cursor: not-allowed; }
   border-radius: 2px;
   background: var(--panel-border);
   color: var(--text);
-}
-.conviction-badge.high  { background: var(--accent-green);   color: #042714; }
-.conviction-badge.mid   { background: var(--accent-yellow);  color: #2e2204; }
-.conviction-badge.low   { background: var(--accent-red);     color: #2e0a0a; }
-
-.return-badge {
-  font-weight: 700;
-  font-size: 11px;
-  padding: 1px 5px;
-  border-radius: 2px;
-}
-.return-badge.pos { color: var(--accent-green); }
-.return-badge.neg { color: var(--accent-red); }
-.return-badge.flat { color: var(--dim); }
-
-.spy-sort-btn.active {
-  border-color: var(--accent-cyan);
-  color: var(--accent-cyan);
 }
 
 /* ----- Technical Chart panel ----- */

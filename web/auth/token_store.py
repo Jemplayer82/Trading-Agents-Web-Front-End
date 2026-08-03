@@ -6,10 +6,9 @@ is mandatory here (require_fernet) — unlike the opt-in secret_box DB columns,
 there is no plaintext fallback for OAuth tokens.
 
 The api container writes the bundle at the end of the OAuth flow and deletes
-it on disconnect (web/main.py); the direct REST client
-(web/auth/schwab_client.py) reads it and re-saves on refresh. Every container
-mounting the tradingagents_data volume sees the same file. Writes are atomic
-(tmp file + rename), so there is no SQLite/WAL-style coordination to manage.
+it on disconnect (web/main.py). Every container mounting the
+tradingagents_data volume sees the same file. Writes are atomic (tmp file +
+rename), so there is no SQLite/WAL-style coordination to manage.
 """
 from __future__ import annotations
 

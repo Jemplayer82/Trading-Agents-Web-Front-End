@@ -85,9 +85,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   // Bias toggle
-  document.querySelectorAll(".bias-btn").forEach((btn) => {
+  document.querySelectorAll("#f-bias .bias-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      document.querySelectorAll(".bias-btn").forEach((b) => b.classList.remove("active"));
+      document.querySelectorAll("#f-bias .bias-btn").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
     });
   });
@@ -124,14 +124,11 @@ async function applySchwabVisibility(enabledOverride) {
       enabled = s.enabled !== false;
     } catch (e) { /* default to showing */ }
   }
-  window.schwabEnabled = enabled;
   const tabBtn = $("tab-portfolio");
   const acctBtn = $("btn-spy-account");
   if (tabBtn) tabBtn.style.display = enabled ? "" : "none";
   if (acctBtn) acctBtn.style.display = enabled ? "" : "none";
   if (!enabled) {
-    const acctPanel = $("spy-account-panel");
-    if (acctPanel) acctPanel.innerHTML = "";
     const portPane = document.querySelector('[data-pane="portfolio"]');
     if (portPane && !portPane.hidden) {
       document.querySelector('.main-tab[data-tab="analyze"]')?.click();
@@ -288,7 +285,7 @@ async function loadPreferences() {
     $("f-aggressiveness-val").textContent = $("f-aggressiveness").value;
   }
   if (prefs.bias) {
-    document.querySelectorAll(".bias-btn").forEach((b) => {
+    document.querySelectorAll("#f-bias .bias-btn").forEach((b) => {
       b.classList.toggle("active", b.dataset.val === prefs.bias);
     });
   }
@@ -630,7 +627,7 @@ function collectParams() {
   document.querySelectorAll("#f-analysts input[type=checkbox]:checked").forEach((cb) =>
     analysts.push(cb.value)
   );
-  const activeBiasBtn = document.querySelector(".bias-btn.active");
+  const activeBiasBtn = document.querySelector("#f-bias .bias-btn.active");
   return {
     ticker: $("f-ticker").value.trim(),
     language: $("f-language").value,
