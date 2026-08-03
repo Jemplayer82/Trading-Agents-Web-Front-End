@@ -4,7 +4,7 @@ A failed run (single-ticker analysis, portfolio scan, or S&P 500 scan) already
 writes status='failed' + an error to the DB, but that's invisible unless someone
 is watching the dashboard. notify_run_failed() pushes the failure over BOTH
 configured channels — the webhook (FRED_NOTIFY_URL, via web/notifier.py) and
-email (SMTP, via web/newsletter.py).
+email (SMTP, via web/mailer.py).
 
 Design:
 - Best-effort and non-blocking: the sends run on a daemon thread and each channel
@@ -24,7 +24,7 @@ import logging
 import os
 import threading
 
-from . import newsletter
+from . import mailer
 from .notifier import default_notifier
 
 log = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ def _send_email(summary: str, detail: str, link: str) -> None:
             f'border-left:3px solid #ff7c7c;padding-left:10px;">{html.escape(detail)}</pre>'
             f'<p><a href="{html.escape(link)}">Open the dashboard</a></p>'
         )
-        newsletter.send_alert(summary, body)
+        mailer.send_alert(summary, body)
     except Exception:
         log.exception("[alerts] email channel failed")
 

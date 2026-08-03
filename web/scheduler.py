@@ -36,7 +36,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from . import alerts, db, features, newsletter
+from . import alerts, db, features
 from . import credentials as creds
 from ._logging import configure_logging
 
@@ -143,6 +143,7 @@ def job_morning_newsletter() -> None:
     sends anyway — a slightly old briefing beats no briefing.
     """
     log.info("[newsletter] morning newsletter job firing")
+    from . import newsletter  # lazy: T2-only module, this job only registers at T2+
     _apply_db_config()  # ensure latest SMTP_* / notifier settings from the UI
     scan = _latest_scan_for_today()
     if not scan:

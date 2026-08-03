@@ -9,7 +9,7 @@ import sqlite3
 
 import pytest
 
-from web import alerts, db, newsletter, scheduler
+from web import alerts, db, mailer, scheduler
 
 # Pre-updated_at schemas, for the migration test.
 _OLD_PORTFOLIO_DDL = """
@@ -53,7 +53,7 @@ class TestNotifyRunFailed:
         notifier = _RecordingNotifier()
         emails = []
         monkeypatch.setattr(alerts, "default_notifier", lambda: notifier)
-        monkeypatch.setattr(newsletter, "send_alert", lambda subject, html: emails.append((subject, html)))
+        monkeypatch.setattr(mailer, "send_alert", lambda subject, html: emails.append((subject, html)))
 
         alerts.notify_run_failed(
             kind="Portfolio scan", run_id=7, label="2026-01-02", error="boom"
@@ -73,7 +73,7 @@ class TestNotifyRunFailed:
 
         emails = []
         monkeypatch.setattr(alerts, "default_notifier", lambda: Boom())
-        monkeypatch.setattr(newsletter, "send_alert", lambda s, h: emails.append(s))
+        monkeypatch.setattr(mailer, "send_alert", lambda s, h: emails.append(s))
 
         alerts.notify_run_failed(kind="Analysis", run_id=1, label="AAPL", error="x").join(timeout=5)
 
@@ -87,13 +87,13 @@ class TestNotifyRunFailed:
             raise RuntimeError("smtp down")
 
         monkeypatch.setattr(alerts, "default_notifier", boom_notifier)
-        monkeypatch.setattr(newsletter, "send_alert", boom_email)
+        monkeypatch.setattr(mailer, "send_alert", boom_email)
         # Must complete without propagating an exception.
         alerts.notify_run_failed(kind="Analysis", run_id=2, label="MSFT", error="x").join(timeout=5)
 
 
 # ---------------------------------------------------------------------------
-# newsletter.send_alert — email transport
+# mailer.send_alert — email transport
 # ---------------------------------------------------------------------------
 
 
@@ -102,7 +102,7 @@ class TestSendAlert:
     def test_noop_when_smtp_unset(self, monkeypatch):
         for var in ("SMTP_HOST", "SMTP_USER", "SMTP_PASS", "NEWSLETTER_TO"):
             monkeypatch.delenv(var, raising=False)
-        assert newsletter.send_alert("subj", "<p>hi</p>") is None
+        assert mailer.send_alert("subj", "<p>hi</p>") is None
 
     def test_smtp_send_invoked_when_configured(self, monkeypatch):
         sent: dict = {}
@@ -133,7 +133,7 @@ class TestSendAlert:
         monkeypatch.setenv("NEWSLETTER_TO", "to@example.com")
         monkeypatch.setattr("smtplib.SMTP", FakeSMTP)
 
-        mid = newsletter.send_alert("Alert: scan failed", "<p>boom</p>")
+        mid = mailer.send_alert("Alert: scan failed", "<p>boom</p>")
         assert mid is not None
         assert sent["subject"] == "Alert: scan failed"
         assert sent["host"] == "smtp.example.com"
