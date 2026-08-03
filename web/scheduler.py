@@ -36,7 +36,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from . import alerts, db, newsletter
+from . import alerts, db, features, newsletter
 from . import credentials as creds
 from ._logging import configure_logging
 
@@ -435,17 +435,19 @@ def job_reap_stuck_runs() -> None:
     scan_err = f"abandoned — no progress for {STUCK_SCAN_STALL_MIN} min, worker likely crashed"
     analysis_err = f"abandoned — still running after {STUCK_ANALYSIS_MIN} min, worker likely crashed"
     try:
-        for scan in db.find_stuck_portfolio_scans(scan_cutoff):
-            db.fail_portfolio_scan(scan["id"], scan_err)
-            log.warning("[reaper] failed stuck portfolio scan %s", scan["id"])
-            alerts.notify_run_failed(kind="Portfolio scan", run_id=scan["id"],
-                                     label=scan.get("trade_date") or "", error=scan_err)
-        for scan in db.find_stuck_spy_scans(scan_cutoff):
-            db.fail_spy_scan(scan["id"], scan_err)
-            kind_label = "Options scan" if scan.get("kind") == "options" else "S&P 500 scan"
-            log.warning("[reaper] failed stuck %s %s", kind_label, scan["id"])
-            alerts.notify_run_failed(kind=kind_label, run_id=scan["id"],
-                                     label=scan.get("trade_date") or "", error=scan_err)
+        if features.enabled("schwab"):
+            for scan in db.find_stuck_portfolio_scans(scan_cutoff):
+                db.fail_portfolio_scan(scan["id"], scan_err)
+                log.warning("[reaper] failed stuck portfolio scan %s", scan["id"])
+                alerts.notify_run_failed(kind="Portfolio scan", run_id=scan["id"],
+                                         label=scan.get("trade_date") or "", error=scan_err)
+        if features.enabled("sp500") or features.enabled("options"):
+            for scan in db.find_stuck_spy_scans(scan_cutoff):
+                db.fail_spy_scan(scan["id"], scan_err)
+                kind_label = "Options scan" if scan.get("kind") == "options" else "S&P 500 scan"
+                log.warning("[reaper] failed stuck %s %s", kind_label, scan["id"])
+                alerts.notify_run_failed(kind=kind_label, run_id=scan["id"],
+                                         label=scan.get("trade_date") or "", error=scan_err)
         for a in db.find_stuck_analyses(analysis_cutoff):
             db.fail_analysis(a["id"], analysis_err)
             log.warning("[reaper] failed stuck analysis %s", a["id"])
@@ -459,14 +461,116 @@ def job_reap_stuck_runs() -> None:
     # the queue on every sweep (idle-guarded no-op if a scan is live), so a
     # crash can't permanently wedge the pipeline. Runs regardless of whether
     # this sweep failed anything — it also recovers a queue stranded earlier.
-    try:
-        r = httpx.post(f"{PORTFOLIO_URL}/api/portfolio/advance-queue",
-                       timeout=30, headers=_internal_headers())
-        started = (r.json() or {}).get("started") if r.is_success else None
-        if started:
-            log.info("[reaper] advanced stranded queue → scan %s", started.get("id"))
-    except Exception:
-        log.exception("[reaper] advance-queue kick failed")
+    # Gated: the portfolio container (and its /api/portfolio/advance-queue
+    # route) doesn't exist below tier 2, so this would just be a connection
+    # error every 20 minutes.
+    if features.enabled("schwab"):
+        try:
+            r = httpx.post(f"{PORTFOLIO_URL}/api/portfolio/advance-queue",
+                           timeout=30, headers=_internal_headers())
+            started = (r.json() or {}).get("started") if r.is_success else None
+            if started:
+                log.info("[reaper] advanced stranded queue → scan %s", started.get("id"))
+        except Exception:
+            log.exception("[reaper] advance-queue kick failed")
+
+
+def register_jobs(sched: BlockingScheduler) -> None:
+    """Register cron jobs, gated by feature tier (see web/features.py).
+
+    reap_stuck_runs and outcome_sweep always register — they apply at every
+    tier (reap_stuck_runs gates its own scan-kind-specific sweeps
+    internally; outcome_sweep resolves memory-log entries for every ticker
+    regardless of which brokerage/scanner features are on).
+    """
+    if features.enabled("schwab"):
+        sched.add_job(
+            job_nightly_scan,
+            # Mon-Fri only: holdings don't move over the closed-market weekend, so a
+            # Sat/Sun scan would burn a full multi-agent LLM pass on stale Friday-close
+            # data. Mirrors the spy_price_refresh weekday restriction below.
+            CronTrigger(day_of_week="mon-fri", hour=22, minute=0, timezone=TIMEZONE),
+            id="nightly_scan",
+            replace_existing=True,
+        )
+        sched.add_job(
+            job_morning_newsletter,
+            CronTrigger(hour=5, minute=0, timezone=TIMEZONE),
+            id="morning_newsletter",
+            replace_existing=True,
+        )
+        sched.add_job(
+            job_token_health,
+            IntervalTrigger(hours=1),
+            id="token_health",
+            replace_existing=True,
+        )
+    if features.enabled("sp500"):
+        sched.add_job(
+            job_spy_scan,
+            CronTrigger(day_of_week="sat", hour=0, minute=0, timezone=TIMEZONE),
+            id="spy_scan",
+            replace_existing=True,
+        )
+        sched.add_job(
+            job_spy_price_refresh,
+            CronTrigger(day_of_week="mon-fri", hour="9-16", minute=0, timezone=TIMEZONE),
+            id="spy_price_refresh",
+            replace_existing=True,
+        )
+    sched.add_job(
+        job_reap_stuck_runs,
+        IntervalTrigger(minutes=20),
+        id="reap_stuck_runs",
+        replace_existing=True,
+    )
+    sched.add_job(
+        job_outcome_sweep,
+        # Mon-Fri 23:30 ET: after US close (day-0 bars final) and after the
+        # 22:00 nightly scan has queued, so the two don't contend.
+        CronTrigger(day_of_week="mon-fri", hour=23, minute=30, timezone=TIMEZONE),
+        id="outcome_sweep",
+        replace_existing=True,
+    )
+    if features.enabled("options"):
+        sched.add_job(
+            job_options_scan,
+            # 07:30 ET: quick scan + deep dives (top DEEP_TOP + SPY) run pre-market;
+            # the build's own market-open gate holds allocation until 09:35 so
+            # entries fill at live mids.
+            CronTrigger(day_of_week="mon-fri", hour=7, minute=30, timezone=TIMEZONE),
+            id="options_scan",
+            replace_existing=True,
+        )
+        sched.add_job(
+            job_options_refresh,
+            CronTrigger(day_of_week="mon-fri", hour="10-16", minute=0, timezone=TIMEZONE),
+            id="options_refresh",
+            replace_existing=True,
+        )
+        sched.add_job(
+            job_options_refresh,
+            # Extra pass just after the close so the day ends on settled marks.
+            CronTrigger(day_of_week="mon-fri", hour=16, minute=45, timezone=TIMEZONE),
+            id="options_refresh_close",
+            replace_existing=True,
+        )
+        sched.add_job(
+            job_options_settle,
+            # 20:00 ET: daily bars final; catches Friday expiries same evening and
+            # holiday-shifted Thursday expiries without a market calendar.
+            CronTrigger(day_of_week="mon-fri", hour=20, minute=0, timezone=TIMEZONE),
+            id="options_settle",
+            replace_existing=True,
+        )
+        sched.add_job(
+            job_options_grade,
+            # 20:15 ET: after the settle writes expired_* rows, before the 23:30
+            # memory sweep — the learning loop grades a complete day.
+            CronTrigger(day_of_week="mon-fri", hour=20, minute=15, timezone=TIMEZONE),
+            id="options_grade",
+            replace_existing=True,
+        )
 
 
 def main() -> None:
@@ -524,107 +628,26 @@ def main() -> None:
             "coalesce": True,
         },
     )
-    sched.add_job(
-        job_nightly_scan,
-        # Mon-Fri only: holdings don't move over the closed-market weekend, so a
-        # Sat/Sun scan would burn a full multi-agent LLM pass on stale Friday-close
-        # data. Mirrors the spy_price_refresh weekday restriction below.
-        CronTrigger(day_of_week="mon-fri", hour=22, minute=0, timezone=TIMEZONE),
-        id="nightly_scan",
-        replace_existing=True,
-    )
-    sched.add_job(
-        job_morning_newsletter,
-        CronTrigger(hour=5, minute=0, timezone=TIMEZONE),
-        id="morning_newsletter",
-        replace_existing=True,
-    )
-    sched.add_job(
-        job_token_health,
-        IntervalTrigger(hours=1),
-        id="token_health",
-        replace_existing=True,
-    )
-    sched.add_job(
-        job_spy_scan,
-        CronTrigger(day_of_week="sat", hour=0, minute=0, timezone=TIMEZONE),
-        id="spy_scan",
-        replace_existing=True,
-    )
-    sched.add_job(
-        job_spy_price_refresh,
-        CronTrigger(day_of_week="mon-fri", hour="9-16", minute=0, timezone=TIMEZONE),
-        id="spy_price_refresh",
-        replace_existing=True,
-    )
-    sched.add_job(
-        job_reap_stuck_runs,
-        IntervalTrigger(minutes=20),
-        id="reap_stuck_runs",
-        replace_existing=True,
-    )
-    sched.add_job(
-        job_outcome_sweep,
-        # Mon-Fri 23:30 ET: after US close (day-0 bars final) and after the
-        # 22:00 nightly scan has queued, so the two don't contend.
-        CronTrigger(day_of_week="mon-fri", hour=23, minute=30, timezone=TIMEZONE),
-        id="outcome_sweep",
-        replace_existing=True,
-    )
-    sched.add_job(
-        job_options_scan,
-        # 07:30 ET: quick scan + deep dives (top DEEP_TOP + SPY) run pre-market;
-        # the build's own market-open gate holds allocation until 09:35 so
-        # entries fill at live mids.
-        CronTrigger(day_of_week="mon-fri", hour=7, minute=30, timezone=TIMEZONE),
-        id="options_scan",
-        replace_existing=True,
-    )
-    sched.add_job(
-        job_options_refresh,
-        CronTrigger(day_of_week="mon-fri", hour="10-16", minute=0, timezone=TIMEZONE),
-        id="options_refresh",
-        replace_existing=True,
-    )
-    sched.add_job(
-        job_options_refresh,
-        # Extra pass just after the close so the day ends on settled marks.
-        CronTrigger(day_of_week="mon-fri", hour=16, minute=45, timezone=TIMEZONE),
-        id="options_refresh_close",
-        replace_existing=True,
-    )
-    sched.add_job(
-        job_options_settle,
-        # 20:00 ET: daily bars final; catches Friday expiries same evening and
-        # holiday-shifted Thursday expiries without a market calendar.
-        CronTrigger(day_of_week="mon-fri", hour=20, minute=0, timezone=TIMEZONE),
-        id="options_settle",
-        replace_existing=True,
-    )
-    sched.add_job(
-        job_options_grade,
-        # 20:15 ET: after the settle writes expired_* rows, before the 23:30
-        # memory sweep — the learning loop grades a complete day.
-        CronTrigger(day_of_week="mon-fri", hour=20, minute=15, timezone=TIMEZONE),
-        id="options_grade",
-        replace_existing=True,
-    )
+    register_jobs(sched)
     # Sweep once at startup too — a crash that happened while the scheduler was
     # down should be caught and alerted immediately, not up to 20 min later.
     job_reap_stuck_runs()
     log.info("Scheduler starting (tz=%s)", TIMEZONE)
-    log.info(" - nightly_scan       cron 22:00 Mon-Fri %s", TIMEZONE)
-    log.info(" - morning_newsletter cron 05:00 %s", TIMEZONE)
-    log.info(" - token_health       every 1h")
-    log.info(" - spy_scan           cron Sat 00:00 %s", TIMEZONE)
-    log.info(" - spy_price_refresh  cron hourly Mon-Fri 09:00-16:00 %s", TIMEZONE)
+    if features.enabled("schwab"):
+        log.info(" - nightly_scan       cron 22:00 Mon-Fri %s", TIMEZONE)
+        log.info(" - morning_newsletter cron 05:00 %s", TIMEZONE)
+        log.info(" - token_health       every 1h")
+    if features.enabled("sp500"):
+        log.info(" - spy_scan           cron Sat 00:00 %s", TIMEZONE)
+        log.info(" - spy_price_refresh  cron hourly Mon-Fri 09:00-16:00 %s", TIMEZONE)
     log.info(" - reap_stuck_runs    every 20m (stall>%dm scans / %dm analyses)",
              STUCK_SCAN_STALL_MIN, STUCK_ANALYSIS_MIN)
     log.info(" - outcome_sweep      cron 23:30 Mon-Fri %s", TIMEZONE)
-    log.info(" - options_scan       cron 07:30 Mon-Fri %s", TIMEZONE)
-    log.info(" - options_refresh    cron hourly Mon-Fri 10:00-16:00 + 16:45 %s", TIMEZONE)
-    log.info(" - options_settle     cron 20:00 Mon-Fri %s", TIMEZONE)
-    log.info(" - options_grade      cron 20:15 Mon-Fri %s", TIMEZONE)
+    if features.enabled("options"):
+        log.info(" - options_scan       cron 07:30 Mon-Fri %s", TIMEZONE)
+        log.info(" - options_refresh    cron hourly Mon-Fri 10:00-16:00 + 16:45 %s", TIMEZONE)
+        log.info(" - options_settle     cron 20:00 Mon-Fri %s", TIMEZONE)
+        log.info(" - options_grade      cron 20:15 Mon-Fri %s", TIMEZONE)
     try:
         sched.start()
     except (KeyboardInterrupt, SystemExit):
