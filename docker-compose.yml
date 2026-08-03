@@ -164,6 +164,25 @@ services:
     depends_on:
       - switchboard
 
+  # CPU-only local Ollama — experiment for the quick-scan role (no tool
+  # calling needed there, unlike deep). No GPU device mapping: WebServer has
+  # none, this runs on spare EPYC cores. mem_limit bounded so a bad model
+  # choice can't reintroduce the OOM crisis this host just recovered from
+  # (see [[webserver-host-ram-constraint]]). Does NOT touch the live
+  # quick_provider preference — point a test run at
+  # http://tradingagents-ollama:11434 explicitly before switching over.
+  # Model persisted in a named volume so a redeploy doesn't re-pull it.
+  tradingagents-ollama:
+    image: ollama/ollama:latest
+    pull_policy: always
+    mem_limit: 4g
+    ports:
+      - "11435:11434"   # host-side debug/pull access
+    volumes:
+      - tradingagents_ollama_data:/root/.ollama
+    restart: unless-stopped
+
 volumes:
   tradingagents_data:
   switchboard_data:
+  tradingagents_ollama_data:
