@@ -111,7 +111,7 @@ optional `switchboard` container.
 A small provider abstraction so holdings aren't hardcoded to one broker. `BrokerageProvider`
 (ABC) → `SchwabProvider` today; `fetch_all_accounts()` returns normalized account/position
 dicts (account ids namespaced `schwab:<num>`), and `parse_occ_symbol()` decodes OCC option
-symbols (expiration/strike/put-call/underlying). `web/portfolio_main.py` (`_accounts_split`,
+symbols (expiration/strike/put-call/underlying). `web/portfolio_routes.py` (`_accounts_split`,
 `_mcp_positions`) consumes this; adding a broker = one new provider class. The legacy
 `_parse_schwab_account` helper (Schwab-only, `/api/spy-account` drift views) is deprecated
 in favor of it.
@@ -123,8 +123,8 @@ alerted out-of-band over **both** channels: the webhook (`FRED_NOTIFY_URL`, `web
 and email (SMTP, `web/newsletter.py:send_alert`). `web/alerts.py:notify_run_failed()` is the
 one entry point; it fires both on a daemon thread and **never raises into** a failing run's
 teardown. It's called from the three failure chokepoints — `web/runner.py` (analysis except),
-and `web/portfolio_main.py` `_run_scan_thread` / `_run_spy_scan_thread` (after the `fail_*`
-write; **not** on `ScanCancelled`, which is a user action, not a failure).
+`web/portfolio_routes.py` `_run_scan_thread`, and `web/spy_routes.py` `_run_spy_scan_thread`
+(after the `fail_*` write; **not** on `ScanCancelled`, which is a user action, not a failure).
 
 That covers runs that *catch* their own exception. A worker that hard-crashes (OOM, container
 death) never runs that except, so the run sits in `running`/`pending` forever — invisible, and
