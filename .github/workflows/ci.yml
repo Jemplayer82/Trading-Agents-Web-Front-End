@@ -44,3 +44,30 @@ jobs:
 
       - name: Run tests
         run: uv run --extra web python -m pytest -q
+
+  tier-check:
+    name: Tier strip check (tier ${{ matrix.tier }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Strip to tier ${{ matrix.tier }}
+        run: python scripts/make_tier.py --tier ${{ matrix.tier }} --apply --force
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: ruff check
+        run: ruff check .
+
+      - name: Run tests
+        run: uv run --extra web python -m pytest -q
