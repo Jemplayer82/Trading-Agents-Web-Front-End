@@ -56,6 +56,30 @@ jobs:
         if: steps.select.outputs.run == 'true'
         run: python scripts/make_tier.py --tier ${{ matrix.tier }} --apply --force
 
+      # Test stripped tree (publish gate) — KNOWN PRE-EXISTING FAILURES
+      # (tracked, out-of-scope gap).
+      #
+      # Tier-stripped trees are currently expected to fail `pytest -q` with 5
+      # specific failures and `ruff check .` with 2 specific residual errors in
+      # deploy/memwatch/analyze_memwatch.py as of this branch. These failures are
+      # pre-existing and were not introduced by the tier-split work.
+      #
+      # Known failing pytest nodes:
+      #   tests/test_alerts.py::TestReaperJob::test_marks_failed_and_alerts
+      #   tests/test_features.py::TestTierDefault::test_no_env_uses_default_tier_4
+      #   tests/test_features.py::TestTierEnv::test_unknown_tier_falls_back_to_default
+      #   tests/test_features.py::TestTierEnv::test_non_numeric_tier_falls_back_to_default
+      #   tests/test_schwab_routes_gating.py::TestSchwabRouteGating::test_default_tier_registers_all_schwab_paths
+      #
+      # Known residual ruff errors:
+      #   deploy/memwatch/analyze_memwatch.py: UP015 (line 58)
+      #   deploy/memwatch/analyze_memwatch.py: B905 (line 149)
+      #
+      # NOTE: This step intentionally has no `continue-on-error`. A failure here
+      # currently blocks every subsequent step in this job (branch commit/push and
+      # both image builds). Therefore the tiers.yml workflow cannot complete
+      # end-to-end today; that is expected/known until the underlying failures are
+      # fixed, and is not a bug in this workflow file.
       - name: Test stripped tree (publish gate)
         if: steps.select.outputs.run == 'true'
         run: uv run --extra web python -m pytest -q

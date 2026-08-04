@@ -45,6 +45,23 @@ jobs:
       - name: Run tests
         run: uv run --extra web python -m pytest -q
 
+  # Tier strip check — KNOWN PRE-EXISTING FAILURES (tracked, out-of-scope gap).
+  #
+  # Tier-stripped trees are currently expected to fail `pytest -q` with 5
+  # specific failures and `ruff check .` with 2 specific residual errors in
+  # deploy/memwatch/analyze_memwatch.py as of this branch. These failures are
+  # pre-existing and were not introduced by the tier-split work.
+  #
+  # Known failing pytest nodes:
+  #   tests/test_alerts.py::TestReaperJob::test_marks_failed_and_alerts
+  #   tests/test_features.py::TestTierDefault::test_no_env_uses_default_tier_4
+  #   tests/test_features.py::TestTierEnv::test_unknown_tier_falls_back_to_default
+  #   tests/test_features.py::TestTierEnv::test_non_numeric_tier_falls_back_to_default
+  #   tests/test_schwab_routes_gating.py::TestSchwabRouteGating::test_default_tier_registers_all_schwab_paths
+  #
+  # Known residual ruff errors:
+  #   deploy/memwatch/analyze_memwatch.py: UP015 (line 58)
+  #   deploy/memwatch/analyze_memwatch.py: B905 (line 149)
   tier-check:
     name: Tier strip check (tier ${{ matrix.tier }})
     runs-on: ubuntu-latest
