@@ -71,6 +71,52 @@ def _images_from_payload(payload: dict) -> list[tuple[str, str]]:
     return seen
 
 
+def _repo_tag_from_image(image: str) -> tuple[str, str]:
+    """Parse an image reference into (repo, tag) using the same rule as
+    _images_from_payload: split on the last colon, defaulting to 'latest'
+    when there is no colon.
+    """
+    repo, sep, tag = image.rpartition(":")
+    if not sep:
+        repo, tag = image, "latest"
+    return (repo, tag)
+
+
+def _build_latest_ids(
+    images: list[tuple[str, str]],
+    fetch_info,
+) -> dict[tuple[str, str], str]:
+    """Return a (repo, tag) -> Docker image Id mapping for `images`.
+
+    `fetch_info(repo, tag)` should return the Docker image JSON dict
+    (including an ``Id`` key) for that exact image reference.
+    """
+    latest_ids: dict[tuple[str, str], str] = {}
+    for repo, tag in images:
+        info = fetch_info(repo, tag)
+        latest_ids[(repo, tag)] = info["Id"]
+    return latest_ids
+
+
+def _container_wants_image_id(
+    container: dict,
+    latest_ids: dict[tuple[str, str], str],
+) -> str | None:
+    """Return the latest image Id for `container` if its exact (repo, tag)
+    is known and its current ImageID differs; otherwise None.
+
+    The container's own ``Image`` string is parsed with the same
+    repo-tag rule used throughout this module, so two tags of the same
+    repo are never conflated.
+    """
+    image = container.get("Image") or ""
+    pair = _repo_tag_from_image(image)
+    want = latest_ids.get(pair)
+    if want and container.get("ImageID") != want:
+        return want
+    return None
+
+
 if not TOKEN:
     sys.exit("PORTAINER_TOKEN is not set — export it and re-run (see module docstring).")
 
@@ -150,14 +196,16 @@ print(f"stack id: {stack_id}")
 result = req("PUT", f"/api/stacks/{stack_id}?endpointId={ENDPOINT_ID}", payload)
 print(f"redeployed: {result.get('Name')} status={result.get('Status')}")
 
-# 3. recreate any container still on an older image id
-latest_ids = {}
-for repo, tag in IMAGES:
-    info = req(
+
+def _fetch_image_info(repo: str, tag: str) -> dict:
+    return req(
         "GET",
         f"/api/endpoints/{ENDPOINT_ID}/docker/images/{urllib.request.quote(f'{repo}:{tag}', safe='')}/json",
     )
-    latest_ids[repo] = info["Id"]
+
+
+# 3. recreate any container still on an older image id
+latest_ids = _build_latest_ids(IMAGES, _fetch_image_info)
 
 filters = urllib.request.quote(
     json.dumps({"label": [f"com.docker.compose.project={STACK_NAME}"]})
@@ -168,9 +216,8 @@ containers = req(
 )
 for c in containers:
     name = c["Names"][0].lstrip("/")
-    image = (c.get("Image") or "").split(":")[0]
-    want = latest_ids.get(image)
-    if want and c["ImageID"] != want:
+    want = _container_wants_image_id(c, latest_ids)
+    if want:
         print(f"{name} on {c['ImageID'][:19]}, latest {want[:19]} -> recreating")
         req("POST", f"/api/docker/{ENDPOINT_ID}/containers/{c['Id']}/recreate", {"PullImage": False})
         print("  recreated")

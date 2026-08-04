@@ -32,6 +32,28 @@ def _load_images_from_payload():
     return namespace["_images_from_payload"]
 
 
+def _load_recreate_helpers():
+    source = _SCRIPT.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(_SCRIPT))
+    wanted = (
+        "_repo_tag_from_image",
+        "_build_latest_ids",
+        "_container_wants_image_id",
+    )
+    segments = {}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in wanted:
+            segments[node.name] = ast.get_source_segment(source, node)
+    func_src = "\n\n".join(segments[name] for name in wanted)
+    namespace = {}
+    exec(compile(func_src, str(_SCRIPT), "exec"), namespace)
+    return (
+        namespace["_repo_tag_from_image"],
+        namespace["_build_latest_ids"],
+        namespace["_container_wants_image_id"],
+    )
+
+
 def _payload(compose_yaml: str) -> dict:
     return {"StackFileContent": compose_yaml, "Env": [], "Prune": False, "PullImage": True}
 
@@ -84,3 +106,47 @@ services:
         ("ghcr.io/jemplayer82/tradingagents", "tier1"),
         ("ghcr.io/jemplayer82/tradingagents-web", "tier1"),
     ]
+
+
+def test_same_repo_two_tags_do_not_collide_in_latest_ids():
+    repo_tag_from_image, build_latest_ids, container_wants_image_id = _load_recreate_helpers()
+    repo = "ghcr.io/jemplayer82/tradingagents"
+    images = [(repo, "latest"), (repo, "tier1")]
+    ids = {
+        (repo, "latest"): "sha256:latest111",
+        (repo, "tier1"): "sha256:tier1111",
+    }
+
+    def fake_fetch(r, t):
+        return {"Id": ids[(r, t)]}
+
+    latest_ids = build_latest_ids(images, fake_fetch)
+
+    # Both tags survive in the lookup: no bare-repo overwrite.
+    assert latest_ids[(repo, "latest")] == ids[(repo, "latest")]
+    assert latest_ids[(repo, "tier1")] == ids[(repo, "tier1")]
+
+    # Container running tier1 resolves to tier1's id, not latest's id.
+    tier1_container = {
+        "Names": ["/ta-tier1"],
+        "Image": f"{repo}:tier1",
+        "ImageID": "sha256:oldtier111",
+    }
+    assert container_wants_image_id(tier1_container, latest_ids) == ids[(repo, "tier1")]
+    assert container_wants_image_id(tier1_container, latest_ids) != ids[(repo, "latest")]
+
+    # Container running latest resolves to latest's id.
+    latest_container = {
+        "Names": ["/ta-latest"],
+        "Image": f"{repo}:latest",
+        "ImageID": "sha256:oldlatest1",
+    }
+    assert container_wants_image_id(latest_container, latest_ids) == ids[(repo, "latest")]
+
+    # A container whose tag is not in the pulled set is not matched at all.
+    unknown_container = {
+        "Names": ["/ta-unknown"],
+        "Image": f"{repo}:experimental",
+        "ImageID": "sha256:experimental",
+    }
+    assert container_wants_image_id(unknown_container, latest_ids) is None
