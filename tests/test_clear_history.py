@@ -60,25 +60,19 @@ class TestDeleteAllSpyScans:
 
 @pytest.mark.unit
 class TestBulkDeleteEndpoints:
+    """web.main-served endpoints only — see test_clear_history_portfolio.py
+    for the web.portfolio_main-served ones (T2+, not importable at T1)."""
+
     @pytest.fixture()
     def api_client(self, monkeypatch):
-        monkeypatch.setenv("INTERNAL_API_TOKEN", "test-secret-token")  # gitleaks:allow
+        monkeypatch.setenv("INTERNAL_API_TOKEN", "test-secret-token")  # gitleaks:allow pragma: allowlist secret
         from fastapi.testclient import TestClient
 
         from web.main import app
         with TestClient(app) as c:
             yield c
 
-    @pytest.fixture()
-    def portfolio_client(self, monkeypatch):
-        monkeypatch.setenv("INTERNAL_API_TOKEN", "test-secret-token")  # gitleaks:allow
-        from fastapi.testclient import TestClient
-
-        from web.portfolio_main import app
-        with TestClient(app) as c:
-            yield c
-
-    _HEADERS = {"x-internal-token": "test-secret-token"}
+    _HEADERS = {"x-internal-token": "test-secret-token"}  # pragma: allowlist secret
 
     def test_delete_all_analyses_endpoint(self, api_client):
         db.create_analysis({"ticker": "AAPL", "trade_date": "2026-07-08"})
@@ -89,26 +83,6 @@ class TestBulkDeleteEndpoints:
         assert resp.status_code == 200
         assert resp.json() == {"status": "deleted", "count": 2}
         assert db.list_analyses() == []
-
-    def test_delete_all_portfolio_scans_endpoint(self, portfolio_client):
-        db.create_portfolio_scan("2026-07-08")
-        db.create_portfolio_scan("2026-07-07")
-
-        resp = portfolio_client.delete("/api/portfolio-scans", headers=self._HEADERS)
-
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "deleted"
-        assert resp.json()["count"] == 2
-        assert db.list_portfolio_scans() == []
-
-    def test_delete_all_spy_scans_endpoint(self, portfolio_client):
-        db.create_spy_scan("2026-07-08")
-
-        resp = portfolio_client.delete("/api/spy-scans", headers=self._HEADERS)
-
-        assert resp.status_code == 200
-        assert resp.json() == {"status": "deleted", "count": 1}
-        assert db.list_spy_scans() == []
 
     def test_single_item_delete_route_still_works(self, api_client):
         """Guard against the zero-vs-one-path-segment routes colliding."""
