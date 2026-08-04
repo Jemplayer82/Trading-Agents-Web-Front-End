@@ -768,7 +768,7 @@ async function refreshSpyPrices(scanId) {
 
 // ===== Tab lifecycle + wiring =====
 
-// "tab-shown" is dispatched by portfolio.js setupTabs() on every tab switch.
+// "tab-shown" is dispatched by utils.js setupTabs() on every tab switch.
 // Leaving this tab stops the 5s poll so a running scan isn't polled invisibly.
 document.addEventListener("tab-shown", (ev) => {
   if (ev.detail === "spy") {

@@ -22,18 +22,84 @@
 // then real accounts with ids namespaced "<provider>:<number>" (e.g.
 // "schwab:12345678"). Selection matches by dataset.id — never by label text.
 //
-// Gotcha: setupTabs() below wires the TOP-LEVEL tab strip for the entire
-// dashboard and dispatches the "tab-shown" document event that app.js / spy.js /
-// credentials.js all listen to. This file is load-bearing for every tab.
+// This is the T2 (Schwab) owner of: applySchwabVisibility (called as
+// window.applySchwabVisibility by credentials.js when the SCHWAB_ENABLED
+// toggle flips — see app.js's header for why that call lives here and not
+// there), the Run Analysis tab's cross-type scan queue (loadAnalyzeQueue,
+// _openRunningScan) and its scan-activity banner (setupScanActivity /
+// pollScanActivity / scanActivity*). These are called from THIS file's own
+// DOMContentLoaded, not app.js's, so a T1 deployment (no portfolio.js) never
+// references them.
 //
 // Globals consumed from utils.js (loaded first): $, escapeHtml, fmtTs,
-// renderMarkdown, progressBar. All top-level names here share the classic-script
-// global scope — don't redeclare utils.js names.
+// renderMarkdown, progressBar. Also DEFINES SCAN_TYPE_TAG / scanTypeKey /
+// renderScanQueue — the shared scan-queue rendering every tab's sidebar uses
+// (this file's own loadAnalyzeQueue, spy.js, options.js) — because the queue
+// concept itself only exists once Schwab/portfolio scans do (T2+). All
+// top-level names here share the classic-script global scope — don't
+// redeclare utils.js names.
 
 let activePortfolioId = null;
 let _accountsData = null;
 let _activeAccountId = "all";
 let portfolioPollTimer = null;
+
+/**
+ * Shared scan-queue rendering for every tab's sidebar. The queue is one global
+ * FIFO (only one scan runs at a time), served by /api/portfolio/status as
+ * { running, queued: [] }. Each item carries scan_type ('portfolio'|'spy') and
+ * kind ('equity'|'options'); scanTypeKey collapses those to a single label key
+ * so a tab can filter to just its own runs — or, on Run Analysis, show them all.
+ */
+const SCAN_TYPE_TAG = { portfolio: "pf", spy: "spy", options: "opt" };
+
+function scanTypeKey(item) {
+  if (!item) return "";
+  if (item.scan_type === "portfolio") return "portfolio";
+  if (item.scan_type === "spy") return item.kind === "options" ? "options" : "spy";
+  return item.scan_type || "";
+}
+
+/**
+ * Render a queue list into `ul` from a /api/portfolio/status payload.
+ *   opts.only  — array of type keys to include (e.g. ["spy"]); omit for all.
+ *   opts.onOpen(item) — click handler for the RUNNING item (optional).
+ */
+function renderScanQueue(ul, data, opts) {
+  if (!ul) return;
+  opts = opts || {};
+  const only = opts.only || null;
+  const running = data && data.running ? [data.running] : [];
+  const queued = (data && data.queued) || [];
+  let items = [...running, ...queued];
+  if (only) items = items.filter((it) => only.includes(scanTypeKey(it)));
+  ul.innerHTML = "";
+  if (!items.length) {
+    ul.innerHTML = '<li class="dim empty">(queue empty)</li>';
+    return;
+  }
+  const runningShown = data && data.running && (!only || only.includes(scanTypeKey(data.running))) ? 1 : 0;
+  items.forEach((item, idx) => {
+    const li = document.createElement("li");
+    li.dataset.id = item.id;
+    const isRunning = data && item === data.running;
+    const label = isRunning ? "RUNNING" : ("#" + (idx - runningShown + 1) + " IN QUEUE");
+    const badgeClass = isRunning ? "HOLD" : "QUEUED";
+    const tag = SCAN_TYPE_TAG[scanTypeKey(item)] || "scan";
+    li.innerHTML =
+      '<span class="h-main">' +
+        '<span class="h-top">' +
+          '<span class="h-tk">' + tag + " #" + item.id + " · " + escapeHtml(item.trade_date || "") + "</span>" +
+          '<span class="h-sig ' + badgeClass + '">' + label + "</span>" +
+        "</span>" +
+        '<span class="h-ts">' + fmtTs(item.created_at) + "</span>" +
+      "</span>";
+    if (isRunning && opts.onOpen) {
+      li.querySelector(".h-main").addEventListener("click", () => opts.onOpen(item));
+    }
+    ul.appendChild(li);
+  });
+}
 
 function stopPortfolioPoll() {
   if (portfolioPollTimer) { clearInterval(portfolioPollTimer); portfolioPollTimer = null; }
@@ -472,28 +538,146 @@ async function loadSchwabStatusLine() {
   }
 }
 
-// ---- Tab strip (whole dashboard) ----
-// Wires the top-level Run Analysis / Portfolio / S&P 500 / Settings tabs and
-// dispatches "tab-shown" (detail = tab name) on every switch. Every module's
-// per-tab refresh hangs off that event — this is dashboard-wide plumbing that
-// happens to live in this file.
-function setupTabs() {
-  document.querySelectorAll(".main-tab").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const name = btn.dataset.tab;
-      document.querySelectorAll(".main-tab").forEach((b) => b.classList.toggle("active", b === btn));
-      document.querySelectorAll(".tab-pane").forEach((p) => {
-        const show = p.dataset.pane === name;
-        p.hidden = !show;
-        p.classList.toggle("active", show);
-      });
-      document.dispatchEvent(new CustomEvent("tab-shown", { detail: name }));
-    });
+// ---- Master Schwab switch ----
+// When off, hide every Schwab surface so users without a brokerage still get
+// reports + the S&P 500 paper builder. Moved from app.js: at T1 (no
+// portfolio.js) there is no Schwab tab to hide in the first place.
+async function applySchwabVisibility(enabledOverride) {
+  // Callers may pass the known master-switch value (e.g. right after saving the
+  // toggle) to skip the /api/auth/schwab/status round-trip, which can block on a
+  // 30s MCP call when Schwab is enabled.
+  let enabled = true;
+  if (typeof enabledOverride === "boolean") {
+    enabled = enabledOverride;
+  } else {
+    try {
+      const s = await (await fetch("/api/auth/schwab/status")).json();
+      enabled = s.enabled !== false;
+    } catch (e) { /* default to showing */ }
+  }
+  const tabBtn = $("tab-portfolio");
+  const acctBtn = $("btn-spy-account");
+  if (tabBtn) tabBtn.style.display = enabled ? "" : "none";
+  if (acctBtn) acctBtn.style.display = enabled ? "" : "none";
+  if (!enabled) {
+    const portPane = document.querySelector('[data-pane="portfolio"]');
+    if (portPane && !portPane.hidden) {
+      document.querySelector('.main-tab[data-tab="analyze"]')?.click();
+    }
+  }
+}
+
+// ---- Run Analysis tab's cross-type scan queue ----
+// The Run Analysis sidebar's "Queue" stab shows EVERY scan type (portfolio,
+// spy, options), not just this tab's own. Moved from app.js because its data
+// source, /api/portfolio/status, is a T2 (portfolio-container) endpoint.
+
+// Jump to a running scan's own tab and open it (queue items are cross-type here).
+function _openRunningScan(item) {
+  const key = scanTypeKey(item);
+  const tab = { portfolio: "portfolio", spy: "spy", options: "options" }[key];
+  if (!tab) return;
+  const tabBtn = document.querySelector(`.main-tab[data-tab="${tab}"]`);
+  if (tabBtn) tabBtn.click();
+  if (key === "portfolio" && typeof loadPortfolioScan === "function") loadPortfolioScan(item.id);
+  else if (key === "spy" && typeof loadSpyScan === "function") loadSpyScan(item.id);
+  else if (key === "options" && typeof loadOptionsScan === "function") loadOptionsScan(item.id);
+}
+
+async function loadAnalyzeQueue() {
+  const ul = $("analyze-queue");
+  if (!ul) return;
+  try {
+    const r = await fetch("/api/portfolio/status");
+    const data = r.ok ? await r.json() : { running: null, queued: [] };
+    renderScanQueue(ul, data, { onOpen: _openRunningScan });  // no `only` → all scan types
+  } catch (e) {
+    ul.innerHTML = `<li class="empty" style="color:var(--accent-red);">${escapeHtml(String(e))}</li>`;
+  }
+}
+
+// ===== Running-scan activity banner =====
+// Surfaces a live progress bar on the Run Analysis tab whenever a Portfolio or
+// S&P 500 scan is running in the portfolio container. The list endpoints live on
+// the portfolio app but nginx routes /api/portfolio* and /api/spy* there, so a
+// plain fetch from here reaches them. Polls every 5s while this tab is visible.
+// Moved from app.js for the same reason as applySchwabVisibility/loadAnalyzeQueue
+// above — both endpoints it polls are T2+.
+
+function setupScanActivity() {
+  const box = $("scan-activity");
+  if (!box) return;
+  // Delegated "view →" link: jump to the owning tab (box is rewritten each poll).
+  box.addEventListener("click", (e) => {
+    const link = e.target.closest(".scan-activity-link");
+    if (!link) return;
+    e.preventDefault();
+    document.querySelector(`.main-tab[data-tab="${link.dataset.tab}"]`)?.click();
   });
+  pollScanActivity();  // analyze is the default tab — poll right away
+  document.addEventListener("tab-shown", (ev) => {
+    if (ev.detail === "analyze") { pollScanActivity(); loadAnalyzeQueue(); }
+  });
+  setInterval(() => {
+    const pane = document.querySelector('[data-pane="analyze"]');
+    if (pane && !pane.hidden) { pollScanActivity(); loadAnalyzeQueue(); }
+  }, 5000);
+}
+
+async function pollScanActivity() {
+  const box = $("scan-activity");
+  if (!box) return;
+  const blocks = [];
+  try {
+    const scans = await (await fetch("/api/portfolio-scans")).json();
+    const run = Array.isArray(scans) ? scans.find((s) => s.status === "running") : null;
+    if (run) blocks.push(scanActivityPortfolio(run));
+  } catch (e) { /* portfolio app unreachable / not authed — skip */ }
+  try {
+    const scans = await (await fetch("/api/spy-scans")).json();
+    const run = Array.isArray(scans) ? scans.find((s) => s.status && s.status.startsWith("running")) : null;
+    if (run) blocks.push(scanActivitySpy(run));
+  } catch (e) { /* skip */ }
+
+  if (!blocks.length) { box.hidden = true; box.innerHTML = ""; return; }
+  box.innerHTML = '<div class="panel-title">[ Scan in progress ]</div>' + blocks.join("");
+  box.hidden = false;
+}
+
+function scanActivityPortfolio(scan) {
+  const sc = scan.scanned_count || 0;
+  const st = scan.scan_total || 0;
+  const ticker = scan.current_ticker ? ` · <strong>${escapeHtml(scan.current_ticker)}</strong>` : "";
+  return (
+    '<div class="scan-activity-row">' +
+      '<div class="scan-activity-head">' +
+        '<a href="#" class="scan-activity-link" data-tab="portfolio">Portfolio scan →</a> ' +
+        `<span class="dim">${sc}/${st} analyzed${ticker}</span>` +
+      "</div>" +
+      progressBar(sc, st) +
+    "</div>"
+  );
+}
+
+function scanActivitySpy(scan) {
+  const qt = scan.quick_total || 500;
+  const qc = scan.quick_count || 0;
+  const dt = scan.deep_total || 50;
+  const dc = scan.deep_count || 0;
+  return (
+    '<div class="scan-activity-row">' +
+      '<div class="scan-activity-head">' +
+        '<a href="#" class="scan-activity-link" data-tab="spy">S&amp;P 500 scan →</a>' +
+      "</div>" +
+      `<div class="scan-activity-sub">Quick ${qc}/${qt}</div>` +
+      progressBar(qc, qt) +
+      `<div class="scan-activity-sub">Deep ${dc}/${dt}</div>` +
+      progressBar(dc, dt) +
+    "</div>"
+  );
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  setupTabs();
   _setupPortfolioStabs();
   $("btn-scan-now")?.addEventListener("click", runScanNow);
   $("portfolio-history-clear-btn")?.addEventListener("click", clearPortfolioHistory);
@@ -513,6 +697,10 @@ document.addEventListener("DOMContentLoaded", () => {
       b.classList.add("active");
     });
   });
+
+  applySchwabVisibility();
+  setupScanActivity();
+  loadAnalyzeQueue();
 });
 
 document.addEventListener("tab-shown", (ev) => {

@@ -8,12 +8,16 @@
   <!-- Script load order block. These are classic (non-module) <script defer> tags
        sharing ONE global scope; defer runs them in document order, so order matters:
          utils.js       shared globals ($, escapeHtml, fmtTs, renderMarkdown,
-                        apiFetch, progressBar) — MUST stay the first /static/ script
+                        apiFetch, progressBar) + setupTabs (the main tab strip,
+                        dispatches "tab-shown") — MUST stay the first /static/ script;
+                        every tier needs it, T1 included
          auth.js        login/setup overlay gate
          schwab-alert.js  full-screen alert when Schwab is enabled but not connected
-         app.js         Run Analysis tab (also defines applySchwabVisibility)
+         app.js         Run Analysis tab — pure T1, no Schwab/scan-queue references
          bus.js         [ Agent Bus ] live feed panel
-         portfolio.js   Portfolio tab + the main tab strip / "tab-shown" event
+         portfolio.js   Portfolio tab; also owns applySchwabVisibility and the Run
+                        Analysis tab's cross-type scan queue/activity banner (T2 data,
+                        so it can't live in app.js — see portfolio.js's header)
          spy.js         S&P 500 tab
          credentials.js Settings tab (IIFE)
        Later scripts must never redeclare a utils.js global — a duplicate top-level
@@ -74,7 +78,7 @@
       </div>
     </div>
   </div>
-  <!-- Topbar: brand, the main tab strip (wired by portfolio.js setupTabs, which
+  <!-- Topbar: brand, the main tab strip (wired by utils.js setupTabs, which
        dispatches "tab-shown"), and the run status / logout corner. -->
   <header class="topbar">
     <div class="brand">
@@ -111,7 +115,7 @@
     <section class="main">
       <!-- Surfaces a live progress bar here whenever a Portfolio or S&P 500
            scan is running in the other tabs / portfolio container. Populated +
-           shown/hidden by pollScanActivity() in app.js. -->
+           shown/hidden by pollScanActivity() in portfolio.js. -->
       <div class="panel" id="scan-activity" hidden></div>
 
       <div class="panel form-panel">

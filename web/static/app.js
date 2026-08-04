@@ -15,8 +15,6 @@
 //   GET    /api/analyses/{id}/chart-data   point-in-time OHLC + indicators
 //   POST   /api/analyses/{id}/ask          Q&A about a saved run
 //   GET    /api/ticker-info/{ticker}       company name / website header
-//   GET    /api/auth/schwab/status         master Schwab switch (can be slow — see
-//                                          applySchwabVisibility)
 //   WS     /api/analyze                    the run itself
 //
 // WebSocket frames (see handleFrame): started, status, report_update, messages,
@@ -25,11 +23,13 @@
 //
 // Classic <script defer> file sharing ONE global scope with the other modules —
 // see the utils.js header. Consumes $, escapeHtml, fmtTs, renderMarkdown from
-// utils.js; never redeclare those names at top level here. Defines
-// applySchwabVisibility (called as window.applySchwabVisibility by credentials.js
-// when the SCHWAB_ENABLED toggle flips). Dispatches the "analysis-started" window
-// event (consumed by bus.js to join the run's bus channel) and listens for
-// "load-analysis" (dispatched by portfolio.js / spy.js cross-links).
+// utils.js; never redeclare those names at top level here. Pure T1 (single-
+// ticker analysis) — no Schwab/scan-queue references; those live in
+// portfolio.js and are called from ITS OWN DOMContentLoaded, not this file's,
+// so a T1 deployment that never loads portfolio.js still works. Dispatches the
+// "analysis-started" window event (consumed by bus.js to join the run's bus
+// channel) and listens for "load-analysis" (dispatched by portfolio.js /
+// spy.js cross-links).
 
 // The 9 report tabs, in display order: [state key, tab label]. The two debate
 // keys have no direct report field — they're synthesized in debateToMarkdown().
@@ -70,7 +70,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   await loadPreferences();
   await loadHistory();
   _setupAnalyzeStabs();
-  loadAnalyzeQueue();
   buildReportTabs();
   $("btn-run").addEventListener("click", startRun);
   $("btn-stop").addEventListener("click", stopRun);
@@ -92,7 +91,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   });
   setupTickerSearch();
-  setupScanActivity();
   const rt = $("reasoning-toggle");
   if (rt) {
     rt.addEventListener("click", () => {
@@ -106,35 +104,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   window.addEventListener("load-analysis", (ev) => {
     if (ev.detail != null) loadHistoryItem(ev.detail);
   });
-  applySchwabVisibility();
 });
-
-// Master Schwab switch (SCHWAB_ENABLED): when off, hide every Schwab surface so
-// users without a brokerage still get reports + the S&P 500 paper builder.
-async function applySchwabVisibility(enabledOverride) {
-  // Callers may pass the known master-switch value (e.g. right after saving the
-  // toggle) to skip the /api/auth/schwab/status round-trip, which can block on a
-  // 30s MCP call when Schwab is enabled.
-  let enabled = true;
-  if (typeof enabledOverride === "boolean") {
-    enabled = enabledOverride;
-  } else {
-    try {
-      const s = await (await fetch("/api/auth/schwab/status")).json();
-      enabled = s.enabled !== false;
-    } catch (e) { /* default to showing */ }
-  }
-  const tabBtn = $("tab-portfolio");
-  const acctBtn = $("btn-spy-account");
-  if (tabBtn) tabBtn.style.display = enabled ? "" : "none";
-  if (acctBtn) acctBtn.style.display = enabled ? "" : "none";
-  if (!enabled) {
-    const portPane = document.querySelector('[data-pane="portfolio"]');
-    if (portPane && !portPane.hidden) {
-      document.querySelector('.main-tab[data-tab="analyze"]')?.click();
-    }
-  }
-}
 
 // Fetch + render the company name and website link for the loaded analysis.
 async function showCompanyHeader(ticker) {
@@ -352,30 +322,6 @@ function _setupAnalyzeStabs() {
   });
 }
 
-// Jump to a running scan's own tab and open it (queue items are cross-type here).
-function _openRunningScan(item) {
-  const key = scanTypeKey(item);
-  const tab = { portfolio: "portfolio", spy: "spy", options: "options" }[key];
-  if (!tab) return;
-  const tabBtn = document.querySelector(`.main-tab[data-tab="${tab}"]`);
-  if (tabBtn) tabBtn.click();
-  if (key === "portfolio" && typeof loadPortfolioScan === "function") loadPortfolioScan(item.id);
-  else if (key === "spy" && typeof loadSpyScan === "function") loadSpyScan(item.id);
-  else if (key === "options" && typeof loadOptionsScan === "function") loadOptionsScan(item.id);
-}
-
-async function loadAnalyzeQueue() {
-  const ul = $("analyze-queue");
-  if (!ul) return;
-  try {
-    const r = await fetch("/api/portfolio/status");
-    const data = r.ok ? await r.json() : { running: null, queued: [] };
-    renderScanQueue(ul, data, { onOpen: _openRunningScan });  // no `only` → all scan types
-  } catch (e) {
-    ul.innerHTML = `<li class="empty" style="color:var(--accent-red);">${escapeHtml(String(e))}</li>`;
-  }
-}
-
 async function loadHistoryItem(id) {
   activeHistoryId = id;
   document.querySelectorAll("#history li").forEach((li) => {
@@ -539,85 +485,6 @@ function hideTickerSuggest() {
   if (box) { box.hidden = true; box.innerHTML = ""; }
   tickerSuggestItems = [];
   tickerSuggestActive = -1;
-}
-
-// ===== Running-scan activity banner =====
-// Surfaces a live progress bar on the Run Analysis tab whenever a Portfolio or
-// S&P 500 scan is running in the portfolio container. The list endpoints live on
-// the portfolio app but nginx routes /api/portfolio* and /api/spy* there, so a
-// plain fetch from here reaches them. Polls every 5s while this tab is visible.
-
-function setupScanActivity() {
-  const box = $("scan-activity");
-  if (!box) return;
-  // Delegated "view →" link: jump to the owning tab (box is rewritten each poll).
-  box.addEventListener("click", (e) => {
-    const link = e.target.closest(".scan-activity-link");
-    if (!link) return;
-    e.preventDefault();
-    document.querySelector(`.main-tab[data-tab="${link.dataset.tab}"]`)?.click();
-  });
-  pollScanActivity();  // analyze is the default tab — poll right away
-  document.addEventListener("tab-shown", (ev) => {
-    if (ev.detail === "analyze") { pollScanActivity(); loadAnalyzeQueue(); }
-  });
-  setInterval(() => {
-    const pane = document.querySelector('[data-pane="analyze"]');
-    if (pane && !pane.hidden) { pollScanActivity(); loadAnalyzeQueue(); }
-  }, 5000);
-}
-
-async function pollScanActivity() {
-  const box = $("scan-activity");
-  if (!box) return;
-  const blocks = [];
-  try {
-    const scans = await (await fetch("/api/portfolio-scans")).json();
-    const run = Array.isArray(scans) ? scans.find((s) => s.status === "running") : null;
-    if (run) blocks.push(scanActivityPortfolio(run));
-  } catch (e) { /* portfolio app unreachable / not authed — skip */ }
-  try {
-    const scans = await (await fetch("/api/spy-scans")).json();
-    const run = Array.isArray(scans) ? scans.find((s) => s.status && s.status.startsWith("running")) : null;
-    if (run) blocks.push(scanActivitySpy(run));
-  } catch (e) { /* skip */ }
-
-  if (!blocks.length) { box.hidden = true; box.innerHTML = ""; return; }
-  box.innerHTML = '<div class="panel-title">[ Scan in progress ]</div>' + blocks.join("");
-  box.hidden = false;
-}
-
-function scanActivityPortfolio(scan) {
-  const sc = scan.scanned_count || 0;
-  const st = scan.scan_total || 0;
-  const ticker = scan.current_ticker ? ` · <strong>${escapeHtml(scan.current_ticker)}</strong>` : "";
-  return (
-    '<div class="scan-activity-row">' +
-      '<div class="scan-activity-head">' +
-        '<a href="#" class="scan-activity-link" data-tab="portfolio">Portfolio scan →</a> ' +
-        `<span class="dim">${sc}/${st} analyzed${ticker}</span>` +
-      "</div>" +
-      progressBar(sc, st) +
-    "</div>"
-  );
-}
-
-function scanActivitySpy(scan) {
-  const qt = scan.quick_total || 500;
-  const qc = scan.quick_count || 0;
-  const dt = scan.deep_total || 50;
-  const dc = scan.deep_count || 0;
-  return (
-    '<div class="scan-activity-row">' +
-      '<div class="scan-activity-head">' +
-        '<a href="#" class="scan-activity-link" data-tab="spy">S&amp;P 500 scan →</a>' +
-      "</div>" +
-      `<div class="scan-activity-sub">Quick ${qc}/${qt}</div>` +
-      progressBar(qc, qt) +
-      `<div class="scan-activity-sub">Deep ${dc}/${dt}</div>` +
-      progressBar(dc, dt) +
-    "</div>"
-  );
 }
 
 // ===== Run lifecycle (WebSocket) =====

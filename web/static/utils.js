@@ -15,7 +15,8 @@
 //      historically why the modules used divergent aliases like `$$p` / `$$spy`.)
 //
 // Shared globals defined here: $, escapeHtml, renderMarkdown, fmtTs, apiFetch,
-// progressBar.
+// progressBar, setupTabs (the whole dashboard's tab strip — every tier needs it,
+// so it lives here rather than in any one tab's file).
 //
 // Escape-at-render discipline (project-wide): every interpolation of server- or
 // LLM-sourced data into an HTML string must pass through escapeHtml(); LLM-authored
@@ -94,58 +95,25 @@ function progressBar(count, total) {
 }
 
 /**
- * Shared scan-queue rendering for every tab's sidebar. The queue is one global
- * FIFO (only one scan runs at a time), served by /api/portfolio/status as
- * { running, queued: [] }. Each item carries scan_type ('portfolio'|'spy') and
- * kind ('equity'|'options'); scanTypeKey collapses those to a single label key
- * so a tab can filter to just its own runs — or, on Run Analysis, show them all.
+ * Wires the top-level Run Analysis / Portfolio / S&P 500 / Options / Settings
+ * tabs and dispatches "tab-shown" (detail = tab name) on every switch. Every
+ * module's per-tab refresh hangs off that event. Lives here (not in any one
+ * tab's own file) because it's dashboard-wide plumbing every tier needs —
+ * a T1-only deployment still has to switch between Run Analysis and Settings.
  */
-const SCAN_TYPE_TAG = { portfolio: "pf", spy: "spy", options: "opt" };
-
-function scanTypeKey(item) {
-  if (!item) return "";
-  if (item.scan_type === "portfolio") return "portfolio";
-  if (item.scan_type === "spy") return item.kind === "options" ? "options" : "spy";
-  return item.scan_type || "";
-}
-
-/**
- * Render a queue list into `ul` from a /api/portfolio/status payload.
- *   opts.only  — array of type keys to include (e.g. ["spy"]); omit for all.
- *   opts.onOpen(item) — click handler for the RUNNING item (optional).
- */
-function renderScanQueue(ul, data, opts) {
-  if (!ul) return;
-  opts = opts || {};
-  const only = opts.only || null;
-  const running = data && data.running ? [data.running] : [];
-  const queued = (data && data.queued) || [];
-  let items = [...running, ...queued];
-  if (only) items = items.filter((it) => only.includes(scanTypeKey(it)));
-  ul.innerHTML = "";
-  if (!items.length) {
-    ul.innerHTML = '<li class="dim empty">(queue empty)</li>';
-    return;
-  }
-  const runningShown = data && data.running && (!only || only.includes(scanTypeKey(data.running))) ? 1 : 0;
-  items.forEach((item, idx) => {
-    const li = document.createElement("li");
-    li.dataset.id = item.id;
-    const isRunning = data && item === data.running;
-    const label = isRunning ? "RUNNING" : ("#" + (idx - runningShown + 1) + " IN QUEUE");
-    const badgeClass = isRunning ? "HOLD" : "QUEUED";
-    const tag = SCAN_TYPE_TAG[scanTypeKey(item)] || "scan";
-    li.innerHTML =
-      '<span class="h-main">' +
-        '<span class="h-top">' +
-          '<span class="h-tk">' + tag + " #" + item.id + " · " + escapeHtml(item.trade_date || "") + "</span>" +
-          '<span class="h-sig ' + badgeClass + '">' + label + "</span>" +
-        "</span>" +
-        '<span class="h-ts">' + fmtTs(item.created_at) + "</span>" +
-      "</span>";
-    if (isRunning && opts.onOpen) {
-      li.querySelector(".h-main").addEventListener("click", () => opts.onOpen(item));
-    }
-    ul.appendChild(li);
+function setupTabs() {
+  document.querySelectorAll(".main-tab").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const name = btn.dataset.tab;
+      document.querySelectorAll(".main-tab").forEach((b) => b.classList.toggle("active", b === btn));
+      document.querySelectorAll(".tab-pane").forEach((p) => {
+        const show = p.dataset.pane === name;
+        p.hidden = !show;
+        p.classList.toggle("active", show);
+      });
+      document.dispatchEvent(new CustomEvent("tab-shown", { detail: name }));
+    });
   });
 }
+
+document.addEventListener("DOMContentLoaded", setupTabs);
