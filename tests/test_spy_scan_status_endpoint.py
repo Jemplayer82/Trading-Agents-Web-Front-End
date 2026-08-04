@@ -137,9 +137,9 @@ class TestIsAnyScanRunningCoversWaitMarket:
         scan_id = db.create_spy_scan("2026-01-01", kind="options")
         db.update_spy_scan(scan_id, status="running_wait_market")
 
-        from web import portfolio_main
+        from web import scan_queue
         with db.connect() as conn:
-            busy = portfolio_main._is_any_scan_running(conn)
+            busy = scan_queue._is_any_scan_running(conn)
         assert busy is not None, "running_wait_market must be treated as busy"
         assert busy["id"] == scan_id
 
@@ -148,9 +148,9 @@ class TestIsAnyScanRunningCoversWaitMarket:
         db.init_db()
         scan_id = db.create_spy_scan("2026-01-01", kind="options", status="completed")
 
-        from web import portfolio_main
+        from web import scan_queue
         with db.connect() as conn:
-            busy = portfolio_main._is_any_scan_running(conn)
+            busy = scan_queue._is_any_scan_running(conn)
         assert busy is None
         assert scan_id  # keep the id referenced; the assertion is on `busy`
 

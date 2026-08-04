@@ -174,10 +174,10 @@ class TestRunScanProgress:
             _make_fake_position("GOOGL"),
         ]
 
-        from web import portfolio_main
+        from web import portfolio_routes
 
         # Patch the Schwab MCP positions source
-        monkeypatch.setattr(portfolio_main, "_mcp_positions", lambda: fake_positions)
+        monkeypatch.setattr(portfolio_routes, "_mcp_positions", lambda: fake_positions)
 
         # Stub the orchestrator _run_scan actually uses. It imports
         # SwitchboardOrchestrator locally, so patch it at its source module.
@@ -201,13 +201,13 @@ class TestRunScanProgress:
 
         # Stub out the aggregator and complete_portfolio_scan to avoid side effects
         monkeypatch.setattr(
-            portfolio_main.aggregator,
+            portfolio_routes.aggregator,
             "run",
             lambda payload, trade_date, config: "stub aggregator report",
         )
 
         scan_id = db.create_portfolio_scan("2026-01-01")
-        portfolio_main._run_scan(scan_id, "2026-01-01")
+        portfolio_routes._run_scan(scan_id, "2026-01-01")
 
         row = db.get_portfolio_scan(scan_id)
         assert row["scan_total"] == 3, f"expected scan_total=3, got {row['scan_total']}"
@@ -231,9 +231,9 @@ class TestRunScanProgress:
             _make_fake_position("MSFT"),
         ]
 
-        from web import portfolio_main
+        from web import portfolio_routes
 
-        monkeypatch.setattr(portfolio_main, "_mcp_positions", lambda: fake_positions)
+        monkeypatch.setattr(portfolio_routes, "_mcp_positions", lambda: fake_positions)
 
         # Same stub as the sibling test above — _run_scan uses
         # SwitchboardOrchestrator, NOT portfolio_graph.run_single_ticker.
@@ -250,13 +250,13 @@ class TestRunScanProgress:
             "tradingagents.orchestrator.SwitchboardOrchestrator", FakeOrchestrator
         )
         monkeypatch.setattr(
-            portfolio_main.aggregator,
+            portfolio_routes.aggregator,
             "run",
             lambda payload, trade_date, config: "stub report",
         )
 
         scan_id = db.create_portfolio_scan("2026-01-01")
-        portfolio_main._run_scan(scan_id, "2026-01-01")
+        portfolio_routes._run_scan(scan_id, "2026-01-01")
 
         row = db.get_portfolio_scan(scan_id)
         assert row["scan_total"] == 2, f"expected scan_total=2 (options excluded), got {row['scan_total']}"

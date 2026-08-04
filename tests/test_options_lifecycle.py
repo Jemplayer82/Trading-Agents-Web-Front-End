@@ -366,7 +366,7 @@ def test_dequeue_dispatches_options_rows_to_options_thread(tmp_db, monkeypatch):
     the equity pipeline (the queue predates the kind column)."""
     import threading
 
-    from web import portfolio_main
+    from web import options_routes, portfolio_routes, scan_queue, spy_routes
 
     started: dict[str, int] = {}
     done = threading.Event()
@@ -377,9 +377,12 @@ def test_dequeue_dispatches_options_rows_to_options_thread(tmp_db, monkeypatch):
             done.set()
         return _target
 
-    monkeypatch.setattr(portfolio_main, "_run_options_scan_thread", _rec("options"))
-    monkeypatch.setattr(portfolio_main, "_run_spy_scan_thread", _rec("equity"))
-    monkeypatch.setattr(portfolio_main, "_run_scan_thread", _rec("portfolio"))
+    # These patches are also what proves scan_queue's runner registry resolves
+    # its target with a live getattr at dispatch time — a reference captured at
+    # register_runner() time would run the real worker instead.
+    monkeypatch.setattr(options_routes, "_run_options_scan_thread", _rec("options"))
+    monkeypatch.setattr(spy_routes, "_run_spy_scan_thread", _rec("equity"))
+    monkeypatch.setattr(portfolio_routes, "_run_scan_thread", _rec("portfolio"))
 
     acct = db.create_paper_account("Q Opt", kind="options")
     opt = db.create_spy_scan("2026-07-17", paper_account_id=acct,
@@ -389,7 +392,7 @@ def test_dequeue_dispatches_options_rows_to_options_thread(tmp_db, monkeypatch):
         conn.execute("UPDATE spy_scans SET created_at = '2026-07-17T00:00:00Z' WHERE id = ?", (opt,))
         conn.execute("UPDATE spy_scans SET created_at = '2026-07-17T00:00:01Z' WHERE id = ?", (eq,))
 
-    portfolio_main._dequeue_next_scan()
+    scan_queue._dequeue_next_scan()
     assert done.wait(5)
     assert started == {"options": opt}
     with db.connect() as conn:
@@ -399,17 +402,17 @@ def test_dequeue_dispatches_options_rows_to_options_thread(tmp_db, monkeypatch):
     # Simulate that run finishing; next dequeue starts the equity row.
     db.update_spy_scan(opt, status="completed")
     done.clear()
-    portfolio_main._dequeue_next_scan()
+    scan_queue._dequeue_next_scan()
     assert done.wait(5)
     assert started["equity"] == eq
 
 
 def test_pending_counts_as_busy(tmp_db):
-    from web import portfolio_main
+    from web import scan_queue
 
     db.create_spy_scan("2026-07-17", kind="options")  # status 'pending'
     with db.connect() as conn:
-        busy = portfolio_main._is_any_scan_running(conn)
+        busy = scan_queue._is_any_scan_running(conn)
     assert busy is not None and busy["scan_type"] == "spy"
 
 
@@ -420,7 +423,7 @@ def test_advance_queue_starts_next_when_idle(tmp_db, monkeypatch):
     the production wedge (equity scan #10 stuck 'queued' behind a crashed run)."""
     import threading
 
-    from web import portfolio_main
+    from web import scan_queue, spy_routes
 
     started: dict[str, int] = {}
     done = threading.Event()
@@ -431,10 +434,10 @@ def test_advance_queue_starts_next_when_idle(tmp_db, monkeypatch):
             done.set()
         return _t
 
-    monkeypatch.setattr(portfolio_main, "_run_spy_scan_thread", _rec("equity"))
+    monkeypatch.setattr(spy_routes, "_run_spy_scan_thread", _rec("equity"))
     q = db.create_spy_scan("2026-07-17", status="queued", kind="equity")
 
-    kicked = portfolio_main._advance_queue_if_idle()
+    kicked = scan_queue._advance_queue_if_idle()
     assert done.wait(5)
     assert started == {"equity": q}
     assert kicked is not None and kicked["id"] == q
@@ -443,13 +446,13 @@ def test_advance_queue_starts_next_when_idle(tmp_db, monkeypatch):
 def test_advance_queue_noop_when_busy(tmp_db, monkeypatch):
     """Advancing must not start a second scan while one is already running —
     otherwise the reaper's recovery kick could double-start a live scan."""
-    from web import portfolio_main
+    from web import scan_queue
 
     calls: list[int] = []
-    monkeypatch.setattr(portfolio_main, "_dequeue_next_scan", lambda: calls.append(1))
+    monkeypatch.setattr(scan_queue, "_dequeue_next_scan", lambda: calls.append(1))
     db.create_spy_scan("2026-07-17", status="running_quick", kind="options")  # busy
 
-    assert portfolio_main._advance_queue_if_idle() is None
+    assert scan_queue._advance_queue_if_idle() is None
     assert calls == [], "must not dequeue while a scan is running"
 
 
