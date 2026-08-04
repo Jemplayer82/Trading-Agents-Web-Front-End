@@ -183,6 +183,14 @@ if proc.returncode != 0:
     sys.exit("render failed — aborting deploy.")
 payload = json.loads(Path(PAYLOAD_OUT).read_text(encoding="utf-8"))
 IMAGES = _images_from_payload(payload)
+if not IMAGES:
+    sys.exit(
+        "ABORT: zero first-party tradingagents images were found in the rendered "
+        "payload's StackFileContent. Expected at least one service image starting with "
+        "'ghcr.io/jemplayer82/tradingagents'. The render likely doesn't match the "
+        "expected image prefix — investigate before deploying. No images pulled, "
+        "no PUT, and no containers recreated."
+    )
 
 # 1. pull both images (public)
 for repo, tag in IMAGES:
