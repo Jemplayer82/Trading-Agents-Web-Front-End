@@ -1,7 +1,7 @@
 """Regression test for scripts/redeploy.py's image derivation — proves the
 new payload-driven logic produces the same image list the old hardcoded
-IMAGES tuple did for a standard :latest master/tier4 render, and is
-tag-aware for tier renders.
+IMAGES tuple did for a standard :latest render, and correctly handles
+non-":latest" tags as generic tag-aware parsing.
 
 redeploy.py has a real side effect at import time (TOKEN sys.exit check, at
 module scope) so this test extracts and execs just the
@@ -90,7 +90,10 @@ services:
     assert result == [(repo, "latest") for repo in legacy_hardcoded_tuple]
 
 
-def test_picks_up_non_latest_tier_tags():
+def test_picks_up_non_latest_tags():
+    """Tag values like "tier1" are just example non-":latest" data — this
+    exercises generic tag parsing, not a wired tier-deploy code path.
+    """
     images_from_payload = _load_images_from_payload()
     compose_yaml = """
 services:

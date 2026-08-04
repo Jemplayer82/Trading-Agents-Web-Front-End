@@ -52,8 +52,8 @@ def _images_from_payload(payload: dict) -> list[tuple[str, str]]:
     the same compose file like switchboard/ollama), and de-duplicates while
     preserving first-seen order so a :latest-tagged payload derives exactly
     the historical hardcoded (tradingagents, tradingagents-web) pair, in the
-    same order. Tag-aware, not hardcoded to ":latest" — a tier build's
-    compose may tag images differently.
+    same order. Tag-aware in general: it derives the repo and tag actually
+    specified by each service's `image:` field rather than assuming ":latest".
     """
     prefix = "ghcr.io/jemplayer82/tradingagents"
     compose = yaml.safe_load(payload["StackFileContent"]) or {}
