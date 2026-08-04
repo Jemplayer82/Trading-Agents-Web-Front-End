@@ -47,5 +47,6 @@ jobs:
           tags: |
             ${{ matrix.image }}:latest
             ${{ matrix.image }}:${{ github.sha }}
+            ${{ matrix.image }}:tier4
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
