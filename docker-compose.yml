@@ -26,13 +26,16 @@ services:
     pull_policy: always
     entrypoint: ["uvicorn", "web.main:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
+      TIER: ${TIER:-4}
       LLM_PROVIDER: ollama
       TRADINGAGENTS_LLM_PROVIDER: ollama
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY}
+      # TIER:2 BEGIN
       SCHWAB_APP_KEY: ${SCHWAB_APP_KEY}
       SCHWAB_APP_SECRET: ${SCHWAB_APP_SECRET}
       SCHWAB_CALLBACK_URL: ${SCHWAB_CALLBACK_URL}
+      # TIER:2 END
       SCHWAB_MCP_URL: ${SCHWAB_MCP_URL:-http://192.168.7.50:3105/mcp}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
       SWITCHBOARD_URL: http://switchboard:3107
@@ -47,7 +50,11 @@ services:
     depends_on:
       - switchboard
 
+  # TIER:2 BEGIN
   # Portfolio scan backend — separate container so long scans don't block ad-hoc.
+  # Only exists from tier 2 up; at tier 2/3/4 it's the SAME image/entrypoint,
+  # differing only in which route modules TIER makes it mount at runtime (see
+  # web/features.py, web/portfolio_main.py).
   # mem_limit + reduced scan concurrency: the host is a 11.5 GB VM already ~67%
   # full at idle across 33 containers, so a large options quick-scan's memory
   # growth used to tip it into a HOST-level OOM that SIGKILLed this process with
@@ -60,6 +67,7 @@ services:
     entrypoint: ["uvicorn", "web.portfolio_main:app", "--host", "0.0.0.0", "--port", "8000"]
     mem_limit: 4g
     environment:
+      TIER: ${TIER:-4}
       LLM_PROVIDER: ollama
       TRADINGAGENTS_LLM_PROVIDER: ollama
       # Caps concurrent deep-dive worker threads (web/spy_scanner.py
@@ -85,6 +93,7 @@ services:
     restart: unless-stopped
     depends_on:
       - tradingagents-api
+  # TIER:2 END
 
   # Cron daemon — fires nightly scan + 5am newsletter + hourly token health.
   tradingagents-scheduler:
@@ -92,6 +101,7 @@ services:
     pull_policy: always
     entrypoint: ["python", "-m", "web.scheduler"]
     environment:
+      TIER: ${TIER:-4}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY}
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN}
       FRED_NOTIFY_URL: ${FRED_NOTIFY_URL}
@@ -118,18 +128,23 @@ services:
       - tradingagents_data:/home/appuser/.tradingagents
     restart: unless-stopped
     depends_on:
+      - tradingagents-api
+      # TIER:2 BEGIN
       - tradingagents-portfolio
+      # TIER:2 END
 
   # Pure nginx frontend — no secrets, just static files + reverse proxy.
   tradingagents-web:
     image: ghcr.io/jemplayer82/tradingagents-web:latest
     pull_policy: always
     ports:
-      - "8080:8000"
+      - "${WEB_PORT:-8080}:8000"
     restart: unless-stopped
     depends_on:
       - tradingagents-api
+      # TIER:2 BEGIN
       - tradingagents-portfolio
+      # TIER:2 END
 
   # Agent message bus — the dashboard streams it via /api/bus, AND it's exposed
   # on host port 3109 so an external Claude CLI (or other off-stack agent) can
@@ -142,7 +157,7 @@ services:
       SWITCHBOARD_MCP_TOKEN: ${SWITCHBOARD_MCP_TOKEN:?SWITCHBOARD_MCP_TOKEN required}
       SWITCHBOARD_DB_PATH: /data/switchboard.db
     ports:
-      - "3109:3107"   # external bus access (3109 host-side: 3107/3108 used by mcp-shared)
+      - "${BUS_PORT:-3109}:3107"   # external bus access (3109 host-side default: 3107/3108 used by mcp-shared)
     volumes:
       - switchboard_data:/data
     restart: unless-stopped

@@ -30,13 +30,21 @@
   <!-- DOMPurify sanitizes LLM-authored markdown before it reaches innerHTML. -->
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.7/dist/purify.min.js" defer></script>
   <script src="/static/auth.js" defer></script>
+  <!-- TIER:2 BEGIN -->
   <script src="/static/schwab-alert.js" defer></script>
+  <!-- TIER:2 END -->
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js" defer></script>
   <script src="/static/app.js" defer></script>
   <script src="/static/bus.js" defer></script>
+  <!-- TIER:2 BEGIN -->
   <script src="/static/portfolio.js" defer></script>
+  <!-- TIER:2 END -->
+  <!-- TIER:3 BEGIN -->
   <script src="/static/spy.js" defer></script>
+  <!-- TIER:3 END -->
+  <!-- TIER:4 BEGIN -->
   <script src="/static/options.js" defer></script>
+  <!-- TIER:4 END -->
   <script src="/static/credentials.js" defer></script>
 </head>
 <body>
@@ -61,6 +69,7 @@
       </form>
     </div>
   </div>
+  <!-- TIER:2 BEGIN -->
   <!-- Schwab-down alert. schwab-alert.js shows this whenever /api/auth/schwab/status
        reports enabled+not-connected — checked on load and every few minutes while
        the tab stays open. Dismissible per-view; reappears next load/recheck until
@@ -78,6 +87,7 @@
       </div>
     </div>
   </div>
+  <!-- TIER:2 END -->
   <!-- Topbar: brand, the main tab strip (wired by utils.js setupTabs, which
        dispatches "tab-shown"), and the run status / logout corner. -->
   <header class="topbar">
@@ -88,9 +98,15 @@
     </div>
     <nav class="tab-strip" id="main-tabs">
       <button class="main-tab active" data-tab="analyze">Run Analysis</button>
+      <!-- TIER:2 BEGIN -->
       <button class="main-tab" id="tab-portfolio" data-tab="portfolio">Portfolio Scan</button>
+      <!-- TIER:2 END -->
+      <!-- TIER:3 BEGIN -->
       <button class="main-tab" data-tab="spy">S&amp;P 500</button>
+      <!-- TIER:3 END -->
+      <!-- TIER:4 BEGIN -->
       <button class="main-tab" data-tab="options">Options</button>
+      <!-- TIER:4 END -->
       <button class="main-tab" data-tab="keys">Settings</button>
     </nav>
     <div class="stats">
@@ -104,19 +120,25 @@
   <main class="layout tab-pane active" data-pane="analyze">
     <aside class="sidebar panel">
       <div class="sidebar-tabs">
+        <!-- TIER:2 BEGIN -->
         <button class="stab" data-stab-target="analyze-queue">Queue</button>
+        <!-- TIER:2 END -->
         <button class="stab active" data-stab-target="history">History</button>
         <button id="history-clear-btn" class="panel-action" title="Clear all history" style="margin-left:auto;">clear</button>
       </div>
+      <!-- TIER:2 BEGIN -->
       <ul id="analyze-queue" class="history" hidden></ul>
+      <!-- TIER:2 END -->
       <ul id="history" class="history"></ul>
     </aside>
 
     <section class="main">
+      <!-- TIER:2 BEGIN -->
       <!-- Surfaces a live progress bar here whenever a Portfolio or S&P 500
            scan is running in the other tabs / portfolio container. Populated +
            shown/hidden by pollScanActivity() in portfolio.js. -->
       <div class="panel" id="scan-activity" hidden></div>
+      <!-- TIER:2 END -->
 
       <div class="panel form-panel">
         <div class="panel-title">[ Run Analysis ]</div>
@@ -236,6 +258,7 @@
     </section>
   </main>
 
+  <!-- TIER:2 BEGIN -->
   <!-- ===== TAB: Portfolio Scan (portfolio.js) =====
        #portfolio-tickers hosts BOTH live holding cards and historical scan-result
        cards — whichever rendered last wins (see portfolio.js header). -->
@@ -297,7 +320,9 @@
       </div>
     </section>
   </main>
+  <!-- TIER:2 END -->
 
+  <!-- TIER:3 BEGIN -->
   <!-- ===== TAB: S&P 500 Portfolio Builder (spy.js) =====
        #spy-main is rebuilt wholesale by spy.js renderSpyScan on each load/poll. -->
   <main class="layout tab-pane" data-pane="spy" hidden>
@@ -367,7 +392,9 @@
       <div id="spy-main"></div>
     </section>
   </main>
+  <!-- TIER:3 END -->
 
+  <!-- TIER:4 BEGIN -->
   <!-- ===== TAB: Options paper trading (options.js) =====
        #options-main is rebuilt wholesale by options.js renderOptionsScan. -->
   <main class="layout tab-pane" data-pane="options" hidden>
@@ -450,6 +477,7 @@
       <div id="options-main"></div>
     </section>
   </main>
+  <!-- TIER:4 END -->
 
   <!-- ===== TAB: Settings / API Keys (credentials.js; pane name is "keys") ===== -->
   <main class="layout single tab-pane" data-pane="keys" hidden>
