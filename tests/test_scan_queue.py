@@ -144,7 +144,11 @@ class TestPortfolioAppTierGating:
         importlib.reload(portfolio_main)
 
     def test_default_tier_has_every_path(self, app_paths):
-        paths = app_paths()
+        # Force every feature on explicitly rather than relying on
+        # DEFAULT_TIER, which scripts/make_tier.py rewrites to 1/2/3 on a
+        # stripped tier tree — this test's intent is "every path exists when
+        # every feature is enabled," true at any DEFAULT_TIER.
+        paths = app_paths(FEATURES="schwab,sp500,options")
         assert {
             "/api/health", "/api/auth/schwab/status", "/api/portfolio-scan",
             "/api/portfolio-scans", "/api/portfolio-scans/{scan_id}",

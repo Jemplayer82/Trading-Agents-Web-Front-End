@@ -5,9 +5,11 @@ counterparts and the shared db.py-level tests.
 """
 from __future__ import annotations
 
+import importlib
+
 import pytest
 
-from web import db
+from web import db, features, portfolio_main
 
 
 @pytest.fixture(autouse=True)
@@ -21,11 +23,21 @@ class TestBulkDeletePortfolioEndpoints:
     @pytest.fixture()
     def portfolio_client(self, monkeypatch):
         monkeypatch.setenv("INTERNAL_API_TOKEN", "test-secret-token")  # gitleaks:allow pragma: allowlist secret
+        # Force every feature on and reload: web.portfolio_main may already be
+        # cached (imported by an earlier test) with whatever DEFAULT_TIER was
+        # active at that point, which scripts/make_tier.py rewrites to 1/2/3
+        # on a stripped tree — these endpoints (incl. the T3 /api/spy-scans
+        # route below) must exist regardless of DEFAULT_TIER.
+        monkeypatch.setenv("FEATURES", "schwab,sp500,options")
+        importlib.reload(features)
+        importlib.reload(portfolio_main)
         from fastapi.testclient import TestClient
 
-        from web.portfolio_main import app
-        with TestClient(app) as c:
+        with TestClient(portfolio_main.app) as c:
             yield c
+        monkeypatch.delenv("FEATURES", raising=False)
+        importlib.reload(features)
+        importlib.reload(portfolio_main)
 
     _HEADERS = {"x-internal-token": "test-secret-token"}  # pragma: allowlist secret
 

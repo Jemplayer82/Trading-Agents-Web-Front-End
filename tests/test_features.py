@@ -15,12 +15,16 @@ def _reload(monkeypatch, **env):
 
 
 class TestTierDefault:
-    def test_no_env_uses_default_tier_4(self, monkeypatch):
+    def test_no_env_matches_default_tier_features(self, monkeypatch):
+        """DEFAULT_TIER is rewritten by scripts/make_tier.py on stripped tier
+        branches (1/2/3) — it's only 4 on master. Compare against the same
+        _TIER_FEATURES source of truth the code uses, not a hardcoded literal,
+        so this holds on every tier."""
         f = _reload(monkeypatch)
-        assert f.DEFAULT_TIER == 4
-        assert f.enabled("schwab")
-        assert f.enabled("sp500")
-        assert f.enabled("options")
+        expected = f._TIER_FEATURES[f.DEFAULT_TIER]
+        assert f.enabled("schwab") == ("schwab" in expected)
+        assert f.enabled("sp500") == ("sp500" in expected)
+        assert f.enabled("options") == ("options" in expected)
 
 
 class TestTierEnv:
@@ -49,12 +53,18 @@ class TestTierEnv:
         assert f.enabled("options")
 
     def test_unknown_tier_falls_back_to_default(self, monkeypatch):
+        # Compare against the no-env baseline (== DEFAULT_TIER's behavior)
+        # rather than a hardcoded tier, so this holds on every stripped tier.
+        baseline = _reload(monkeypatch)
+        baseline_features = {f: baseline.enabled(f) for f in ("schwab", "sp500", "options")}
         f = _reload(monkeypatch, TIER="99")
-        assert f.enabled("options")  # DEFAULT_TIER == 4
+        assert {k: f.enabled(k) for k in baseline_features} == baseline_features
 
     def test_non_numeric_tier_falls_back_to_default(self, monkeypatch):
+        baseline = _reload(monkeypatch)
+        baseline_features = {f: baseline.enabled(f) for f in ("schwab", "sp500", "options")}
         f = _reload(monkeypatch, TIER="bogus")
-        assert f.enabled("options")
+        assert {k: f.enabled(k) for k in baseline_features} == baseline_features
 
 
 class TestFeaturesEnvOverride:

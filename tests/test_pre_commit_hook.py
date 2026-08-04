@@ -1,6 +1,5 @@
 """Regression tests for the tier/* blocking pre-commit hook."""
 
-import os
 import shutil
 import subprocess
 from pathlib import Path

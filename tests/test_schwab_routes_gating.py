@@ -1,7 +1,9 @@
 """Tier-gating parity for the Schwab OAuth routes extracted to schwab_routes.py.
 
-Locks in: at the default tier (master's behavior), web.main.app registers
-exactly the same 3 Schwab paths it always did; at tier 1, none of them exist.
+Locks in: web.main.app registers the 3 Schwab paths iff the "schwab" feature
+is on for the active DEFAULT_TIER (4 on master, rewritten to 1/2/3 by
+scripts/make_tier.py on a stripped tier tree); explicit TIER=1/TIER=2 always
+behave as documented regardless of DEFAULT_TIER.
 """
 from __future__ import annotations
 
@@ -27,9 +29,13 @@ def _app_paths(monkeypatch, **env):
 
 
 class TestSchwabRouteGating:
-    def test_default_tier_registers_all_schwab_paths(self, monkeypatch):
+    def test_default_tier_registers_schwab_paths_iff_enabled(self, monkeypatch):
         paths = _app_paths(monkeypatch)
-        assert _SCHWAB_PATHS <= paths
+        import web.features as features_module  # reloaded by _app_paths above
+        if features_module.enabled("schwab"):
+            assert _SCHWAB_PATHS <= paths
+        else:
+            assert not (paths & _SCHWAB_PATHS)
 
     def test_tier_1_registers_no_schwab_paths(self, monkeypatch):
         paths = _app_paths(monkeypatch, TIER="1")

@@ -200,6 +200,10 @@ class TestFindStuck:
 @pytest.mark.unit
 class TestReaperJob:
     def test_marks_failed_and_alerts(self, monkeypatch, tmp_path):
+        # Portfolio-scan reaping is gated on the "schwab" feature (see
+        # web/scheduler.py job_reap_stuck_runs) — force it on so this test
+        # exercises that path regardless of the active DEFAULT_TIER.
+        monkeypatch.setenv("FEATURES", "schwab")
         monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
         db.init_db()
         stuck = db.create_portfolio_scan("2026-01-02")
