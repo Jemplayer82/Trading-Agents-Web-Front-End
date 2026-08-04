@@ -225,3 +225,6 @@ __marimo__/
 
 # Local Claude Code settings (machine-specific)
 .claude/settings.json
+
+# Pipeline automation logs (kimi-k2.7-code request/response audit trail)
+.pipeline/
