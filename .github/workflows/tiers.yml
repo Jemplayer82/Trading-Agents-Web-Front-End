@@ -46,6 +46,13 @@ jobs:
         with:
           ref: master
 
+      - name: Resolve checked-out master SHA
+        if: steps.select.outputs.run == 'true'
+        id: master_sha
+        shell: bash
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Install uv
         if: steps.select.outputs.run == 'true'
         uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5
@@ -93,11 +100,13 @@ jobs:
       # extra repo secret, which this project intentionally avoids.
       - name: Commit + force-push tier branch
         if: steps.select.outputs.run == 'true'
+        env:
+          MASTER_SHA: ${{ steps.master_sha.outputs.sha }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "tier${{ matrix.tier }}: generated from master@${GITHUB_SHA::12} [skip ci]"
+          git commit -m "tier${{ matrix.tier }}: generated from master@${MASTER_SHA::12} [skip ci]"
           git push --force origin HEAD:tier/${{ matrix.tier }}
 
       - name: Log in to GitHub Container Registry
@@ -121,7 +130,7 @@ jobs:
           push: true
           tags: |
             ghcr.io/jemplayer82/tradingagents:tier${{ matrix.tier }}
-            ghcr.io/jemplayer82/tradingagents:tier${{ matrix.tier }}-${{ github.sha }}
+            ghcr.io/jemplayer82/tradingagents:tier${{ matrix.tier }}-${{ steps.master_sha.outputs.sha }}
           cache-from: type=gha,scope=ghcr.io/jemplayer82/tradingagents
           cache-to: type=gha,mode=min,scope=ghcr.io/jemplayer82/tradingagents
 
@@ -134,6 +143,6 @@ jobs:
           push: true
           tags: |
             ghcr.io/jemplayer82/tradingagents-web:tier${{ matrix.tier }}
-            ghcr.io/jemplayer82/tradingagents-web:tier${{ matrix.tier }}-${{ github.sha }}
+            ghcr.io/jemplayer82/tradingagents-web:tier${{ matrix.tier }}-${{ steps.master_sha.outputs.sha }}
           cache-from: type=gha,scope=ghcr.io/jemplayer82/tradingagents-web
           cache-to: type=gha,mode=min,scope=ghcr.io/jemplayer82/tradingagents-web
