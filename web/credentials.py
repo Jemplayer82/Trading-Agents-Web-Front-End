@@ -98,37 +98,45 @@ def list_meta() -> list[dict[str, Any]]:
 # ===================================================================
 
 # Each entry: key (env var), label, group, secret (mask?), placeholder.
+# T1 groups come first; the TIER:2 block below holds everything that only
+# applies once the "schwab" feature is on (see web/features.py). Order here
+# only affects Settings-page group display order — cosmetic, not functional.
 SETTINGS_REGISTRY: list[dict[str, Any]] = [
+    # Market data
+    {"key": "TECHNICAL_INDICATOR_VENDOR", "label": "Technical indicators source", "group": "Market Data", "secret": False, "type": "select", "options": ["yfinance", "alpha_vantage"], "placeholder": "yfinance = free local calc (Schwab OHLCV feeds it when 'Use Schwab for market data' is on); alpha_vantage = pre-calculated (needs the key below)"},  # pragma: allowlist secret
+    {"key": "ALPHA_VANTAGE_API_KEY", "label": "Alpha Vantage API Key", "group": "Market Data", "secret": True, "placeholder": "Only needed when the indicators source is alpha_vantage"},  # pragma: allowlist secret
+    # Ollama / LLM infra
+    {"key": "OLLAMA_BASE_URL", "label": "Ollama Base URL", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "https://ollama.com/v1 or http://host:11434/v1"},  # pragma: allowlist secret
+    {"key": "OLLAMA_API_KEY", "label": "Ollama API Key", "group": "Ollama & Bus Routing", "secret": True, "placeholder": "Ollama Cloud auth token"},  # pragma: allowlist secret
+    {"key": "OLLAMA_MAX_CONCURRENCY", "label": "Max concurrent LLM analyses", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "Shared concurrency budget across single-ticker analyses and (T3+) the S&P 500 scanner (default 3, floor 1)."},
+    {"key": "SWITCHBOARD_TARGET_AGENT", "label": "Switchboard — LLM handler agent", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "Bus agent that answers LLM requests: 'llm-router' (built-in → Ollama/OpenAI) or 'cleo' (your local free claude -p session)"},  # pragma: allowlist secret
+    # Email / alerts + newsletter — SMTP/FRED_NOTIFY_URL are T1 (run-failure
+    # alerts fire for single-ticker analyses too, see web/alerts.py +
+    # web/mailer.py); NEWSLETTER_* only matter once the T2 morning newsletter
+    # job registers, but the fields are harmless unused at T1.
+    {"key": "SMTP_HOST", "label": "SMTP Host", "group": "Email / Alerts & Newsletter", "secret": False, "placeholder": "smtp.gmail.com"},
+    {"key": "SMTP_PORT", "label": "SMTP Port", "group": "Email / Alerts & Newsletter", "secret": False, "placeholder": "587"},
+    {"key": "SMTP_USER", "label": "SMTP Username", "group": "Email / Alerts & Newsletter", "secret": False, "placeholder": "you@example.com"},
+    {"key": "SMTP_PASS", "label": "SMTP Password", "group": "Email / Alerts & Newsletter", "secret": True, "placeholder": "App password"},  # pragma: allowlist secret
+    {"key": "NEWSLETTER_FROM", "label": "Newsletter From", "group": "Email / Alerts & Newsletter", "secret": False, "placeholder": "defaults to SMTP username"},
+    {"key": "NEWSLETTER_TO", "label": "Newsletter To", "group": "Email / Alerts & Newsletter", "secret": False, "placeholder": "recipient@example.com"},
+    # Notifications
+    {"key": "FRED_NOTIFY_URL", "label": "Notify Webhook URL", "group": "Notifications", "secret": True, "placeholder": "WhatsApp/webhook URL (leave blank to disable)"},  # pragma: allowlist secret
+    # TIER:2 BEGIN
     # Brokerage (Schwab) — data-source switch
     {"key": "SCHWAB_ENABLED", "label": "Data source — Schwab MCP (on) vs free built-in tools (off)", "group": "Brokerage (Schwab)", "secret": False, "type": "toggle", "on_label": "On — Schwab", "off_label": "Off — free / yfinance", "placeholder": "on = Schwab holdings + market data; off hides holdings and uses free yfinance"},
     # Brokerage (Schwab OAuth app credentials)
-    {"key": "SCHWAB_APP_KEY", "label": "Schwab App Key", "group": "Brokerage (Schwab)", "secret": True, "placeholder": "Client ID from the Schwab developer portal"},
-    {"key": "SCHWAB_APP_SECRET", "label": "Schwab App Secret", "group": "Brokerage (Schwab)", "secret": True, "placeholder": "Client secret"},
+    {"key": "SCHWAB_APP_KEY", "label": "Schwab App Key", "group": "Brokerage (Schwab)", "secret": True, "placeholder": "Client ID from the Schwab developer portal"},  # pragma: allowlist secret
+    {"key": "SCHWAB_APP_SECRET", "label": "Schwab App Secret", "group": "Brokerage (Schwab)", "secret": True, "placeholder": "Client secret"},  # pragma: allowlist secret
     {"key": "SCHWAB_CALLBACK_URL", "label": "Schwab Callback URL", "group": "Brokerage (Schwab)", "secret": False, "placeholder": "https://trading.txferguson.net/api/auth/schwab/callback"},
     {"key": "SCHWAB_MCP_URL", "label": "Schwab MCP URL", "group": "Brokerage (Schwab)", "secret": False, "placeholder": "http://100.112.40.124:3105/mcp"},
     {"key": "SCHWAB_MARKET_DATA", "label": "Use Schwab for market data (off = free yfinance)", "group": "Brokerage (Schwab)", "secret": False, "type": "toggle", "on_label": "On — Schwab quotes", "off_label": "Off — yfinance", "placeholder": ""},
-    # Market data
-    {"key": "TECHNICAL_INDICATOR_VENDOR", "label": "Technical indicators source", "group": "Market Data", "secret": False, "type": "select", "options": ["yfinance", "alpha_vantage"], "placeholder": "yfinance = free local calc (Schwab OHLCV feeds it when 'Use Schwab for market data' is on); alpha_vantage = pre-calculated (needs the key below)"},  # pragma: allowlist secret
-    {"key": "ALPHA_VANTAGE_API_KEY", "label": "Alpha Vantage API Key", "group": "Market Data", "secret": True, "placeholder": "Only needed when the indicators source is alpha_vantage"},
-    # Ollama / LLM infra
-    {"key": "OLLAMA_BASE_URL", "label": "Ollama Base URL", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "https://ollama.com/v1 or http://host:11434/v1"},  # pragma: allowlist secret
-    {"key": "OLLAMA_API_KEY", "label": "Ollama API Key", "group": "Ollama & Bus Routing", "secret": True, "placeholder": "Ollama Cloud auth token"},
-    {"key": "OLLAMA_MAX_CONCURRENCY", "label": "S&P scanner max concurrent tickers", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "Max parallel tickers in the S&P 500 scanner (default 3, floor 1). Does not affect portfolio or single-ticker runs."},
-    {"key": "SWITCHBOARD_TARGET_AGENT", "label": "Switchboard — LLM handler agent", "group": "Ollama & Bus Routing", "secret": False, "placeholder": "Bus agent that answers LLM requests: 'llm-router' (built-in → Ollama/OpenAI) or 'cleo' (your local free claude -p session)"},  # pragma: allowlist secret
-    # Email / newsletter
-    {"key": "SMTP_HOST", "label": "SMTP Host", "group": "Email / Newsletter", "secret": False, "placeholder": "smtp.gmail.com"},
-    {"key": "SMTP_PORT", "label": "SMTP Port", "group": "Email / Newsletter", "secret": False, "placeholder": "587"},
-    {"key": "SMTP_USER", "label": "SMTP Username", "group": "Email / Newsletter", "secret": False, "placeholder": "you@example.com"},
-    {"key": "SMTP_PASS", "label": "SMTP Password", "group": "Email / Newsletter", "secret": True, "placeholder": "App password"},
-    {"key": "NEWSLETTER_FROM", "label": "Newsletter From", "group": "Email / Newsletter", "secret": False, "placeholder": "defaults to SMTP username"},
-    {"key": "NEWSLETTER_TO", "label": "Newsletter To", "group": "Email / Newsletter", "secret": False, "placeholder": "recipient@example.com"},
-    # Notifications
-    {"key": "FRED_NOTIFY_URL", "label": "Notify Webhook URL", "group": "Notifications", "secret": True, "placeholder": "WhatsApp/webhook URL (leave blank to disable)"},
     # Brokerage (Alpaca) — credential fields stored, no live holdings integration yet
     {"key": "ALPACA_ENABLED", "label": "Alpaca (credential fields only — holdings not yet wired)", "group": "Brokerage (Alpaca)", "secret": False, "type": "toggle", "on_label": "On", "off_label": "Off", "placeholder": ""},
-    {"key": "ALPACA_API_KEY", "label": "Alpaca API Key", "group": "Brokerage (Alpaca)", "secret": True, "placeholder": "API key ID from alpaca.markets"},
-    {"key": "ALPACA_API_SECRET", "label": "Alpaca API Secret", "group": "Brokerage (Alpaca)", "secret": True, "placeholder": "API secret"},
+    {"key": "ALPACA_API_KEY", "label": "Alpaca API Key", "group": "Brokerage (Alpaca)", "secret": True, "placeholder": "API key ID from alpaca.markets"},  # pragma: allowlist secret
+    {"key": "ALPACA_API_SECRET", "label": "Alpaca API Secret", "group": "Brokerage (Alpaca)", "secret": True, "placeholder": "API secret"},  # pragma: allowlist secret
     {"key": "ALPACA_BASE_URL", "label": "Alpaca Base URL", "group": "Brokerage (Alpaca)", "secret": False, "placeholder": "https://api.alpaca.markets"},
+    # TIER:2 END
 ]
 
 _REGISTRY_BY_KEY = {s["key"]: s for s in SETTINGS_REGISTRY}
