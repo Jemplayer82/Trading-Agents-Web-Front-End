@@ -9,7 +9,7 @@ empty).
 
 Flow:
   0. Render payload from docker-compose.yml + .env  -> STACK_PAYLOAD_OUT.
-  1. Pull both :latest images on the endpoint (anonymous; images are public).
+  1. Pull every first-party tradingagents image referenced by the rendered payload (repo+tag derived from the payload, not hardcoded).
   2. PUT the rendered payload to the stack.
   3. Recreate any container still on an older image id (a PUT alone often won't
      recreate just because :latest moved).
@@ -33,16 +33,43 @@ import time
 import urllib.request
 from pathlib import Path
 
+import yaml
+
 BASE = os.environ.get("PORTAINER_URL", "https://192.168.7.50:9443").rstrip("/")
 TOKEN = os.environ.get("PORTAINER_TOKEN")  # pragma: allowlist secret
 ENDPOINT_ID = int(os.environ.get("PORTAINER_ENDPOINT_ID", "3"))
 STACK_NAME = os.environ.get("TRADINGAGENTS_STACK", "tradingagents")
 PAYLOAD_OUT = os.environ.get("STACK_PAYLOAD_OUT", r"C:\tmp\stack67_payload.json")
 RENDER = Path(__file__).resolve().parent / "render_stack_payload.py"
-IMAGES = (
-    "ghcr.io/jemplayer82/tradingagents",
-    "ghcr.io/jemplayer82/tradingagents-web",
-)
+
+
+def _images_from_payload(payload: dict) -> list[tuple[str, str]]:
+    """Derive (repo, tag) pairs to pull/recreate from a rendered stack
+    payload's StackFileContent (the compose YAML Portainer will receive).
+
+    Parses every service's `image:` value, keeps only first-party
+    tradingagents images (prefix match — excludes services riding along in
+    the same compose file like switchboard/ollama), and de-duplicates while
+    preserving first-seen order so a :latest-tagged payload derives exactly
+    the historical hardcoded (tradingagents, tradingagents-web) pair, in the
+    same order. Tag-aware, not hardcoded to ":latest" — a tier build's
+    compose may tag images differently.
+    """
+    prefix = "ghcr.io/jemplayer82/tradingagents"
+    compose = yaml.safe_load(payload["StackFileContent"]) or {}
+    seen: list[tuple[str, str]] = []
+    for svc in (compose.get("services") or {}).values():
+        image = (svc or {}).get("image") or ""
+        if not image.startswith(prefix):
+            continue
+        repo, sep, tag = image.rpartition(":")
+        if not sep:
+            repo, tag = image, "latest"
+        pair = (repo, tag)
+        if pair not in seen:
+            seen.append(pair)
+    return seen
+
 
 if not TOKEN:
     sys.exit("PORTAINER_TOKEN is not set — export it and re-run (see module docstring).")
@@ -109,11 +136,12 @@ proc = subprocess.run([sys.executable, str(RENDER)], env={**os.environ, "STACK_P
 if proc.returncode != 0:
     sys.exit("render failed — aborting deploy.")
 payload = json.loads(Path(PAYLOAD_OUT).read_text(encoding="utf-8"))
+IMAGES = _images_from_payload(payload)
 
 # 1. pull both images (public)
-for image in IMAGES:
-    req("POST", f"/api/endpoints/{ENDPOINT_ID}/docker/images/create?fromImage={image}&tag=latest")
-    print(f"pulled {image}:latest")
+for repo, tag in IMAGES:
+    req("POST", f"/api/endpoints/{ENDPOINT_ID}/docker/images/create?fromImage={repo}&tag={tag}")
+    print(f"pulled {repo}:{tag}")
 
 # 2. locate stack + PUT the rendered payload (secrets are inline literals)
 stacks = req("GET", "/api/stacks")
@@ -124,12 +152,12 @@ print(f"redeployed: {result.get('Name')} status={result.get('Status')}")
 
 # 3. recreate any container still on an older image id
 latest_ids = {}
-for image in IMAGES:
+for repo, tag in IMAGES:
     info = req(
         "GET",
-        f"/api/endpoints/{ENDPOINT_ID}/docker/images/{urllib.request.quote(f'{image}:latest', safe='')}/json",
+        f"/api/endpoints/{ENDPOINT_ID}/docker/images/{urllib.request.quote(f'{repo}:{tag}', safe='')}/json",
     )
-    latest_ids[image] = info["Id"]
+    latest_ids[repo] = info["Id"]
 
 filters = urllib.request.quote(
     json.dumps({"label": [f"com.docker.compose.project={STACK_NAME}"]})
