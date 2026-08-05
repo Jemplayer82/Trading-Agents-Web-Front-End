@@ -55,7 +55,7 @@ for _stream in (sys.stdout, sys.stderr):
 def _open_any(path: str):
     if path.endswith(".gz"):
         return io.TextIOWrapper(gzip.open(path, "rb"), encoding="utf-8", errors="replace")
-    return open(path, "r", encoding="utf-8", errors="replace")
+    return open(path, encoding="utf-8", errors="replace")
 
 
 def load(base_dir: str, name: str) -> list[dict]:
@@ -146,7 +146,7 @@ class Series:
         denom = sum((x - mx) ** 2 for x in xs)
         if denom == 0:
             return 0.0
-        return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / denom
+        return sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True)) / denom
 
 
 def collect(rows: list[dict], key_field: str | None, value_field: str,

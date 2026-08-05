@@ -207,7 +207,7 @@ def compute_options_stats(rows: list[dict[str, Any]], min_closed: int = 10) -> d
     by_reason: dict[str, list[dict[str, Any]]] = {}
     by_dte: dict[str, list[dict[str, Any]]] = {}
     by_delta: dict[str, list[dict[str, Any]]] = {}
-    for r, g in zip(closed, grades):
+    for r, g in zip(closed, grades, strict=True):
         if g.get("exit_reason"):
             by_reason.setdefault(str(g["exit_reason"]), []).append(g)
         b = _bucket_dte(g.get("dte_entry"))
@@ -388,7 +388,7 @@ def run_batch_reflection(
     closed.sort(key=lambda r: r.get("closed_at") or "", reverse=True)
     batch = closed[:batch_max]
     grades = [grade_position(r) for r in batch]
-    lines = [_grade_line(r, g) for r, g in zip(batch, grades)]
+    lines = [_grade_line(r, g) for r, g in zip(batch, grades, strict=True)]
     stats = compute_options_stats(closed, min_closed=1)  # full stats for the record
 
     resp = llm.invoke([

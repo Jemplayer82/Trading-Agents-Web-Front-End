@@ -690,6 +690,7 @@ def test_forced_closes_trail(monkeypatch):
 
 def test_prompt_shows_days_held_and_ride_guidance(monkeypatch):
     from unittest.mock import MagicMock
+
     from web import options_allocator as oa
     llm = MagicMock()
     llm.invoke.return_value = MagicMock(content="[]")

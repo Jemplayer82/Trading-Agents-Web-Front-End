@@ -26,6 +26,7 @@ class TestMarketWaitStatusSplit:
         scan_id = db.create_spy_scan("2026-01-01", kind="options")
 
         from datetime import datetime
+
         from web import options_engine
 
         # A Monday well before market open — the loop must write the wait
@@ -54,6 +55,7 @@ class TestMarketWaitStatusSplit:
         scan_id = db.create_spy_scan("2026-01-01", kind="options")
 
         from datetime import datetime
+
         from web import options_engine
 
         monkeypatch.setattr(
