@@ -23,19 +23,20 @@ class TestBulkDeletePortfolioEndpoints:
     @pytest.fixture()
     def portfolio_client(self, monkeypatch):
         monkeypatch.setenv("INTERNAL_API_TOKEN", "test-secret-token")  # gitleaks:allow pragma: allowlist secret
-        # Force every feature on and reload: web.portfolio_main may already be
-        # cached (imported by an earlier test) with whatever DEFAULT_TIER was
-        # active at that point, which scripts/make_tier.py rewrites to 1/2/3
-        # on a stripped tree — these endpoints (incl. the T3 /api/spy-scans
-        # route below) must exist regardless of DEFAULT_TIER.
-        monkeypatch.setenv("FEATURES", "schwab,sp500,options")
+        # Reload at the physical DEFAULT_TIER (no TIER/FEATURES override):
+        # web.portfolio_main may be cached from an earlier test's reload with a
+        # different env. Forcing every feature on would ImportError below tier
+        # 4 — a stripped tier's route module for a not-enabled feature is
+        # genuinely deleted from disk, not just gated off — so only the
+        # ambient default (whatever's physically here) is safe to reload with.
+        monkeypatch.delenv("TIER", raising=False)
+        monkeypatch.delenv("FEATURES", raising=False)
         importlib.reload(features)
         importlib.reload(portfolio_main)
         from fastapi.testclient import TestClient
 
         with TestClient(portfolio_main.app) as c:
             yield c
-        monkeypatch.delenv("FEATURES", raising=False)
         importlib.reload(features)
         importlib.reload(portfolio_main)
 
@@ -52,6 +53,8 @@ class TestBulkDeletePortfolioEndpoints:
         assert resp.json()["count"] == 2
         assert db.list_portfolio_scans() == []
 
+    @pytest.mark.skipif(features.DEFAULT_TIER < 3,
+                         reason="spy_routes.py isn't physically present below tier 3")
     def test_delete_all_spy_scans_endpoint(self, portfolio_client):
         db.create_spy_scan("2026-07-08")
 

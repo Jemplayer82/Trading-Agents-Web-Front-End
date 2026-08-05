@@ -143,27 +143,38 @@ class TestPortfolioAppTierGating:
         importlib.reload(features)
         importlib.reload(portfolio_main)
 
-    def test_default_tier_has_every_path(self, app_paths):
-        # Force every feature on explicitly rather than relying on
-        # DEFAULT_TIER, which scripts/make_tier.py rewrites to 1/2/3 on a
-        # stripped tier tree — this test's intent is "every path exists when
-        # every feature is enabled," true at any DEFAULT_TIER.
-        paths = app_paths(FEATURES="schwab,sp500,options")
-        assert {
-            "/api/health", "/api/auth/schwab/status", "/api/portfolio-scan",
-            "/api/portfolio-scans", "/api/portfolio-scans/{scan_id}",
-            "/api/portfolio/status", "/api/portfolio/advance-queue",
-            "/api/accounts", "/api/paper-accounts", "/api/spy-scan",
-            "/api/spy-scans", "/api/spy-account", "/api/spy-account/compare",
-            "/api/options-scan", "/api/options-positions", "/api/options-summary",
-        } <= paths
+    def test_default_tier_has_every_path_for_its_features(self, app_paths):
+        # No env override: exercises whatever DEFAULT_TIER is physically on
+        # disk (4 on master, rewritten to 1/2/3 by scripts/make_tier.py on a
+        # stripped tree). Forcing FEATURES beyond what's physically present
+        # would ImportError — a stripped tier's route modules for a
+        # not-enabled feature are genuinely deleted, not just gated off — so
+        # the expected set is derived from features.enabled(), not hardcoded.
+        paths = app_paths()
+        expected = {"/api/health", "/api/auth/schwab/status",
+                    "/api/portfolio/status", "/api/portfolio/advance-queue"}
+        if features.enabled("schwab"):
+            expected |= {"/api/portfolio-scan", "/api/portfolio-scans",
+                         "/api/portfolio-scans/{scan_id}", "/api/accounts"}
+        if features.enabled("sp500"):
+            expected |= {"/api/paper-accounts", "/api/spy-scan", "/api/spy-scans",
+                         "/api/spy-account", "/api/spy-account/compare"}
+        if features.enabled("options"):
+            expected |= {"/api/options-scan", "/api/options-positions", "/api/options-summary"}
+        assert expected <= paths
 
     def test_tier_2_drops_spy_and_options(self, app_paths):
+        # Safe at any physical tier this file runs at (2+, since the whole
+        # file is deleted below tier 2): TIER="2" only needs portfolio_routes.py,
+        # which exists at every physical tier >= 2.
         paths = app_paths(TIER="2")
         assert "/api/portfolio-scan" in paths
         assert "/api/accounts" in paths
         assert not [p for p in paths if p.startswith(("/api/spy", "/api/options", "/api/paper-accounts"))]
 
+    @pytest.mark.skipif(features.DEFAULT_TIER < 3,
+                         reason="spy_routes.py isn't physically present below tier 3 — "
+                                "TIER=3 can't be faked via env once it's deleted")
     def test_tier_3_drops_options_only(self, app_paths):
         paths = app_paths(TIER="3")
         assert "/api/spy-scan" in paths
