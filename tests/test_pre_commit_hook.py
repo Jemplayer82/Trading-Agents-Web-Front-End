@@ -1,4 +1,4 @@
-"""Regression tests for the tier/* blocking pre-commit hook."""
+"""Regression tests for the tier-branch blocking pre-commit hook."""
 
 import shutil
 import subprocess
@@ -61,9 +61,17 @@ def test_pre_commit_hook_allows_non_tier_branch(scratch_repo: Path) -> None:
     assert result.stderr == ""
 
 
-@pytest.mark.parametrize("branch", ["tier/1", "tier/2"])
+@pytest.mark.parametrize(
+    "branch",
+    [
+        "tier-1-base",
+        "tier-2-brokerage",
+        "tier-3-scanner",
+        "tier/1",  # legacy pattern — a stale pre-rename checkout stays protected
+    ],
+)
 def test_pre_commit_hook_blocks_tier_branches(scratch_repo: Path, branch: str) -> None:
-    """tier/* branches are generated artifacts and must be blocked."""
+    """Tier branches are generated artifacts and must be blocked."""
     subprocess.run(
         [GIT, "checkout", "-b", branch],
         cwd=scratch_repo,
@@ -76,5 +84,5 @@ def test_pre_commit_hook_blocks_tier_branches(scratch_repo: Path, branch: str) -
     result = _run_hook(scratch_repo)
     assert result.returncode == 1, result.stderr
     assert "ERROR:" in result.stderr
-    assert "tier/*" in result.stderr
+    assert "tier-*" in result.stderr
     assert "generated" in result.stderr.lower()

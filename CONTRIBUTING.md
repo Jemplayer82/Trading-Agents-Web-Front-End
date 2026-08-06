@@ -1,4 +1,4 @@
-# Contributing to Trading-Agents-Web-Front-End
+# Contributing to ai-trading-desk
 
 Thank you for your interest in contributing! This project is licensed under the
 **GNU Affero General Public License v3.0 (AGPL-3.0)** and maintained by

@@ -1,6 +1,6 @@
 [Unit]
 Description=memwatch — sample host memory into CSVs
-Documentation=https://github.com/Jemplayer82/Trading-Agents-Web-Front-End/blob/master/deploy/memwatch/README.md
+Documentation=https://github.com/Jemplayer82/ai-trading-desk/blob/master/deploy/memwatch/README.md
 
 [Service]
 Type=oneshot

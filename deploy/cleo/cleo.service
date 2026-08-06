@@ -1,6 +1,6 @@
 [Unit]
 Description=Cleo — Claude CLI LLM handler for TradingAgents (switchboard bus daemon)
-Documentation=https://github.com/Jemplayer82/TradingAgents/blob/master/deploy/cleo/README.md
+Documentation=https://github.com/Jemplayer82/ai-trading-desk/blob/master/deploy/cleo/README.md
 After=network-online.target docker.service
 Wants=network-online.target
 

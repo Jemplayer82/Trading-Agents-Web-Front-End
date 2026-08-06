@@ -1,27 +1,30 @@
 """Generate a tier deployment from master — the strip script tier branches
 are built from.
 
-TradingAgents ships at 4 cumulative feature tiers (see web/features.py):
-  1 = single-ticker analysis only
-  2 = + Schwab brokerage
-  3 = + S&P 500 scanner
+ai-trading-desk ships at 4 cumulative feature tiers (see web/features.py):
+  1 = single-ticker analysis only            -> branch tier-1-base
+  2 = + Schwab brokerage                     -> branch tier-2-brokerage
+  3 = + S&P 500 scanner                      -> branch tier-3-scanner
   4 = + options paper trading (= master, the full product — this script is a
       no-op at tier 4 except for the two harmless substitutions below)
 
-Two mechanisms carry the split:
+Three mechanisms carry the split:
   1. Runtime feature gates (web/features.py DEFAULT_TIER) — this script
      rewrites that one constant; web/main.py, web/scheduler.py and
      web/portfolio_main.py's shell read it at import time and mount/register
      the right routes and cron jobs. No file changes needed for that part.
   2. Whole-file deletion + TIER:N marker-comment stripping, for content that
-     can't self-gate: static HTML, nginx routing, compose services, and one
-     settings-registry ordering. This script does both.
+     can't self-gate: static HTML, nginx routing, compose services, one
+     settings-registry ordering, and README feature sections.
+  3. The README's TIER-IDENTITY block, rewritten per tier so each generated
+     branch's landing page says which tier it is and that it's generated.
 
-Tier branches (tier/1, tier/2, tier/3) are GENERATED ARTIFACTS, regenerated
-from master and force-pushed by .github/workflows/tiers.yml. Never develop on
-one directly — a regen overwrites it silently. All development happens on
-master; this script (and the manifest below) is the single source of truth
-for what each tier contains.
+Tier branches (tier-1-base, tier-2-brokerage, tier-3-scanner) are GENERATED
+ARTIFACTS, regenerated from master and force-pushed by
+.github/workflows/tiers.yml. Never develop on one directly — a regen
+overwrites it silently. All development happens on master; this script (and
+the manifest below) is the single source of truth for what each tier
+contains.
 
 Usage:
     python scripts/make_tier.py --lint                  # markers balanced?
@@ -118,7 +121,28 @@ MARKED_FILES = [
     "web/nginx.conf",
     "docker-compose.yml",
     "web/credentials.py",
+    "README.md",
 ]
+
+# Branch each tier is published to. Tier 4 is master by definition (it IS the
+# full product), so it has no generated branch.
+TIER_BRANCH = {
+    1: "tier-1-base",
+    2: "tier-2-brokerage",
+    3: "tier-3-scanner",
+    4: "master",
+}
+
+# One-line identity for each tier, rendered into README.md's TIER-IDENTITY
+# block. Keep TIER_IDENTITY[4] in sync with what master's README literally
+# contains — apply_tier asserts it, which is what keeps a tier-4 build
+# byte-identical to master.
+TIER_IDENTITY = {
+    1: "Tier 1 — Base: single-ticker AI analysis",
+    2: "Tier 2 — Brokerage: + Schwab account scanning",
+    3: "Tier 3 — Scanner: + the weekly S&P 500 scanner",
+    4: "Tier 4 — Full: + daily options paper trading (the complete product)",
+}
 
 # (file, regex, replacement template with {tier}) — applied after deletion +
 # marker stripping. Deliberately NEVER touches pyproject.toml/uv.lock: every
@@ -129,18 +153,29 @@ SUBSTITUTIONS = [
     ("docker-compose.yml", r"\$\{TIER:-\d+\}", "${{TIER:-{tier}}}"),
 ]
 
-_BANNER = """# GENERATED BRANCH — tier {tier}
-
-This branch is regenerated from `master` by `scripts/make_tier.py`, driven
-by `.github/workflows/tiers.yml`. **Never commit directly to this branch —
-the next regeneration force-pushes over it and your commit is gone.**
-
-Develop on `master`. To change what this tier contains, edit
-`scripts/make_tier.py`'s manifest and the `TIER:N` markers in the four files
-it strips (see that script's docstring).
-"""
-
 _MARKER_RE = re.compile(r"(?:<!--|#)\s*TIER:(\d+)\s+(BEGIN|END)\s*(?:-->)?\s*$")
+
+# The README block rewritten per tier. Deliberately NOT a TIER:N marker (the
+# sentinel has no digits, so _MARKER_RE never matches it and lint() ignores it).
+_IDENTITY_RE = re.compile(
+    r"(?s)(<!-- TIER-IDENTITY BEGIN -->\n).*?(<!-- TIER-IDENTITY END -->)"
+)
+
+
+def _readme_identity(tier: int) -> str:
+    """The rendered TIER-IDENTITY block body for `tier`, sentinels excluded."""
+    head = f"> **This branch: `{TIER_BRANCH[tier]}` — {TIER_IDENTITY[tier]}.**\n"
+    if tier == 4:
+        return head + (
+            "> Development happens here. The reduced tiers are published as "
+            "generated branches — see the tier table below.\n"
+        )
+    return head + (
+        "> **GENERATED BRANCH — do not commit here.** Regenerated from `master` "
+        "by `scripts/make_tier.py` (driven by `.github/workflows/tiers.yml`); "
+        "the next regeneration force-pushes over this branch and your commit is "
+        "gone. Develop on `master`.\n"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -299,13 +334,44 @@ def apply_tier(tier: int, *, root: Path = ROOT, force: bool = False) -> None:
             path.write_text(new_text, encoding="utf-8")
             print(f"substituted {n}x in {rel}: {pattern!r} -> tier {tier}")
 
-    if tier < 4:
-        (root / "TIER-README.md").write_text(_banner_for(tier), encoding="utf-8")
-        print("wrote TIER-README.md")
+    _rewrite_readme_identity(tier, root=root)
 
 
-def _banner_for(tier: int) -> str:
-    return _BANNER.format(tier=tier)
+def _rewrite_readme_identity(tier: int, *, root: Path) -> None:
+    """Rewrite README.md's TIER-IDENTITY block for `tier`.
+
+    Also asserts that master's committed block matches _readme_identity(4)
+    exactly. That drift guard is load-bearing: it's what makes a tier-4 build
+    provably byte-identical to master (check_tier relies on it), and it fires
+    in ci.yml's tier-check the moment the README and TIER_IDENTITY disagree —
+    instead of silently shipping a wrong identity line on every tier branch.
+    """
+    readme = root / "README.md"
+    if not readme.exists():
+        return
+    text = readme.read_text(encoding="utf-8")
+
+    def _sub(target: int, s: str) -> tuple[str, int]:
+        return _IDENTITY_RE.subn(
+            lambda m: m.group(1) + _readme_identity(target) + m.group(2), s
+        )
+
+    as_tier4, n = _sub(4, text)
+    if n != 1:
+        raise ValueError(
+            f"README.md: expected exactly 1 TIER-IDENTITY block, found {n}"
+        )
+    if as_tier4 != text:
+        raise ValueError(
+            "README.md's TIER-IDENTITY block has drifted from "
+            "_readme_identity(4) — edit them together. (This assertion is what "
+            "keeps a tier-4 build byte-identical to master.)"
+        )
+
+    new_text, _ = _sub(tier, text)
+    if new_text != text:
+        readme.write_text(new_text, encoding="utf-8")
+        print(f"rewrote README TIER-IDENTITY block for tier {tier}")
 
 
 # ---------------------------------------------------------------------------

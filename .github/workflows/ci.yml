@@ -4,8 +4,12 @@ on:
   pull_request:
   push:
     branches: [master]
+    # NOTE: '**.md' is deliberately NOT ignored — README.md carries TIER:N
+    # markers and the TIER-IDENTITY block, so it's generated input to
+    # scripts/make_tier.py. A README-only commit must still run tier-check,
+    # or a broken marker/identity block lands unvalidated and only detonates
+    # at the next tiers.yml dispatch.
     paths-ignore:
-      - '**.md'
       - 'LICENSE'
       - '.gitignore'
       - 'docs/**'

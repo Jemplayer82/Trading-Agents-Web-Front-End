@@ -25,7 +25,7 @@ _TTL = 86400  # 24 hours
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (compatible; TradingAgents/1.0; "
-        "+https://github.com/Jemplayer82/TradingAgents)"
+        "+https://github.com/Jemplayer82/ai-trading-desk)"
     )
 }
 _WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"

@@ -32,7 +32,7 @@ _FORBIDDEN = [
     ("web/requirements.txt", "deps live in root requirements.txt / pyproject, not web/requirements.txt"),
     ("tradingagents/tests", "tests live in tests/ at the repo root"),
     ("web/tests", "tests live in tests/ at the repo root"),
-    ("4-tab", "the dashboard has 5 tabs now: Run Analysis / Portfolio Scan / S&P 500 / Options / Settings"),
+    ("4-tab", "don't state a tab COUNT — it differs per tier and goes stale; list the tabs instead"),
     ("Messages Log", "the tool-calls panel was removed; it is Live Reasoning now"),
 ]
 
@@ -58,3 +58,12 @@ def test_readme_names_the_deployed_images(readme: str) -> None:
     """The canonical deploy images must be named (catches a generator dropping them)."""
     assert "ghcr.io/jemplayer82/tradingagents" in readme
     assert "tradingagents-web" in readme
+
+
+@pytest.mark.unit
+def test_readme_has_tier_identity_block(readme: str) -> None:
+    """scripts/make_tier.py rewrites this block per tier so each generated
+    branch says which tier it is. Losing the sentinels would silently ship
+    master's identity line on every tier branch."""
+    assert "<!-- TIER-IDENTITY BEGIN -->" in readme
+    assert "<!-- TIER-IDENTITY END -->" in readme
