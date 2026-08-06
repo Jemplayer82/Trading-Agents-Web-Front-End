@@ -4,6 +4,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_global_news,
     get_language_instruction,
     get_news,
+    invoke_with_tool_call_retry,
 )
 from tradingagents.dataflows.config import get_config
 
@@ -51,7 +52,7 @@ def create_news_analyst(llm):
         prompt = prompt.partial(instrument_context=instrument_context)
 
         chain = prompt | llm.bind_tools(tools)
-        result = chain.invoke(state["messages"])
+        result = invoke_with_tool_call_retry(chain, state, log_label="news_analyst")
 
         report = ""
 

@@ -1,4 +1,6 @@
-from langchain_core.messages import HumanMessage, RemoveMessage
+import logging
+
+from langchain_core.messages import HumanMessage, RemoveMessage, ToolMessage
 
 # Import tools from separate utility files
 from tradingagents.agents.utils.core_stock_tools import get_stock_data
@@ -27,7 +29,17 @@ __all__ = [
     "get_language_instruction",
     "build_instrument_context",
     "create_msg_delete",
+    "invoke_with_tool_call_retry",
 ]
+
+log = logging.getLogger(__name__)
+
+_NO_TOOL_CALL_NUDGE = (
+    "You have not called any tools yet, so no data has been fetched — writing "
+    "an analysis now would be from memory, which is stale and not allowed. "
+    "Do not narrate or describe what you are about to do. Emit ONLY the tool "
+    "call(s) now."
+)
 
 
 def get_language_instruction() -> str:
@@ -60,6 +72,50 @@ def build_instrument_context(ticker: str, asset_type: str = "stock") -> str:
         "preserving any exchange suffix (e.g. `.TO`, `.L`, `.HK`, `.T`, `-USD`)."
         + extra_hint
     )
+
+def invoke_with_tool_call_retry(chain, state, *, log_label: str):
+    """Invoke a tool-bound analyst chain; retry once on a claim-without-call.
+
+    ``market_analyst_node`` and its siblings treat "the reply has zero
+    tool_calls" as "the model is done and this is the final report" — that's
+    the only signal available, since a genuine final report and a model that
+    merely narrated intent ("I've submitted the tool calls, awaiting
+    results...") look identical from the outside. Weaker models occasionally
+    do the latter on their very first turn, before ever fetching anything,
+    and the narration silently becomes the stored report — the analysis
+    "completes" with no error and an empty-looking result (bug found
+    2026-08-06: market/news/fundamentals reports came back as stubs like
+    "Awaiting stock data response...").
+
+    The fix retries ONCE, and only when nothing has actually been fetched
+    yet this round — a ``ToolMessage`` already in ``state["messages"]`` means
+    the analyst is legitimately wrapping up after real data arrived, and that
+    case must not be touched. Bounded to one retry so a model that keeps
+    refusing to call anything doesn't loop forever; if the retry also comes
+    back empty, its text is accepted as the report same as before — that is
+    now a real model limitation rather than a coin flip.
+    """
+    messages = list(state["messages"])
+    result = chain.invoke(messages)
+
+    has_fetched = any(isinstance(m, ToolMessage) for m in state["messages"])
+    if len(result.tool_calls) == 0 and not has_fetched:
+        log.warning(
+            "%s: zero tool_calls on first turn with nothing fetched yet — "
+            "retrying once with a corrective nudge",
+            log_label,
+        )
+        messages = messages + [result, HumanMessage(content=_NO_TOOL_CALL_NUDGE)]
+        result = chain.invoke(messages)
+        if len(result.tool_calls) == 0:
+            log.error(
+                "%s: still zero tool_calls after the retry — accepting the "
+                "model's text as the report",
+                log_label,
+            )
+
+    return result
+
 
 def create_msg_delete():
     def delete_messages(state):
