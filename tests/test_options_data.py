@@ -232,3 +232,35 @@ def test_fetch_candidates_filters_direction_and_conviction(monkeypatch):
     assert [(c["ticker"], c["put_call"]) for c in cands] == [("AAA", "CALL"), ("BBB", "PUT")]
     assert ("CCC", "HOLD") not in calls  # HOLD skipped before any chain fetch
     assert any("DDD" in n for n in notes)  # low conviction noted
+
+
+def test_fetch_candidates_treats_5tier_overweight_underweight_as_directional(monkeypatch):
+    """Deep dives return the system-wide 5-tier rating (Buy, Overweight, Hold,
+    Underweight, Sell) via SignalProcessor.process_signal, not raw BUY/SELL/HOLD
+    — see tradingagents/agents/utils/rating.py. Only "Buy"/"Sell" (the two most
+    extreme tiers) used to match here, silently dropping every Overweight/
+    Underweight call (real, if less extreme, directional signal) with zero
+    note. Overweight must vet as a CALL candidate, Underweight as a PUT."""
+    calls = []
+
+    def fake_fetch_contract(underlying, direction, spot_hint=None):
+        calls.append((underlying, direction))
+        return ({"occ_symbol": f"{underlying} X", "underlying": underlying,
+                 "put_call": "CALL" if direction == "BUY" else "PUT",
+                 "strike": 100.0, "expiration_date": _exp(21), "dte": 21,
+                 "bid": 1.0, "ask": 1.2, "mid": 1.1, "delta": 0.45,
+                 "open_interest": 500, "underlying_price": 100.0,
+                 "spread": 0.2, "spread_pct": 0.18, "source": "schwab"}, [])
+
+    monkeypatch.setattr(options_data, "fetch_contract", fake_fetch_contract)
+    signals = [
+        {"ticker": "OVW", "signal": "Overweight", "conviction": 8, "reasoning": "bullish"},
+        {"ticker": "UDW", "signal": "Underweight", "conviction": 8, "reasoning": "bearish"},
+        {"ticker": "HLD", "signal": "Hold", "conviction": 9, "reasoning": "meh"},
+    ]
+    cands, notes = options_data.fetch_candidates(signals)
+    assert calls == [("OVW", "BUY"), ("UDW", "SELL")]
+    assert [(c["ticker"], c["put_call"], c["signal"]) for c in cands] == [
+        ("OVW", "CALL", "BUY"), ("UDW", "PUT", "SELL"),
+    ]
+    assert ("HLD", "BUY") not in calls and ("HLD", "SELL") not in calls

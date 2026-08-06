@@ -582,7 +582,20 @@ def _zero_candidate_reason(
         return (f"All {len(enriched)} deep dives failed{noise}. No contracts were vetted — "
                 f"check the analysis history for the underlying error.")
     extra = f" ({failed} further dives failed and were skipped)" if failed else ""
-    return (f"{len(usable)} of {len(enriched)} deep dives produced a usable signal, but no "
+    # usable carries each deep dive's OWN final rating (the 5-tier Buy/Overweight/
+    # Hold/Underweight/Sell scale — tradingagents/agents/utils/rating.py), which
+    # overwrites the quick scan's BUY/SELL signal and can legitimately land on
+    # Hold after full analysis. That's zero candidates with zero vetting notes
+    # too (options_data.fetch_candidates never calls fetch_contract for it) —
+    # distinguish "nothing directional to vet" from an actual vetting failure.
+    directional_final = sum(
+        1 for r in usable
+        if (r.get("signal") or "").upper() in options_data._DIRECTION_BY_SIGNAL
+    )
+    if not directional_final:
+        return (f"{len(usable)} of {len(enriched)} deep dives completed, but every one "
+                f"rated Hold after full analysis — no directional call to vet{extra}.")
+    return (f"{directional_final} of {len(usable)} deep dives rated a directional call, but no "
             f"contract passed liquidity/delta/DTE vetting{extra} — see the vetting notes below.")
 
 

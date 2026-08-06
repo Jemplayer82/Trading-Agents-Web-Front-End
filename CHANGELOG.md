@@ -156,6 +156,21 @@ Breaking changes within the 0.x line are called out explicitly.
 - **Zero-trade runs now explain themselves** in the allocator report, telling
   "nothing scored directional" apart from "dives failed" and "nothing passed
   contract vetting".
+- **Deep-dive Overweight/Underweight calls were silently discarded before
+  contract vetting.** The options vetter only recognized literal `BUY`/`SELL`,
+  but a deep dive's own final rating is the system-wide 5-tier scale (`Buy`,
+  `Overweight`, `Hold`, `Underweight`, `Sell` — `rating.py`), and only the two
+  most extreme tiers matched. `Overweight`/`Underweight` — real, if less
+  extreme, directional calls — never reached `fetch_contract`, and the skip
+  path logged no note, so a scan with dozens of confident directional calls
+  reported "no contract passed liquidity/delta/DTE vetting" despite never
+  actually trying to vet most of them. This had been quietly starving the
+  daily options build since launch (`Buy`/`Sell` alone landed 0-8 of ~40-50
+  deep dives most days); it just took a run of days with zero extreme-tier
+  ratings to make it fully visible. `Overweight` now maps to the CALL/BUY
+  side, `Underweight` to PUT/SELL. The zero-candidate explainer also now
+  distinguishes "every deep dive rated Hold" (nothing to vet) from "some
+  rated directional but none survived vetting" (a real vetting failure).
 - **Scan queue never dequeued.** `_dequeue_next_scan`'s `ORDER BY created_at`
   referenced a column absent from its UNION's result set — SQLite raised
   `OperationalError` on the first queued scan, so queued runs sat forever.

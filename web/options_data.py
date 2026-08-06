@@ -43,6 +43,16 @@ MAX_SPREAD_ABS = 0.10       # spread ok if <= $0.10 absolute...
 MAX_SPREAD_PCT = 0.20       # ...or <= 20% of mid
 STRIKE_ATTEMPTS = 3         # preferred strike + 2 alternates before skipping
 
+# Deep dives return the system-wide 5-tier rating (tradingagents/agents/utils
+# /rating.py: Buy, Overweight, Hold, Underweight, Sell), not raw BUY/SELL/HOLD
+# — the quick scanner's vocabulary. Overweight/Underweight are real directional
+# calls, just not the most extreme tier; Hold and any unrecognized label carry
+# no entry mapped below and fall through as "not tradeable" in the caller.
+_DIRECTION_BY_SIGNAL = {
+    "BUY": "BUY", "OVERWEIGHT": "BUY",
+    "SELL": "SELL", "UNDERWEIGHT": "SELL",
+}
+
 
 def today_et() -> date:
     return datetime.now(_ET).date()
@@ -354,32 +364,36 @@ def fetch_candidates(
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Map deep-dived directional signals to vetted contracts.
 
-    signals: rows with ticker / signal (BUY|SELL|HOLD) / conviction /
-    reasoning / entry_price. HOLDs and conviction < MIN_CONVICTION are skipped.
-    Returns (candidates, rejection_notes); every candidate carries its signal,
-    conviction and rationale for the allocator prompt.
+    signals: rows with ticker / signal (BUY|SELL|HOLD, or the 5-tier Buy|
+    Overweight|Hold|Underweight|Sell a deep dive's own rating produces —
+    see _DIRECTION_BY_SIGNAL) / conviction / reasoning / entry_price. Holds,
+    unrecognized labels, and conviction < MIN_CONVICTION are skipped.
+    Returns (candidates, rejection_notes); every candidate carries its
+    (normalized BUY/SELL) signal, conviction and rationale for the allocator
+    prompt.
     """
     candidates: list[dict[str, Any]] = []
     notes: list[str] = []
     done = 0
     for row in signals:
         done += 1
-        sig = (row.get("signal") or "").upper()
+        sig_raw = (row.get("signal") or "").upper()
+        direction = _DIRECTION_BY_SIGNAL.get(sig_raw)
         conviction = int(row.get("conviction") or 0)
         ticker = row.get("ticker")
-        if not ticker or sig not in ("BUY", "SELL"):
+        if not ticker or direction is None:
             continue
         if conviction < MIN_CONVICTION:
             notes.append(f"{ticker}: conviction {conviction} < {MIN_CONVICTION}")
             continue
-        contract, c_notes = fetch_contract(ticker, sig, spot_hint=row.get("entry_price"))
+        contract, c_notes = fetch_contract(ticker, direction, spot_hint=row.get("entry_price"))
         notes += c_notes
         if contract is None:
             notes.append(f"{ticker}: no tradeable contract")
         else:
             contract.update({
                 "ticker": ticker,
-                "signal": sig,
+                "signal": direction,
                 "conviction": conviction,
                 "rationale": (row.get("reasoning") or "")[:500],
                 "final_decision": (row.get("final_decision") or "")[:2000],
