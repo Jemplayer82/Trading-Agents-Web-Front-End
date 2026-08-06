@@ -12,6 +12,7 @@ reproduces each failure condition, so the protections are verified, not assumed.
 from __future__ import annotations
 
 import importlib.util
+import logging
 import os
 import subprocess
 import sys
@@ -220,3 +221,71 @@ def test_dispatch_always_releases_its_inflight_slot(cleo):
                    "http://127.0.0.1:1", "tok", "cleo", sem)
 
     assert sem.acquire(blocking=False), "_dispatch leaked its in-flight slot on error"
+
+
+# ---------------------------------------------------------------------------
+# Tool-marker dialect tolerance (the "blank market report" bug, 2026-08-06)
+# ---------------------------------------------------------------------------
+#
+# There is no tool schema on this path, so nothing validates the model's marker
+# syntax. Models emit near-misses. The old strict pattern matched exactly one
+# dialect, and because _ToolMarkerFilter suppresses everything after the bare
+# `<tool_call` prefix, a near-miss lost BOTH the tool call and the text — the
+# run finished with a 0-character report and no error to trace.
+
+_DIALECTS = [
+    ('canonical', '<tool_call name="get_stock_data">{"ticker":"SPY"}</tool_call>'),
+    ('single_quotes', "<tool_call name='get_stock_data'>{\"ticker\":\"SPY\"}</tool_call>"),
+    ('envelope', '<tool_call>{"name":"get_stock_data","arguments":{"ticker":"SPY"}}</tool_call>'),
+    ('id_before_name', '<tool_call id="1" name="get_stock_data">{"ticker":"SPY"}</tool_call>'),
+    ('newlines', '<tool_call name="get_stock_data">\n{"ticker":"SPY"}\n</tool_call>'),
+    ('code_fence', '<tool_call name="get_stock_data">```json\n{"ticker":"SPY"}\n```</tool_call>'),
+    ('unquoted_attr', '<tool_call name=get_stock_data>{"ticker":"SPY"}</tool_call>'),
+    ('envelope_fenced',
+     '<tool_call>```json\n{"name":"get_stock_data","arguments":{"ticker":"SPY"}}\n```</tool_call>'),
+]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("label,raw", _DIALECTS, ids=[d[0] for d in _DIALECTS])
+def test_every_observed_dialect_yields_the_same_call(cleo, label, raw):
+    calls = cleo._parse_tool_calls(raw)
+    assert len(calls) == 1, f"{label}: dropped — this is a silently empty report"
+    assert calls[0]["name"] == "get_stock_data"
+    assert calls[0]["args"] == {"ticker": "SPY"}, f"{label}: args mangled"
+
+
+@pytest.mark.unit
+def test_argument_legitimately_called_name_is_not_mistaken_for_the_tool(cleo):
+    """The envelope form looks for a "name" key — it must not hijack a real arg."""
+    calls = cleo._parse_tool_calls(
+        '<tool_call name="lookup">{"name":"Apple Inc"}</tool_call>'
+    )
+    assert calls[0]["name"] == "lookup"
+    assert calls[0]["args"] == {"name": "Apple Inc"}
+
+
+@pytest.mark.unit
+def test_mixed_dialects_in_one_reply_all_parse(cleo):
+    calls = cleo._parse_tool_calls(
+        '<tool_call name="a">{"x":1}</tool_call>\n'
+        '<tool_call>{"name":"b","args":{"y":2}}</tool_call>'
+    )
+    assert [(c["name"], c["args"]) for c in calls] == [("a", {"x": 1}), ("b", {"y": 2})]
+
+
+@pytest.mark.unit
+def test_unreadable_marker_is_logged_not_swallowed(cleo, caplog):
+    """A marker we still can't parse must leave a trace. The filter has already
+    eaten the text by this point, so without the log the run is undiagnosable."""
+    with caplog.at_level(logging.ERROR):
+        calls = cleo._parse_tool_calls("<tool_call>not json at all</tool_call>")
+    assert calls == []
+    assert any("tool_call" in r.message.lower() for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_ordinary_prose_produces_no_calls_and_no_error_log(cleo, caplog):
+    with caplog.at_level(logging.ERROR):
+        assert cleo._parse_tool_calls("SPY closed at 512.30, up 0.4% on the session.") == []
+    assert not caplog.records

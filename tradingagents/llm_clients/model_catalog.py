@@ -230,6 +230,31 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # corpus (web/options_learning.py) is graded by whatever model was current
     # when each entry was written. Pin a specific ID for work that needs to
     # stay comparable.
+    # ⚠️ TOOL-CALL RELIABILITY HISTORY — read before trusting a model choice here.
+    #
+    # The Claude CLI cannot accept Anthropic tool schemas, so Cleo teaches the
+    # model an inline marker syntax instead (scripts/cleo_llm_handler.py). Until
+    # 2026-08-06 that marker was parsed by a single strict pattern, so a model
+    # emitting any near-miss dialect (single quotes, reordered attributes, the
+    # common {"name":..,"arguments":..} envelope) had its call silently dropped
+    # AND its text suppressed — the run finished with a 0-character report and
+    # no error. Measured over 30 days, multi-tool requests, before the fix:
+    #
+    #     claude-sonnet-4-6    240 req    0% zero-tool-call replies
+    #     claude-sonnet-5       33 req    3%
+    #     claude-opus-5       1078 req    4%
+    #     claude-opus-4-8      371 req   33%
+    #     claude-haiku-4-5    2444 req   44%
+    #
+    # That spread was mostly the PARSER, not the models — weaker models just
+    # guessed the undocumented dialect wrong more often. The parser now accepts
+    # every observed dialect and logs loudly when it still cannot read a marker,
+    # so every model here is offered. Re-measure before drawing conclusions:
+    #
+    #   journalctl -u cleo --since -30d | grep -E 'llm_request|streamed reply'
+    #
+    # (pair each `llm_request … tools=N` with its `streamed reply … (M tool_calls)`
+    # by inbox id; a reply with M==0 where N>=1 is a silently empty report.)
     "switchboard": {
         "quick": [
             ("Sonnet — always latest (via bus)", "sonnet"),

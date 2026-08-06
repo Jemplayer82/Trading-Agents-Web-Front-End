@@ -323,9 +323,17 @@ def job_options_grade() -> None:
             config["llm_provider"] = "switchboard"
             # Bare family name, not a pinned ID: the switchboard hands this
             # straight to `claude --model`, which resolves it to whatever the
-            # current Haiku is. Keeps the nightly jobs off a snapshot that
+            # current Sonnet is. Keeps the nightly jobs off a snapshot that
             # eventually gets retired out from under them.
-            config["quick_think_llm"] = "haiku"
+            #
+            # Sonnet rather than Haiku despite this being the "quick" role.
+            # These jobs bind tools and run unattended overnight, so a silently
+            # empty result is expensive to notice; Sonnet has the strongest
+            # tool-call record on the bus. This is a fallback for when no
+            # provider key is configured — an operator's explicit choice in the
+            # Run Analysis form always wins over it (web/runner.py
+            # _resolve_model gives explicit params top precedence).
+            config["quick_think_llm"] = "sonnet"
         llm = None
         try:
             llm = create_llm_client(
@@ -389,9 +397,17 @@ def job_outcome_sweep() -> None:
             config["llm_provider"] = "switchboard"
             # Bare family name, not a pinned ID: the switchboard hands this
             # straight to `claude --model`, which resolves it to whatever the
-            # current Haiku is. Keeps the nightly jobs off a snapshot that
+            # current Sonnet is. Keeps the nightly jobs off a snapshot that
             # eventually gets retired out from under them.
-            config["quick_think_llm"] = "haiku"
+            #
+            # Sonnet rather than Haiku despite this being the "quick" role.
+            # These jobs bind tools and run unattended overnight, so a silently
+            # empty result is expensive to notice; Sonnet has the strongest
+            # tool-call record on the bus. This is a fallback for when no
+            # provider key is configured — an operator's explicit choice in the
+            # Run Analysis form always wins over it (web/runner.py
+            # _resolve_model gives explicit params top precedence).
+            config["quick_think_llm"] = "sonnet"
         memory_log = TradingMemoryLog(config)
         # Missing/misconfigured LLM keys degrade the sweep (NOISE/CENSORED
         # entries still resolve; LLM-graded ones defer) instead of killing it.
