@@ -230,31 +230,35 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # corpus (web/options_learning.py) is graded by whatever model was current
     # when each entry was written. Pin a specific ID for work that needs to
     # stay comparable.
-    # ⚠️ TOOL-CALL RELIABILITY HISTORY — read before trusting a model choice here.
+    # ⚠️ TOOL-CALL RELIABILITY — two bugs fixed here 2026-08-06, both worth
+    # knowing about before trusting a model choice on this provider.
     #
-    # The Claude CLI cannot accept Anthropic tool schemas, so Cleo teaches the
-    # model an inline marker syntax instead (scripts/cleo_llm_handler.py). Until
-    # 2026-08-06 that marker was parsed by a single strict pattern, so a model
-    # emitting any near-miss dialect (single quotes, reordered attributes, the
-    # common {"name":..,"arguments":..} envelope) had its call silently dropped
-    # AND its text suppressed — the run finished with a 0-character report and
-    # no error. Measured over 30 days, multi-tool requests, before the fix:
+    # (1) The Claude CLI cannot accept Anthropic tool schemas, so Cleo teaches
+    # the model an inline marker syntax instead (scripts/cleo_llm_handler.py).
+    # Its parser used to accept only one dialect, so a near-miss (single
+    # quotes, reordered attributes, the common {"name":..,"arguments":..}
+    # envelope) had its call silently dropped AND its text suppressed — a
+    # 0-character report, no error. The parser now accepts every observed
+    # dialect and logs loudly when it still cannot read a marker.
     #
-    #     claude-sonnet-4-6    240 req    0% zero-tool-call replies
-    #     claude-sonnet-5       33 req    3%
-    #     claude-opus-5       1078 req    4%
-    #     claude-opus-4-8      371 req   33%
-    #     claude-haiku-4-5    2444 req   44%
+    # (2) That alone did NOT fix "blank market/news/fundamentals reports" —
+    # the deeper bug was in the analyst nodes themselves
+    # (tradingagents/agents/analysts/*.py), which treat "reply has zero
+    # tool_calls" as the ONLY signal that a report is final. That can't
+    # distinguish a genuine final report from a model narrating intent on its
+    # first turn without ever calling anything ("I have made tool calls...
+    # awaiting results"). Fixed via invoke_with_tool_call_retry() in
+    # agents/utils/agent_utils.py: one corrective retry, only when nothing has
+    # been fetched yet this round.
     #
-    # That spread was mostly the PARSER, not the models — weaker models just
-    # guessed the undocumented dialect wrong more often. The parser now accepts
-    # every observed dialect and logs loudly when it still cannot read a marker,
-    # so every model here is offered. Re-measure before drawing conclusions:
-    #
-    #   journalctl -u cleo --since -30d | grep -E 'llm_request|streamed reply'
-    #
-    # (pair each `llm_request … tools=N` with its `streamed reply … (M tool_calls)`
-    # by inbox id; a reply with M==0 where N>=1 is a silently empty report.)
+    # NOTE: an earlier version of this comment carried a 30-day zero-tool-call
+    # rate table per model, used to justify removing/re-adding Haiku from this
+    # list. Those numbers conflated legitimate final-report turns (0 calls
+    # because the analyst is done) with real failures (0 calls because nothing
+    # was ever fetched) and were never a valid failure rate — deleted rather
+    # than left to mislead. If you want real per-model reliability data, grade
+    # it on whether the STORED REPORT is a stub (see the retry-guard docstring
+    # for the stub signature), not on raw tool-call counts from the Cleo log.
     "switchboard": {
         "quick": [
             ("Sonnet — always latest (via bus)", "sonnet"),
