@@ -1,0 +1,107 @@
+name: Model catalog check
+
+# From the Claude 4.6 generation on, Anthropic's model IDs are pinned snapshots
+# rather than evergreen pointers, so a catalog entry going stale is SILENT — the
+# dropdown keeps offering a model that quietly resolves to something older
+# instead of failing loudly. This job is the tripwire.
+#
+# It reads Anthropic's public models-overview markdown. No API key, no Anthropic
+# API call, no token spend.
+#
+# Scheduled workflows only fire on the default branch, so the generated tier
+# branches never run this a second, third and fourth time.
+
+on:
+  schedule:
+    # Mondays 13:17 UTC. Deliberately off the hour: GitHub queues cron jobs and
+    # the top of the hour is the most contended slot.
+    - cron: '17 13 * * 1'
+  workflow_dispatch:
+    inputs:
+      strict:
+        description: 'Also fail when Anthropic lists a model we do not offer'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    name: Claude model catalog drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # No dependency install: the script is standard-library only and loads
+      # model_catalog.py by path rather than through the package __init__
+      # (which would pull in LangChain).
+      - name: Check catalog against Anthropic's published model list
+        id: check
+        run: |
+          set +e
+          python scripts/check_model_catalog.py ${{ inputs.strict && '--strict' || '' }} > report.txt 2>&1
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+          set -e
+          cat report.txt
+
+      - name: Open or update the drift issue
+        if: steps.check.outputs.status == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: Claude model catalog drift
+        run: |
+          {
+            echo '`scripts/check_model_catalog.py` found drift between `MODEL_OPTIONS`'
+            echo "in \`tradingagents/llm_clients/model_catalog.py\` and Anthropic's"
+            echo 'published model list.'
+            echo
+            echo '```'
+            cat report.txt
+            echo '```'
+            echo
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } > body.md
+
+          existing=$(gh issue list --state open --search "$TITLE in:title" \
+            --json number,title --jq ".[] | select(.title == \"$TITLE\") | .number" | head -n1)
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file body.md
+          else
+            gh issue create --title "$TITLE" --body-file body.md
+          fi
+
+      - name: Close the drift issue once the catalog is clean again
+        if: steps.check.outputs.status == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: Claude model catalog drift
+        run: |
+          existing=$(gh issue list --state open --search "$TITLE in:title" \
+            --json number,title --jq ".[] | select(.title == \"$TITLE\") | .number" | head -n1)
+          if [ -n "$existing" ]; then
+            gh issue close "$existing" \
+              --comment "Catalog matches Anthropic's published model list again."
+          fi
+
+      # Exit 2 means the fetch failed or the page parsed to zero models — a
+      # broken check, not drift. Distinguishing the two matters: silently
+      # treating "couldn't read the docs" as "nothing changed" is how a
+      # tripwire rots without anyone noticing.
+      - name: Fail if the model list could not be read
+        if: steps.check.outputs.status == '2'
+        run: |
+          echo "::error::Could not read Anthropic's model list - network failure, or the docs page layout changed and scripts/check_model_catalog.py needs its regexes updated."
+          exit 1
+
+      - name: Fail on drift
+        if: steps.check.outputs.status == '1'
+        run: |
+          echo "::error::Claude model catalog has drifted - see the tracking issue."
+          exit 1
