@@ -38,6 +38,30 @@ assertion fails CI otherwise (that assertion is what keeps a tier-4 build
 byte-identical to master). Never state a tab or service COUNT in the README;
 counts differ per tier and go stale.
 
+## Claude model IDs go stale silently
+
+From the Claude 4.6 generation on, Anthropic's model IDs are **pinned
+snapshots, not evergreen pointers**. A stale entry in `MODEL_OPTIONS`
+(`tradingagents/llm_clients/model_catalog.py`) therefore does not 404 — it
+quietly keeps running an older model. Check it before trusting the dropdown:
+
+    python scripts/check_model_catalog.py
+
+That reads Anthropic's public models-overview markdown — no API key, no
+Anthropic API call, no token spend — and diffs it against our Claude entries.
+`.github/workflows/model-catalog-check.yml` runs it every Monday and files a
+tracking issue on drift. Bump the "Last verified" date in the catalog whenever
+you touch those entries.
+
+Two things that trip people up:
+
+- **There is no Sonnet 4.8.** The Sonnet line runs 4.5 → 4.6 → 5; only Opus
+  has a 4.8. "Sonnet 4.8" means `claude-sonnet-5`.
+- **Adding a model may need an `effort` change too.** `anthropic_client.py`
+  gates the `effort` parameter by model family — Haiku and Sonnet 4.5 reject
+  it with a 400, everything else from Opus 4.5 / Sonnet 4.6 on accepts it.
+  A new family or ID shape needs `_EFFORT_PATTERN` widened.
+
 ## Guard hook
 
 A commit-blocking guard for tier branches lives at

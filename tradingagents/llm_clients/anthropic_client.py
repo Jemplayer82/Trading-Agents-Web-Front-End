@@ -11,20 +11,32 @@ _PASSTHROUGH_KWARGS = (
     "callbacks", "http_client", "http_async_client", "effort",
 )
 
-# Anthropic's extended-thinking ``effort`` parameter is accepted by Opus 4.5+
-# and Sonnet 4.5+ only. Haiku (any version shipped to date) 400s with
-# ``"This model does not support the effort parameter"`` (#831). Future
-# ``claude-{opus,sonnet}-X-Y`` releases inherit effort support via the
-# forward-compat pattern below; future Haiku stays excluded by default.
+# Anthropic's ``effort`` parameter is accepted by the Opus, Sonnet, Fable and
+# Mythos families from Opus 4.5 / Sonnet 4.6 onward. Haiku (any version shipped
+# to date) 400s with ``"This model does not support the effort parameter"``
+# (#831), and so does Sonnet 4.5 — it predates effort even though its Opus 4.5
+# contemporary supports it, which is why it needs a carve-out by name.
 _EFFORT_EXACT = {
     "claude-mythos-preview",  # non-standard preview name; effort-capable
 }
-_EFFORT_PATTERN = re.compile(r"^claude-(opus|sonnet)-\d+-\d+$")
+_EFFORT_EXCLUDED = {
+    "claude-sonnet-4-5",
+    "claude-sonnet-4-5-20250929",
+}
+# Covers both ID shapes: the dateless two-segment snapshots used from the 4.6
+# generation on (``claude-opus-4-8``) and the single-segment 5-series IDs
+# (``claude-opus-5``, ``claude-sonnet-5``, ``claude-fable-5``). Haiku is absent
+# deliberately, so future Haiku releases stay excluded by default. Dated IDs
+# (three-plus segments) also fall through to "no effort" — conservative, since
+# a missing effort is a silent default while a rejected one is a hard 400.
+_EFFORT_PATTERN = re.compile(r"^claude-(opus|sonnet|fable|mythos)-\d+(-\d+)?$")
 
 
 def _supports_effort(model: str) -> bool:
     """Whether Anthropic accepts the ``effort`` parameter for this model."""
     model_lc = model.lower()
+    if model_lc in _EFFORT_EXCLUDED:
+        return False
     return model_lc in _EFFORT_EXACT or bool(_EFFORT_PATTERN.match(model_lc))
 
 

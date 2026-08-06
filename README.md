@@ -414,7 +414,7 @@ journalctl -u cleo -f                    # confirm "registered as 'cleo'"
 #    (leave "backend provider" blank — Cleo ignores it)
 
 # 4. In the Analysis form, pick provider "Switchboard (Bus LLM)" and a Claude model
-#    (e.g. claude-sonnet-4-6 or claude-opus-4-8) then run as normal.
+#    (e.g. claude-sonnet-5 or claude-opus-5) then run as normal.
 ```
 
 > 📋 **Cleo env knobs** (set in `/etc/cleo/cleo.env` or as shell env vars):
@@ -424,7 +424,7 @@ journalctl -u cleo -f                    # confirm "registered as 'cleo'"
 > | `SWITCHBOARD_URL` | — | Switchboard base URL, no trailing `/mcp` (e.g. `http://host:3109`) |
 > | `SWITCHBOARD_MCP_TOKEN` | — | Bearer token — must match `SWITCHBOARD_MCP_TOKEN` in the stack |
 > | `SWITCHBOARD_AGENT_ID` | `cleo` | Bus agent name to register as |
-> | `DEFAULT_MODEL` | `claude-sonnet-4-6` | Fallback model when the request doesn't specify one |
+> | `DEFAULT_MODEL` | `claude-sonnet-5` | Fallback model when the request doesn't specify one |
 > | `CLEO_CALL_TIMEOUT_S` | `150` | Hard per-call deadline in seconds — keep below the client's 180s so Cleo fails itself first |
 > | `CLAUDE_BIN` | `claude` | Full path to the `claude` binary if it isn't on `PATH` for the service user |
 

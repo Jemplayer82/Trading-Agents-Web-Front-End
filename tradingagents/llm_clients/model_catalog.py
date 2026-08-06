@@ -88,17 +88,33 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("GPT-5.5 Pro - Most capable, expensive ($30/$180 per 1M tokens)", "gpt-5.5-pro"),
         ],
     },
+    # Anthropic. Source: the "Claude API alias" row of
+    # https://platform.claude.com/docs/en/about-claude/models/overview.md
+    #
+    # From the 4.6 generation on, those dateless IDs are pinned snapshots, not
+    # evergreen pointers — a stale entry here quietly runs an older model rather
+    # than 404ing, so drift is silent. Check it (free, no API key needed) with:
+    #
+    #     python scripts/check_model_catalog.py
+    #
+    # There is no Sonnet 4.8: the Sonnet line runs 4.5 → 4.6 → 5, and only Opus
+    # has a 4.8. Claude Fable 5 is deliberately absent — it is double Opus
+    # pricing, thinking is always on (an explicit thinking=disabled is a 400),
+    # it requires 30-day data retention, and it can answer with
+    # stop_reason="refusal". AnthropicClient handles none of those yet.
+    #
+    # Last verified 2026-08-06.
     "anthropic": {
         "quick": [
-            ("Claude Sonnet 4.6 - Best speed and intelligence balance", "claude-sonnet-4-6"),
+            ("Claude Sonnet 5 - Best speed and intelligence balance", "claude-sonnet-5"),
             ("Claude Haiku 4.5 - Fastest with near-frontier intelligence", "claude-haiku-4-5"),
-            ("Claude Sonnet 4.5 - High-performance for agents and coding", "claude-sonnet-4-5"),
+            ("Claude Sonnet 4.6 - Previous-gen balanced", "claude-sonnet-4-6"),
         ],
         "deep": [
-            ("Claude Opus 4.7 - Latest frontier, long-running agents and coding", "claude-opus-4-7"),
-            ("Claude Opus 4.6 - Frontier intelligence, agents and coding", "claude-opus-4-6"),
-            ("Claude Opus 4.5 - Premium, max intelligence", "claude-opus-4-5"),
-            ("Claude Sonnet 4.6 - Best speed and intelligence balance", "claude-sonnet-4-6"),
+            ("Claude Opus 5 - Latest frontier, complex agentic and enterprise work", "claude-opus-5"),
+            ("Claude Opus 4.8 - Previous frontier Opus, long-running agents", "claude-opus-4-8"),
+            ("Claude Sonnet 5 - Near-Opus quality at Sonnet cost", "claude-sonnet-5"),
+            ("Claude Opus 4.7 - Older Opus, still available", "claude-opus-4-7"),
         ],
     },
     "google": {
@@ -183,16 +199,27 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("Custom model ID", "custom"),
         ],
     },
+    # Switchboard reaches Claude through Cleo, which shells out to `claude -p`
+    # against the host user's CLI subscription — so these cost nothing per token
+    # and are the route the deployed stack actually uses. Model IDs are handed
+    # to `claude --model` verbatim, so they track the same catalog as the
+    # "anthropic" provider above; non-Claude entries fall through to llm-router.
+    #
+    # Haiku keeps its dated ID here because that exact string is what the
+    # scheduler's fallback config sends (web/scheduler.py) and what the running
+    # deployment has been exercising.
     "switchboard": {
         "quick": [
-            ("Claude Sonnet 4.6 (via bus)", "claude-sonnet-4-6"),
+            ("Claude Sonnet 5 (via bus)", "claude-sonnet-5"),
             ("Claude Haiku 4.5 (via bus)", "claude-haiku-4-5-20251001"),
+            ("Claude Sonnet 4.6 (via bus)", "claude-sonnet-4-6"),
             ("Llama 3 (via bus)", "llama3"),
             ("Custom model ID", "custom"),
         ],
         "deep": [
+            ("Claude Opus 5 (via bus)", "claude-opus-5"),
             ("Claude Opus 4.8 (via bus)", "claude-opus-4-8"),
-            ("Claude Sonnet 4.6 (via bus)", "claude-sonnet-4-6"),
+            ("Claude Sonnet 5 (via bus)", "claude-sonnet-5"),
             ("Custom model ID", "custom"),
         ],
     },

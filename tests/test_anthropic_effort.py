@@ -1,9 +1,10 @@
 """Tests for Anthropic effort-parameter gating (#831).
 
-Haiku 4.5 (and current Haiku versions) reject the ``effort`` parameter
-with a 400. Opus 4.5+ and Sonnet 4.5+ accept it. The gate uses a
-forward-compat regex so future ``claude-{opus,sonnet}-X-Y`` releases
-inherit support automatically.
+Haiku (every version shipped to date) rejects the ``effort`` parameter with a
+400, and so does Sonnet 4.5. Opus 4.5+, Sonnet 4.6+, Fable and Mythos accept
+it. The gate uses a forward-compat regex so future releases inherit support
+automatically, across both live ID shapes: the dateless two-segment snapshots
+(``claude-opus-4-8``) and the single-segment 5-series IDs (``claude-opus-5``).
 """
 
 import pytest
@@ -24,7 +25,7 @@ def _capture_kwargs(monkeypatch):
 class TestEffortGate:
     @pytest.mark.parametrize(
         "model",
-        ["claude-haiku-4-5", "claude-haiku-5-0", "claude-haiku-4-7-preview"],
+        ["claude-haiku-4-5", "claude-haiku-4-5-20251001", "claude-haiku-5-0"],
     )
     def test_haiku_does_not_receive_effort(self, monkeypatch, model):
         captured = _capture_kwargs(monkeypatch)
@@ -33,9 +34,20 @@ class TestEffortGate:
 
     @pytest.mark.parametrize(
         "model",
+        ["claude-sonnet-4-5", "claude-sonnet-4-5-20250929"],
+    )
+    def test_sonnet_4_5_does_not_receive_effort(self, monkeypatch, model):
+        """Sonnet 4.5 predates effort and 400s on it — unlike Opus 4.5."""
+        captured = _capture_kwargs(monkeypatch)
+        mod.AnthropicClient(model=model, effort="high", api_key="x").get_llm()
+        assert "effort" not in captured["kwargs"]
+
+    @pytest.mark.parametrize(
+        "model",
         [
-            "claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7",
-            "claude-sonnet-4-5", "claude-sonnet-4-6",
+            "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
+            "claude-opus-4-6", "claude-opus-4-5",
+            "claude-sonnet-5", "claude-sonnet-4-6",
         ],
     )
     def test_current_opus_and_sonnet_receive_effort(self, monkeypatch, model):
@@ -45,10 +57,20 @@ class TestEffortGate:
 
     @pytest.mark.parametrize(
         "model",
-        ["claude-opus-5-0", "claude-opus-4-8", "claude-sonnet-5-0"],
+        ["claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-mythos-5"],
     )
-    def test_future_opus_sonnet_inherit_effort_via_pattern(self, monkeypatch, model):
-        """Forward-compat: new Opus/Sonnet versions don't need a code change."""
+    def test_single_segment_five_series_ids_receive_effort(self, monkeypatch, model):
+        """Regression: the original ``-\\d+-\\d+`` pattern missed these entirely."""
+        captured = _capture_kwargs(monkeypatch)
+        mod.AnthropicClient(model=model, effort="low", api_key="x").get_llm()
+        assert captured["kwargs"]["effort"] == "low"
+
+    @pytest.mark.parametrize(
+        "model",
+        ["claude-opus-6", "claude-opus-5-1", "claude-sonnet-6", "claude-fable-6"],
+    )
+    def test_future_releases_inherit_effort_via_pattern(self, monkeypatch, model):
+        """Forward-compat: new Opus/Sonnet/Fable versions need no code change."""
         captured = _capture_kwargs(monkeypatch)
         mod.AnthropicClient(model=model, effort="low", api_key="x").get_llm()
         assert captured["kwargs"]["effort"] == "low"
