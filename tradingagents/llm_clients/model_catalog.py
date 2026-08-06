@@ -103,6 +103,12 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # it requires 30-day data retention, and it can answer with
     # stop_reason="refusal". AnthropicClient handles none of those yet.
     #
+    # No always-latest entry is possible HERE. Anthropic retired evergreen
+    # pointers with the 4.6 generation, so there is no `claude-opus-latest` and
+    # `claude-opus-5` will never become Opus 6; a bare `opus` sent to the REST
+    # API is a 404. The always-latest names live under "switchboard" below,
+    # where the Claude CLI resolves them for us.
+    #
     # Last verified 2026-08-06.
     "anthropic": {
         "quick": [
@@ -201,25 +207,45 @@ MODEL_OPTIONS: ProviderModeOptions = {
     },
     # Switchboard reaches Claude through Cleo, which shells out to `claude -p`
     # against the host user's CLI subscription — so these cost nothing per token
-    # and are the route the deployed stack actually uses. Model IDs are handed
-    # to `claude --model` verbatim, so they track the same catalog as the
-    # "anthropic" provider above; non-Claude entries fall through to llm-router.
+    # and are the route the deployed stack actually uses. Values are handed to
+    # `claude --model` verbatim; non-Claude entries fall through to llm-router.
     #
-    # Haiku keeps its dated ID here because that exact string is what the
-    # scheduler's fallback config sends (web/scheduler.py) and what the running
-    # deployment has been exercising.
+    # THIS is the one provider where an always-latest name genuinely exists.
+    # The Claude CLI resolves the bare family names at call time (verified on
+    # WebServer, CLI 2.1.220, 2026-08-06):
+    #
+    #     opus   -> claude-opus-5
+    #     sonnet -> claude-sonnet-5
+    #     haiku  -> claude-haiku-4-5-20251001
+    #
+    # They lead each list, which makes them the default for background scans —
+    # web/runner.py::_catalog_default takes the first non-"custom" entry. The
+    # pinned IDs stay below them as the escape hatch.
+    #
+    # The tradeoff, spelled out because it is the same one that got the
+    # version-less Qwen aliases excluded above: an always-latest name means the
+    # model under your analysis changes the day Anthropic ships the next one,
+    # with no commit and no warning. That is fine for ad-hoc runs and awkward
+    # for anything that compares results over time — the options reflection
+    # corpus (web/options_learning.py) is graded by whatever model was current
+    # when each entry was written. Pin a specific ID for work that needs to
+    # stay comparable.
     "switchboard": {
         "quick": [
-            ("Claude Sonnet 5 (via bus)", "claude-sonnet-5"),
-            ("Claude Haiku 4.5 (via bus)", "claude-haiku-4-5-20251001"),
-            ("Claude Sonnet 4.6 (via bus)", "claude-sonnet-4-6"),
+            ("Sonnet — always latest (via bus)", "sonnet"),
+            ("Haiku — always latest, fastest (via bus)", "haiku"),
+            ("Claude Sonnet 5 — pinned (via bus)", "claude-sonnet-5"),
+            ("Claude Haiku 4.5 — pinned (via bus)", "claude-haiku-4-5-20251001"),
+            ("Claude Sonnet 4.6 — pinned (via bus)", "claude-sonnet-4-6"),
             ("Llama 3 (via bus)", "llama3"),
             ("Custom model ID", "custom"),
         ],
         "deep": [
-            ("Claude Opus 5 (via bus)", "claude-opus-5"),
-            ("Claude Opus 4.8 (via bus)", "claude-opus-4-8"),
-            ("Claude Sonnet 5 (via bus)", "claude-sonnet-5"),
+            ("Opus — always latest (via bus)", "opus"),
+            ("Sonnet — always latest, cheaper (via bus)", "sonnet"),
+            ("Claude Opus 5 — pinned (via bus)", "claude-opus-5"),
+            ("Claude Opus 4.8 — pinned (via bus)", "claude-opus-4-8"),
+            ("Claude Sonnet 5 — pinned (via bus)", "claude-sonnet-5"),
             ("Custom model ID", "custom"),
         ],
     },

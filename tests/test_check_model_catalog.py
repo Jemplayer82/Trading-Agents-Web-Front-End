@@ -94,6 +94,12 @@ class TestCatalogDiff:
         assert "llama3" not in checker.catalog_model_ids()["switchboard"]
         assert "custom" not in checker.catalog_model_ids()["switchboard"]
 
+    @pytest.mark.parametrize("alias", ["opus", "sonnet", "haiku"])
+    def test_cli_family_aliases_are_not_checked_as_ids(self, checker, alias):
+        """They resolve at call time and never appear in Anthropic's ID list,
+        so treating them as IDs would report permanent false drift."""
+        assert alias not in checker.catalog_model_ids()["switchboard"]
+
     def test_clean_when_docs_list_everything_we_offer(self, checker, monkeypatch):
         ours = {m for models in checker.catalog_model_ids().values() for m in models}
         monkeypatch.setattr(checker, "fetch_live_model_ids", lambda *a, **k: ours)

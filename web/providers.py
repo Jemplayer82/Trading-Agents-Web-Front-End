@@ -32,10 +32,19 @@ def _is_ollama_cloud(url: str | None) -> bool:
 #
 #     curl -H "Authorization: Bearer $OLLAMA_API_KEY" https://ollama.com/v1/models
 #
-# Every value below must appear in that list. Entries are also verified to
-# support tool calling, which the analysts require (they bind get_stock_data /
-# get_indicators — a model without tool support fails the whole graph).
-# Last verified: 2026-07-18.
+# Presence in that list is NOT the test, and treating it as one produces false
+# alarms: as of 2026-08-06 `/v1/models` no longer lists any `-cloud` suffixed
+# name, yet `gpt-oss:20b-cloud` and `gpt-oss:120b-cloud` both still answer
+# chat.completions with HTTP 200. The only reliable check is a real call:
+#
+#     curl -s -o /dev/null -w '%{http_code}\n' https://ollama.com/v1/chat/completions \
+#       -H "Authorization: Bearer $OLLAMA_API_KEY" -H 'Content-Type: application/json' \
+#       -d '{"model":"<id>","messages":[{"role":"user","content":"hi"}],"max_tokens":3}'
+#
+# Entries are also verified to support tool calling, which the analysts require
+# (they bind get_stock_data / get_indicators — a model without tool support
+# fails the whole graph).
+# Last verified: 2026-08-06 (all entries below smoke-tested with a live call).
 _OLLAMA_CLOUD_MODELS = {
     "quick": [
         ("GPT-OSS 20B (cloud) — default", "gpt-oss:20b-cloud"),
