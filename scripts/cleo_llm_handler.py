@@ -95,9 +95,33 @@ _HTTP = httpx.Client(
 # the system prompt and parse it back out of the generated text.
 _TOOL_OPEN = "<tool_call"
 _TOOL_CLOSE = "</tool_call>"
-_TOOL_RE = re.compile(
-    r'<tool_call\s+name="([^"]+)"(?:\s+id="([^"]*)")?\s*>([\s\S]*?)</tool_call>'
-)
+
+# Parsing is deliberately LOOSE, and it has to be.
+#
+# There is no tool schema on this path — the CLI can't take one, so the model is
+# told the marker syntax in prose and has nothing validating its output. Models
+# therefore emit near-misses: single quotes, reordered attributes, or the far
+# more common `{"name": ..., "arguments": {...}}` envelope they saw everywhere
+# in training. The old strict pattern (`name="..."` in that exact order, double
+# quotes only) matched none of those.
+#
+# That combination was silently destructive. _ToolMarkerFilter suppresses
+# everything from the bare prefix `<tool_call` onward, so a near-miss lost the
+# tool call AND the text: the run finished with a 0-character report, no error
+# anywhere. Measured 2026-08-06: 44% of Haiku and 33% of Opus 4.8 multi-tool
+# replies produced zero tool calls, which is what "the market report comes back
+# blank" actually was. It read as a model-quality problem and was a parser one.
+#
+# So: match the block loosely, then work out the tool name from whichever
+# dialect showed up, and shout in the log if a marker appears that we still
+# cannot read — this must never fail silently again.
+_TOOL_BLOCK_RE = re.compile(r"<tool_call\b([^>]*)>([\s\S]*?)</tool_call>", re.I)
+_ATTR_RE = re.compile(r"""(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""")
+
+# Where the tool name and its arguments hide, across the dialects seen in the
+# wild. Order matters: first hit wins.
+_NAME_KEYS = ("name", "tool", "tool_name", "function")
+_ARG_KEYS = ("arguments", "args", "input", "parameters", "params")
 
 
 # ---------------------------------------------------------------------------
@@ -290,19 +314,86 @@ def _augment_system_with_tools(system: str, tools: list) -> str:
     )
 
 
+def _strip_code_fence(body: str) -> str:
+    """Drop a ```json ... ``` wrapper if the model fenced its arguments.
+
+    Without this the fence reaches json.loads, which raises, and the call went
+    out with args={} — the tool then ran with no arguments, which is its own
+    silent wrong answer rather than an error.
+    """
+    body = body.strip()
+    if not body.startswith("```"):
+        return body
+    lines = body.splitlines()
+    if lines and lines[0].lstrip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip().startswith("```"):
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
 def _parse_tool_calls(text: str) -> list[dict]:
-    """Extract inline <tool_call> markers from generated text → bus tool_calls."""
+    """Extract inline <tool_call> markers from generated text → bus tool_calls.
+
+    Accepts every dialect observed on the bus, not just the one the prompt asks
+    for: quotes of either kind, attributes in any order, and the bare-tag
+    envelope form where the tool name lives inside the JSON body.
+    """
     calls: list[dict] = []
-    for name, call_id, raw_args in _TOOL_RE.findall(text):
-        try:
-            args = json.loads(raw_args.strip()) if raw_args.strip() else {}
-        except json.JSONDecodeError:
-            args = {}
+    for attr_blob, body in _TOOL_BLOCK_RE.findall(text):
+        attrs = {
+            m.group(1).lower(): (m.group(2) or m.group(3) or m.group(4) or "")
+            for m in _ATTR_RE.finditer(attr_blob)
+        }
+        name = next((attrs[k] for k in _NAME_KEYS if attrs.get(k)), "")
+        call_id = attrs.get("id", "")
+
+        payload = _strip_code_fence(body)
+        parsed: object = None
+        if payload:
+            try:
+                parsed = json.loads(payload)
+            except json.JSONDecodeError:
+                log.warning("tool_call body is not valid JSON: %.200s", payload)
+
+        args: dict = {}
+        if isinstance(parsed, dict):
+            if name:
+                # The attribute already named the tool, so the body is the
+                # argument object — unless it nests one under a known key.
+                nested = next(
+                    (parsed[k] for k in _ARG_KEYS if isinstance(parsed.get(k), dict)),
+                    None,
+                )
+                args = nested if nested is not None else parsed
+            else:
+                # Envelope form: {"name": "...", "arguments": {...}}
+                name = next(
+                    (parsed[k] for k in _NAME_KEYS if isinstance(parsed.get(k), str)),
+                    "",
+                )
+                args = next(
+                    (parsed[k] for k in _ARG_KEYS if isinstance(parsed.get(k), dict)),
+                    {},
+                )
+
+        if not name:
+            log.error(
+                "DROPPED tool_call — no tool name in any known position: <tool_call%.120s>%.200s",
+                attr_blob, body,
+            )
+            continue
+
         calls.append({
             "id": call_id or f"toolu_{uuid4().hex[:16]}",
             "name": name,
             "args": args,
         })
+
+    if not calls and _TOOL_OPEN in text:
+        # The filter has already swallowed this text, so without the log line
+        # the run just ends with an empty report and no trace of why.
+        log.error("tool_call marker present but nothing parsed: %.400s", text)
     return calls
 
 

@@ -326,11 +326,13 @@ def job_options_grade() -> None:
             # current Sonnet is. Keeps the nightly jobs off a snapshot that
             # eventually gets retired out from under them.
             #
-            # Sonnet, not Haiku, despite this being the "quick" role: these jobs
-            # bind tools, and on Cleo's inline marker protocol Haiku returns
-            # zero tool calls 44% of the time (measured over 2444 requests) vs
-            # ~0-3% for Sonnet. A dropped tool call here is silent — the job
-            # completes with no data rather than failing.
+            # Sonnet rather than Haiku despite this being the "quick" role.
+            # These jobs bind tools and run unattended overnight, so a silently
+            # empty result is expensive to notice; Sonnet has the strongest
+            # tool-call record on the bus. This is a fallback for when no
+            # provider key is configured — an operator's explicit choice in the
+            # Run Analysis form always wins over it (web/runner.py
+            # _resolve_model gives explicit params top precedence).
             config["quick_think_llm"] = "sonnet"
         llm = None
         try:
@@ -398,11 +400,13 @@ def job_outcome_sweep() -> None:
             # current Sonnet is. Keeps the nightly jobs off a snapshot that
             # eventually gets retired out from under them.
             #
-            # Sonnet, not Haiku, despite this being the "quick" role: these jobs
-            # bind tools, and on Cleo's inline marker protocol Haiku returns
-            # zero tool calls 44% of the time (measured over 2444 requests) vs
-            # ~0-3% for Sonnet. A dropped tool call here is silent — the job
-            # completes with no data rather than failing.
+            # Sonnet rather than Haiku despite this being the "quick" role.
+            # These jobs bind tools and run unattended overnight, so a silently
+            # empty result is expensive to notice; Sonnet has the strongest
+            # tool-call record on the bus. This is a fallback for when no
+            # provider key is configured — an operator's explicit choice in the
+            # Run Analysis form always wins over it (web/runner.py
+            # _resolve_model gives explicit params top precedence).
             config["quick_think_llm"] = "sonnet"
         memory_log = TradingMemoryLog(config)
         # Missing/misconfigured LLM keys degrade the sweep (NOISE/CENSORED
