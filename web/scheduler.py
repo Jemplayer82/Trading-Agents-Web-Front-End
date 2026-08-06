@@ -321,7 +321,11 @@ def job_options_grade() -> None:
             # Same credential fallback as job_outcome_sweep below: this
             # container carries no provider keys; route via the switchboard.
             config["llm_provider"] = "switchboard"
-            config["quick_think_llm"] = "claude-haiku-4-5-20251001"
+            # Bare family name, not a pinned ID: the switchboard hands this
+            # straight to `claude --model`, which resolves it to whatever the
+            # current Haiku is. Keeps the nightly jobs off a snapshot that
+            # eventually gets retired out from under them.
+            config["quick_think_llm"] = "haiku"
         llm = None
         try:
             llm = create_llm_client(
@@ -383,7 +387,11 @@ def job_outcome_sweep() -> None:
             # resolution every night (was: "Missing OPENAI_API_KEY" in
             # logs since at least 2026-07-23).
             config["llm_provider"] = "switchboard"
-            config["quick_think_llm"] = "claude-haiku-4-5-20251001"
+            # Bare family name, not a pinned ID: the switchboard hands this
+            # straight to `claude --model`, which resolves it to whatever the
+            # current Haiku is. Keeps the nightly jobs off a snapshot that
+            # eventually gets retired out from under them.
+            config["quick_think_llm"] = "haiku"
         memory_log = TradingMemoryLog(config)
         # Missing/misconfigured LLM keys degrade the sweep (NOISE/CENSORED
         # entries still resolve; LLM-graded ones defer) instead of killing it.

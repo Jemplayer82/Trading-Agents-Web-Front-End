@@ -130,7 +130,14 @@ def fetch_live_model_ids(url: str = DOCS_URL, timeout: int = 30) -> set[str]:
 
 
 def catalog_model_ids() -> dict[str, set[str]]:
-    """Claude IDs in our catalog, keyed by the provider that offers them."""
+    """Claude IDs in our catalog, keyed by the provider that offers them.
+
+    Only ``claude-*`` values are model IDs. The switchboard menu also carries
+    the bare CLI family aliases (``opus``/``sonnet``/``haiku``), which resolve
+    at call time and by design never appear in Anthropic's ID list — checking
+    them here would report permanent false drift. ``llama3`` and the ``custom``
+    UI sentinel are skipped for the same reason.
+    """
     out: dict[str, set[str]] = {}
     for provider in CLAUDE_PROVIDERS:
         values = {
