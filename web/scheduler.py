@@ -323,9 +323,15 @@ def job_options_grade() -> None:
             config["llm_provider"] = "switchboard"
             # Bare family name, not a pinned ID: the switchboard hands this
             # straight to `claude --model`, which resolves it to whatever the
-            # current Haiku is. Keeps the nightly jobs off a snapshot that
+            # current Sonnet is. Keeps the nightly jobs off a snapshot that
             # eventually gets retired out from under them.
-            config["quick_think_llm"] = "haiku"
+            #
+            # Sonnet, not Haiku, despite this being the "quick" role: these jobs
+            # bind tools, and on Cleo's inline marker protocol Haiku returns
+            # zero tool calls 44% of the time (measured over 2444 requests) vs
+            # ~0-3% for Sonnet. A dropped tool call here is silent — the job
+            # completes with no data rather than failing.
+            config["quick_think_llm"] = "sonnet"
         llm = None
         try:
             llm = create_llm_client(
@@ -389,9 +395,15 @@ def job_outcome_sweep() -> None:
             config["llm_provider"] = "switchboard"
             # Bare family name, not a pinned ID: the switchboard hands this
             # straight to `claude --model`, which resolves it to whatever the
-            # current Haiku is. Keeps the nightly jobs off a snapshot that
+            # current Sonnet is. Keeps the nightly jobs off a snapshot that
             # eventually gets retired out from under them.
-            config["quick_think_llm"] = "haiku"
+            #
+            # Sonnet, not Haiku, despite this being the "quick" role: these jobs
+            # bind tools, and on Cleo's inline marker protocol Haiku returns
+            # zero tool calls 44% of the time (measured over 2444 requests) vs
+            # ~0-3% for Sonnet. A dropped tool call here is silent — the job
+            # completes with no data rather than failing.
+            config["quick_think_llm"] = "sonnet"
         memory_log = TradingMemoryLog(config)
         # Missing/misconfigured LLM keys degrade the sweep (NOISE/CENSORED
         # entries still resolve; LLM-graded ones defer) instead of killing it.

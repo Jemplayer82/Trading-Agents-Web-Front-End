@@ -230,12 +230,34 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # corpus (web/options_learning.py) is graded by whatever model was current
     # when each entry was written. Pin a specific ID for work that needs to
     # stay comparable.
+    # ⚠️ TOOL-CALL RELIABILITY IS THE BINDING CONSTRAINT ON THIS PROVIDER.
+    #
+    # The Claude CLI cannot accept Anthropic tool schemas, so Cleo teaches the
+    # model an inline marker syntax instead (scripts/cleo_llm_handler.py). Weak
+    # models follow that improvised protocol unreliably, and when one returns
+    # zero tool calls the analyst never fetches its data — the run "succeeds"
+    # with an empty market report and broken news rather than erroring.
+    #
+    # Measured on the live bus, multi-tool requests only, 30 days to 2026-08-06
+    # (requests where >=1 tool was bound, counting replies with 0 tool calls):
+    #
+    #     claude-sonnet-4-6    240 req    0% failed
+    #     claude-sonnet-5       33 req    3% failed
+    #     claude-opus-5       1078 req    4% failed
+    #     claude-opus-4-8      371 req   33% failed   <-- do not use for analysts
+    #     claude-haiku-4-5    2444 req   44% failed   <-- REMOVED from quick
+    #
+    # Haiku is gone from "quick" because every quick-role caller is an analyst
+    # that binds tools, and a coin-flip tool-call rate makes it unusable there.
+    # Opus 4.8 stays available in "deep" by explicit request, but it is a third
+    # as reliable as Opus 5 on this path — prefer `opus`.
+    #
+    # Re-measure after any change to Cleo's marker prompt:
+    #   journalctl -u cleo --since -30d | grep -E 'llm_request|streamed reply'
     "switchboard": {
         "quick": [
             ("Sonnet — always latest (via bus)", "sonnet"),
-            ("Haiku — always latest, fastest (via bus)", "haiku"),
             ("Claude Sonnet 5 — pinned (via bus)", "claude-sonnet-5"),
-            ("Claude Haiku 4.5 — pinned (via bus)", "claude-haiku-4-5-20251001"),
             ("Claude Sonnet 4.6 — pinned (via bus)", "claude-sonnet-4-6"),
             ("Llama 3 (via bus)", "llama3"),
             ("Custom model ID", "custom"),
@@ -244,7 +266,7 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("Opus — always latest (via bus)", "opus"),
             ("Sonnet — always latest, cheaper (via bus)", "sonnet"),
             ("Claude Opus 5 — pinned (via bus)", "claude-opus-5"),
-            ("Claude Opus 4.8 — pinned (via bus)", "claude-opus-4-8"),
+            ("Claude Opus 4.8 — pinned, weak tool calling (via bus)", "claude-opus-4-8"),
             ("Claude Sonnet 5 — pinned (via bus)", "claude-sonnet-5"),
             ("Custom model ID", "custom"),
         ],
