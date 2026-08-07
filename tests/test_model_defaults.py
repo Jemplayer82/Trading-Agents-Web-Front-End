@@ -70,13 +70,28 @@ def test_switchboard_default_is_an_always_latest_alias():
     """The switchboard menu leads with the Claude CLI's bare family names.
 
     Cleo hands the value straight to `claude --model`, which resolves `opus` /
-    `sonnet` / `haiku` to whatever is current at call time — so background
-    scans track the latest model without a commit. `_catalog_default` takes the
-    first non-"custom" entry, which is what makes leading position load-bearing
-    rather than cosmetic.
+    `sonnet` to whatever is current at call time — so background scans track
+    the latest model without a commit. `_catalog_default` takes the first
+    non-"custom" entry, which is what makes leading position load-bearing
+    rather than cosmetic. `haiku` is deliberately absent from this provider's
+    menus — see the model_catalog.py comment for the tool-call reliability
+    finding that got it removed.
     """
     assert runner._catalog_default("switchboard", "deep") == "opus"
     assert runner._catalog_default("switchboard", "quick") == "sonnet"
+
+
+def test_haiku_is_not_offered_on_switchboard():
+    """Unreliable tool-call compliance on Cleo's inline marker protocol —
+    live-tested 2026-08-06, stalled through both the original attempt and the
+    corrective retry on market/news/fundamentals. Still fine as a direct
+    Anthropic-API model (real tool binding, different code path) — this
+    exclusion is switchboard-only."""
+    from tradingagents.llm_clients.model_catalog import MODEL_OPTIONS
+
+    for mode in ("quick", "deep"):
+        values = [v for _, v in MODEL_OPTIONS["switchboard"][mode]]
+        assert not any("haiku" in v.lower() for v in values), (mode, values)
 
 
 def test_switchboard_still_offers_pinned_ids_below_the_aliases():

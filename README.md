@@ -430,6 +430,18 @@ journalctl -u cleo -f                    # confirm "registered as 'cleo'"
 
 The daemon handles up to 8 concurrent requests so back-to-back analyst calls during a scan don't block each other. A single-instance flock guard prevents a second accidental copy from splitting the request stream. Updating Cleo is a pull + restart: `git pull && sudo systemctl restart cleo`.
 
+> ⚠️ **Why Claude Haiku isn't offered as a Switchboard model.** The `claude` CLI
+> has no way to accept a real tool schema over this path, so Cleo teaches the
+> model an inline text marker instead (`<tool_call name="...">`). Haiku's grasp
+> of that improvised protocol is unreliable: live-tested against production
+> Cleo, it repeatedly claimed to be "still waiting" for tool results it was
+> already holding, sending analysts back a status update instead of a report —
+> even after a corrective retry. Sonnet and Opus didn't show this. Haiku still
+> works fine as a **direct Anthropic-API** model (real tool binding, a
+> different code path); it's excluded only from the free Switchboard/Cleo
+> route. See the `switchboard` catalog entry in
+> `tradingagents/llm_clients/model_catalog.py` for the technical detail.
+
 #### Streaming protocol
 
 When `stream: true` is in the `llm_request` payload (the default), the handler sends one `llm_stream_chunk` DM per text delta:

@@ -216,7 +216,7 @@ MODEL_OPTIONS: ProviderModeOptions = {
     #
     #     opus   -> claude-opus-5
     #     sonnet -> claude-sonnet-5
-    #     haiku  -> claude-haiku-4-5-20251001
+    #     haiku  -> claude-haiku-4-5-20251001  (resolves fine; not offered here — see below)
     #
     # They lead each list, which makes them the default for background scans —
     # web/runner.py::_catalog_default takes the first non-"custom" entry. The
@@ -259,12 +259,37 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # than left to mislead. If you want real per-model reliability data, grade
     # it on whether the STORED REPORT is a stub (see the retry-guard docstring
     # for the stub signature), not on raw tool-call counts from the Cleo log.
+    #
+    # ⚠️ HAIKU IS DELIBERATELY NOT OFFERED HERE (removed 2026-08-06).
+    #
+    # With the retry-guard fix above in place — which correctly detects a
+    # stall, sends a corrective nudge, retries once, and logs loudly if it
+    # still fails — Haiku was live-tested (SPCX, market/news/fundamentals run
+    # individually against production Cleo, no shortcuts) and stalled through
+    # BOTH the original attempt and the retry on all three analysts in that
+    # run. One example, verbatim, after being explicitly told the data was
+    # already in its own context: "I'm ready to continue, but I haven't yet
+    # received the tool results... Could you please provide the tool
+    # results?" — a question with no one to answer it, in an unattended
+    # pipeline.
+    #
+    # This is not a code bug. Cleo can't hand the CLI a real tool schema, so
+    # it teaches the marker syntax in prose (scripts/cleo_llm_handler.py) with
+    # nothing validating the model's output, and Haiku's grasp of that
+    # improvised protocol is unreliable enough that a single bounded retry —
+    # the most you can add without risking runaway retry loops on a model that
+    # just won't comply — regularly is not enough. Sonnet and Opus did not
+    # show this failure mode in the same live testing.
+    #
+    # Re-add only after re-verifying against the STORED REPORT TEXT (not tool-
+    # call counts, not report length — both looked fine here and were wrong
+    # twice this same day) on a fresh Cleo/model-catalog build. See
+    # README.md's "Claude via Switchboard" section for the same explanation
+    # aimed at operators, not code readers.
     "switchboard": {
         "quick": [
             ("Sonnet — always latest (via bus)", "sonnet"),
-            ("Haiku — always latest, fastest (via bus)", "haiku"),
             ("Claude Sonnet 5 — pinned (via bus)", "claude-sonnet-5"),
-            ("Claude Haiku 4.5 — pinned (via bus)", "claude-haiku-4-5-20251001"),
             ("Claude Sonnet 4.6 — pinned (via bus)", "claude-sonnet-4-6"),
             ("Llama 3 (via bus)", "llama3"),
             ("Custom model ID", "custom"),
