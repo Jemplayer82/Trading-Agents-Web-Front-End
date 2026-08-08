@@ -23,6 +23,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_SWEEP_CENSOR_AFTER_DAYS":       "sweep_censor_after_days",
     "TRADINGAGENTS_MEMORY_CONTEXT_MAX_AGE_DAYS":   "memory_context_max_age_days",
     "TRADINGAGENTS_DEEP_DIVE_STORE_DECISIONS":     "deep_dive_store_decisions",
+    "TRADINGAGENTS_RESEARCH_MANAGER_ROLE":         "research_manager_role",
     "TRADINGAGENTS_DEEP_DIVE_REUSE":                "deep_dive_reuse",
     "TRADINGAGENTS_DEEP_DIVE_REUSE_MAX_AGE_HOURS":  "deep_dive_reuse_max_age_hours",
     "TRADINGAGENTS_QUICK_SCAN_REUSE":               "quick_scan_reuse",
@@ -148,6 +149,11 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "llm_provider": "openai",
     "deep_think_llm": "gpt-5.4",
     "quick_think_llm": "gpt-5.4-mini",
+    # Which LLM tier drives the Research Manager's debate synthesis.
+    # "quick" (default) -- the deep model's route has a documented live
+    # timeout failure for this call shape; set to "deep" (env override
+    # TRADINGAGENTS_RESEARCH_MANAGER_ROLE) to roll back.
+    "research_manager_role": "quick",
     # When None, each provider's client falls back to its own default endpoint
     # (api.openai.com for OpenAI, generativelanguage.googleapis.com for Gemini, ...).
     # The CLI overrides this per provider when the user picks one. Keeping a
