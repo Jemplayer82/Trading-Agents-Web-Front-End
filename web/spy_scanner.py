@@ -39,6 +39,10 @@ from langchain_openai import ChatOpenAI
 from tradingagents.dataflows import schwab_mcp
 from tradingagents.orchestrator import SwitchboardOrchestrator
 
+from tradingagents.agents.utils.agent_utils import get_global_news
+from tradingagents.dataflows.config import set_config
+from tradingagents.llm_clients import create_llm_client
+
 from . import db
 from .llm_helpers import llm_for
 
@@ -539,6 +543,76 @@ def _deep_dive_fingerprint(config: dict[str, Any], selected_analysts: list[str])
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
+def _macro_brief_provider_kwargs(config: dict[str, Any], provider: str) -> dict[str, Any]:
+    """Mirror SwitchboardOrchestrator._provider_kwargs for the scan-level macro-brief LLM call."""
+    provider = provider.lower()
+    if provider == "google":
+        lvl = config.get("google_thinking_level")
+        return {"thinking_level": lvl} if lvl else {}
+    if provider == "openai":
+        effort = config.get("openai_reasoning_effort")
+        return {"reasoning_effort": effort} if effort else {}
+    if provider == "anthropic":
+        effort = config.get("anthropic_effort")
+        return {"effort": effort} if effort else {}
+    return {}
+
+
+def _compute_macro_brief(config: dict[str, Any], trade_date: str, scan_id: int) -> None:
+    """Fetch macro/global news once and summarize it into config['macro_brief'].
+
+    Shared by every ticker's news analyst in this scan run (see
+    tradingagents/agents/analysts/news_analyst.py's macro_brief parameter and
+    SwitchboardOrchestrator's news analyst_factories entry) instead of each
+    dive independently re-fetching/re-summarizing the same ticker-independent
+    macro news. Best-effort: on ANY failure config['macro_brief'] is left
+    unset so news_analyst falls back to its default per-ticker
+    get_global_news tool-calling behavior for this scan rather than failing
+    the scan.
+    """
+    try:
+        # get_global_news / route_to_vendor pull look_back_days/limit
+        # defaults from the module-level config singleton (get_config()), not
+        # from this function's `config` param directly — set_config() first
+        # so THIS scan's global_news_lookback_days/global_news_article_limit/
+        # global_news_queries are what get read (same convention
+        # SwitchboardOrchestrator.__init__ already follows via its own
+        # set_config(self.config) call).
+        set_config(config)
+        news_text = get_global_news.func(trade_date)
+        if not news_text:
+            return
+        provider = config.get("quick_llm_provider") or config.get("llm_provider", "ollama")
+        quick_client = create_llm_client(
+            provider=provider,
+            model=config["quick_think_llm"],
+            base_url=config.get("quick_backend_url") or config.get("backend_url"),
+            **_macro_brief_provider_kwargs(config, provider),
+        )
+        quick_llm = quick_client.get_llm()
+        prompt = (
+            "Summarize the following macro/world news into a compact, "
+            "150-250 word brief capturing the state of the macro/world news "
+            f"relevant to trading, as of {trade_date}. Be concrete — name "
+            "specific events, figures, and sources where present; do not "
+            "pad with generic commentary.\n\n"
+            f"{news_text}"
+        )
+        response = quick_llm.invoke(prompt)
+        summary = getattr(response, "content", None)
+        if summary is None and isinstance(response, str):
+            summary = response
+        if summary:
+            config["macro_brief"] = summary
+            log.info("[spy %s] macro brief computed (%d chars)", scan_id, len(summary))
+    except Exception:
+        log.warning(
+            "[spy %s] macro brief computation failed — news analysts fall back "
+            "to per-ticker get_global_news for this scan",
+            scan_id, exc_info=True,
+        )
+
+
 def run_deep_dives(
     scan_id: int,
     candidates: list[dict[str, Any]],
@@ -565,6 +639,13 @@ def run_deep_dives(
     """
     log.info("[spy %s] deep dive on %d tickers", scan_id, len(candidates))
     db.update_spy_scan(scan_id, status="running_deep", deep_total=len(candidates))
+
+    if (
+        "news" in selected_analysts
+        and config.get("macro_brief") is None
+        and config.get("macro_brief_enabled", True)
+    ):
+        _compute_macro_brief(config, trade_date, scan_id)
 
     enriched: list[dict[str, Any]] = []
     completed = 0
