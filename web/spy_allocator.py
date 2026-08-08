@@ -143,7 +143,7 @@ PER_TICKER_TEMPLATE = (
 
 
 def _llm(config: dict[str, Any]):
-    return llm_for(config, deep=True, temperature=0.1)
+    return llm_for(config, deep=False, temperature=0.1)
 
 
 # ─── Fallbacks ────────────────────────────────────────────────────────────────
