@@ -111,3 +111,23 @@ def test_preexisting_macro_brief_is_never_overwritten(tmp_db, monkeypatch):
     config = _run(tickers=["AAPL"], config_extra={"macro_brief": "already set by caller"})
     assert calls["fetch"] == 0
     assert config["macro_brief"] == "already set by caller"
+
+
+def test_vendor_fetch_failure_string_leaves_macro_brief_unset(tmp_db, monkeypatch, caplog):
+    """Real yfinance failure mode: it returns an error string, not an exception."""
+    calls = _install(monkeypatch, fetch_text="Error fetching global news: rate limited")
+    config = _run(tickers=["AAPL"])
+    assert config.get("macro_brief") is None
+    assert calls["fetch"] == 1
+    assert calls["summarize"] == 0
+    assert "no usable news" in caplog.text.lower()
+
+
+def test_no_global_news_found_string_leaves_macro_brief_unset(tmp_db, monkeypatch, caplog):
+    """yfinance 'no news found' placeholder must not become a fake macro brief."""
+    calls = _install(monkeypatch, fetch_text="No global news found for 2026-08-08")
+    config = _run(tickers=["AAPL"])
+    assert config.get("macro_brief") is None
+    assert calls["fetch"] == 1
+    assert calls["summarize"] == 0
+    assert "no usable news" in caplog.text.lower()

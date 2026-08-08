@@ -305,7 +305,7 @@ def _quick_scan_one(
                     resp = llm.invoke([
                         {"role": "system", "content": QUICK_SCAN_SYSTEM},
                         {"role": "user", "content": prompt},
-                    ])
+                        ])
                 break
             except Exception as e:
                 msg = str(e).lower()
@@ -542,6 +542,20 @@ def _deep_dive_fingerprint(config: dict[str, Any], selected_analysts: list[str])
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
+def _is_usable_global_news(news_text: str | None) -> bool:
+    """Return True only if `news_text` is actual content, not a vendor error/no-news placeholder."""
+    if not news_text:
+        return False
+    stripped = news_text.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("Error fetching global news:"):
+        return False
+    if stripped.startswith("No global news found"):
+        return False
+    return True
+
+
 def _macro_brief_provider_kwargs(config: dict[str, Any], provider: str) -> dict[str, Any]:
     """Mirror SwitchboardOrchestrator._provider_kwargs for the scan-level macro-brief LLM call."""
     provider = provider.lower()
@@ -579,7 +593,12 @@ def _compute_macro_brief(config: dict[str, Any], trade_date: str, scan_id: int) 
         # set_config(self.config) call).
         set_config(config)
         news_text = get_global_news.func(trade_date)
-        if not news_text:
+        if not _is_usable_global_news(news_text):
+            log.warning(
+                "[spy %s] global news fetch returned no usable news — "
+                "news analysts fall back to per-ticker get_global_news for this scan",
+                scan_id,
+            )
             return
         provider = config.get("quick_llm_provider") or config.get("llm_provider", "ollama")
         quick_client = create_llm_client(
