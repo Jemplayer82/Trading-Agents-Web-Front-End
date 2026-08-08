@@ -22,6 +22,7 @@ exposes market data and account reads exclusively.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import threading
@@ -35,7 +36,7 @@ import yfinance as yf
 
 from tradingagents.dataflows import schwab_mcp
 
-from . import db, options_allocator, options_data, options_learning, scan_queue, spy_scanner
+from . import db, market_cache, options_allocator, options_data, options_learning, scan_queue, spy_scanner
 from .runner import build_config
 from .spy_tickers import get_sp500_tickers
 
@@ -47,6 +48,17 @@ ALWAYS_DEEP = ("SPY",)  # tickers guaranteed a deep dive every run, HOLD or not
 MARKET_OPEN_ET = (9, 35)  # allocation waits for live quotes on trading days
 SETTLE_HOUR_ET = 17     # expiry-day positions settle only after this hour
 STALE_ALERT_THRESHOLD = 3
+
+# Same-day cache of the movers pre-screen. All three daily options
+# accounts run the identical screen over the identical (24h-cached)
+# S&P 500 universe, each otherwise paying its own ~500-ticker
+# yf.download. trade_date scoping means a result can never be served
+# into a later trading day; the 4h TTL means a build kicked off
+# manually in the afternoon re-screens rather than trading off a stale
+# morning list.
+_PRESCREEN_TTL_SECONDS = 4 * 3600
+_PRESCREEN_CACHE = market_cache.SameDayCache("options-prescreen",
+                                             ttl_seconds=_PRESCREEN_TTL_SECONDS)
 
 # Serializes the POST-WAIT phase (mark-to-market -> chain fetch ->
 # allocator -> open/close -> complete_spy_scan) across concurrent
@@ -155,8 +167,28 @@ def _mover_score(closes: list[float], volumes: list[float]) -> float | None:
     return ret5 + 0.5 * ret20 + 3.0 * min(vol_kick, 3.0)
 
 
-def prescreen(tickers: list[str], top_n: int = PRESCREEN_TOP) -> list[str]:
-    """Rank the universe by mover score from one bulk download; top_n survive."""
+def prescreen(
+    tickers: list[str],
+    top_n: int = PRESCREEN_TOP,
+    *,
+    trade_date: str | None = None,
+) -> list[str]:
+    """Rank the universe by mover score from one bulk download; top_n survive.
+
+    Cached same-trading-day so the three daily options accounts don't each
+    pay for an identical ~500-ticker yfinance download.  trade_date=None
+    bypasses the cache for callers that need a fresh screen.
+    """
+    if trade_date is not None:
+        key = (
+            top_n,
+            hashlib.sha256("\n".join(sorted(tickers)).encode()).hexdigest()[:16],
+        )
+        cached = _PRESCREEN_CACHE.get(trade_date, key)
+        if cached is not None:
+            log.info("[options] reusing same-day movers pre-screen (%d tickers)", len(cached))
+            return list(cached)
+
     try:
         raw = yf.download(tickers, period="1mo", auto_adjust=True, progress=False, threads=True)
     except Exception as exc:
@@ -180,7 +212,10 @@ def prescreen(tickers: list[str], top_n: int = PRESCREEN_TOP) -> list[str]:
             if s is not None:
                 scored.append((s, tickers[0]))
     scored.sort(key=lambda x: (-x[0], x[1]))
-    return [t for _, t in scored[:top_n]]
+    result = [t for _, t in scored[:top_n]]
+    if result and trade_date is not None:
+        _PRESCREEN_CACHE.put(trade_date, key, list(result))
+    return result
 
 
 def select_deep_dive_targets(quick_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -498,7 +533,7 @@ def _apply_intraday_stops(
     quoted positions and closes breaches immediately.
 
     Fill convention (standard backtest rule):
-      - previous mark ABOVE the stop, new quote at/below it -> the price
+      - previous mark ABOVE the stop, fresh quote at/below it -> the price
         crossed the level sometime this interval, so fill AT the stop level,
         like a working stop order would have;
       - first observation already below the stop (overnight gap / never
@@ -726,7 +761,7 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
     with _phase("Couldn't fetch the S&P 500 ticker list"):
         universe = get_sp500_tickers()
     with _phase("Movers pre-screen failed"):
-        movers = prescreen(universe, PRESCREEN_TOP)
+        movers = prescreen(universe, PRESCREEN_TOP, trade_date=trade_date)
     if not movers:
         raise RuntimeError("Movers pre-screen returned no tickers")
     # Quick-scan the top 250 movers + SPY (the index gauge, always included).

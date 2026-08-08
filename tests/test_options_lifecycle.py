@@ -3,11 +3,13 @@ ledger's transactional invariants, expiry settlement idempotency, and the
 kind-scoped scan queries."""
 
 import sqlite3
+import threading
 from datetime import date, datetime, timedelta
 
+import pandas as pd
 import pytest
 
-from web import db, options_engine
+from web import db, market_cache, options_engine
 
 pytestmark = pytest.mark.unit
 
@@ -704,3 +706,168 @@ def test_prompt_shows_days_held_and_ride_guidance(monkeypatch):
     user = llm.invoke.call_args[0][0][1]["content"]
     assert "WINNERS RIDE" in system and "trailing stop" in system.lower()
     assert "held " in user and "d left" in user  # days-held now in every open line
+
+
+# ── Same-day movers pre-screen cache ─────────────────────────────────────────
+
+class TestPrescreenSameDayCache:
+    @pytest.fixture(autouse=True)
+    def _clear_prescreen_cache(self):
+        options_engine._PRESCREEN_CACHE.clear()
+        yield
+        options_engine._PRESCREEN_CACHE.clear()
+
+    @pytest.fixture()
+    def fake_download(self, monkeypatch):
+        calls = {"n": 0}
+        rows = 21
+        data = {}
+        for i, ticker in enumerate(["AAA", "BBB", "CCC"]):
+            start = 100.0 + i * 10.0
+            data[("Close", ticker)] = [start + j for j in range(rows)]
+            data[("Volume", ticker)] = [1_000_000 + i * 100_000] * rows
+        df = pd.DataFrame(data)
+
+        def _download(*args, **kwargs):
+            calls["n"] += 1
+            return df
+
+        monkeypatch.setattr(options_engine.yf, "download", _download)
+        return {"calls": calls, "df": df, "download": _download}
+
+    def test_second_same_day_call_is_a_cache_hit(self, fake_download):
+        tickers = ["AAA", "BBB", "CCC"]
+        trade_date = "2026-07-29"
+        r1 = options_engine.prescreen(tickers, 3, trade_date=trade_date)
+        r2 = options_engine.prescreen(tickers, 3, trade_date=trade_date)
+        assert fake_download["calls"]["n"] == 1
+        assert r1 == r2
+
+    def test_returns_a_copy_not_the_cached_list(self, fake_download):
+        tickers = ["AAA", "BBB", "CCC"]
+        trade_date = "2026-07-29"
+        r1 = options_engine.prescreen(tickers, 3, trade_date=trade_date)
+        r1.append("SPY")
+        r2 = options_engine.prescreen(tickers, 3, trade_date=trade_date)
+        assert "SPY" not in r2
+        assert r1 is not r2
+        assert fake_download["calls"]["n"] == 1
+
+    def test_different_trade_date_refetches(self, fake_download):
+        tickers = ["AAA", "BBB", "CCC"]
+        r1 = options_engine.prescreen(tickers, 3, trade_date="2026-07-29")
+        r2 = options_engine.prescreen(tickers, 3, trade_date="2026-07-30")
+        assert fake_download["calls"]["n"] == 2
+        assert r1 == r2
+
+    def test_prior_day_entry_is_evicted(self, fake_download):
+        tickers = ["AAA", "BBB", "CCC"]
+        options_engine.prescreen(tickers, 3, trade_date="2026-07-29")
+        options_engine.prescreen(tickers, 3, trade_date="2026-07-30")
+        assert options_engine._PRESCREEN_CACHE.stats()["size"] == 1
+        options_engine.prescreen(tickers, 3, trade_date="2026-07-29")
+        assert fake_download["calls"]["n"] == 3
+        assert options_engine._PRESCREEN_CACHE.stats()["size"] == 1
+
+    def test_different_top_n_refetches(self, fake_download):
+        tickers = ["AAA", "BBB", "CCC"]
+        options_engine.prescreen(tickers, 3, trade_date="2026-07-29")
+        options_engine.prescreen(tickers, 2, trade_date="2026-07-29")
+        assert fake_download["calls"]["n"] == 2
+
+    def test_different_ticker_set_refetches(self, fake_download):
+        options_engine.prescreen(["AAA", "BBB", "CCC"], 3, trade_date="2026-07-29")
+        options_engine.prescreen(["AAA", "BBB"], 3, trade_date="2026-07-29")
+        assert fake_download["calls"]["n"] == 2
+
+    def test_ticker_order_does_not_matter(self, fake_download):
+        r1 = options_engine.prescreen(["AAA", "BBB", "CCC"], 3, trade_date="2026-07-29")
+        r2 = options_engine.prescreen(["CCC", "AAA", "BBB"], 3, trade_date="2026-07-29")
+        assert fake_download["calls"]["n"] == 1
+        assert r1 == r2
+
+    def test_no_trade_date_bypasses_the_cache(self, fake_download):
+        tickers = ["AAA", "BBB", "CCC"]
+        r1 = options_engine.prescreen(tickers, 3, trade_date=None)
+        r2 = options_engine.prescreen(tickers, 3, trade_date=None)
+        assert fake_download["calls"]["n"] == 2
+        assert r1 == r2
+        assert options_engine._PRESCREEN_CACHE.stats()["size"] == 0
+
+    def test_ttl_expiry_refetches(self, fake_download, monkeypatch):
+        tickers = ["AAA", "BBB", "CCC"]
+        trade_date = "2026-07-29"
+        start = 1000.0
+        monkeypatch.setattr(market_cache, "_now", lambda: start)
+        r1 = options_engine.prescreen(tickers, 3, trade_date=trade_date)
+        monkeypatch.setattr(
+            market_cache,
+            "_now",
+            lambda: start + options_engine._PRESCREEN_TTL_SECONDS + 1,
+        )
+        r2 = options_engine.prescreen(tickers, 3, trade_date=trade_date)
+        assert fake_download["calls"]["n"] == 2
+        assert r1 == r2
+
+    def test_empty_result_is_not_cached(self, monkeypatch):
+        calls = {"n": 0}
+
+        def empty_download(*args, **kwargs):
+            calls["n"] += 1
+            return pd.DataFrame()
+
+        monkeypatch.setattr(options_engine.yf, "download", empty_download)
+        tickers = ["AAA", "BBB", "CCC"]
+        trade_date = "2026-07-29"
+        r1 = options_engine.prescreen(tickers, 3, trade_date=trade_date)
+        r2 = options_engine.prescreen(tickers, 3, trade_date=trade_date)
+        assert r1 == []
+        assert r2 == []
+        assert calls["n"] == 2
+        assert options_engine._PRESCREEN_CACHE.stats()["size"] == 0
+
+    def test_download_failure_is_not_cached(self, fake_download, monkeypatch):
+        calls = {"n": 0}
+        df = fake_download["df"]
+
+        def flaky_download(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("network down")
+            return df
+
+        monkeypatch.setattr(options_engine.yf, "download", flaky_download)
+        tickers = ["AAA", "BBB", "CCC"]
+        trade_date = "2026-07-29"
+        with pytest.raises(RuntimeError, match="pre-screen bulk download failed"):
+            options_engine.prescreen(tickers, 3, trade_date=trade_date)
+        assert options_engine._PRESCREEN_CACHE.stats()["size"] == 0
+        r = options_engine.prescreen(tickers, 3, trade_date=trade_date)
+        assert calls["n"] == 2
+        assert r == ["AAA", "BBB", "CCC"]
+
+    def test_concurrent_callers_get_consistent_results(self, fake_download):
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                results.append(
+                    options_engine.prescreen(
+                        ["AAA", "BBB", "CCC"], 3, trade_date="2026-07-29"
+                    )
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+        assert not errors
+        assert len(results) == 3
+        assert results[0] == results[1] == results[2]
+        assert results[0] is not results[1]
+        assert results[0] is not results[2]
+        assert results[1] is not results[2]
