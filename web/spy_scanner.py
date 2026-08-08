@@ -22,6 +22,8 @@ every 5s for its progress bar.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import re
@@ -321,9 +323,34 @@ def _quick_scan_one(
                 "reasoning": f"scan error: {exc}", "entry_price": 0.0, "error": str(exc)}
 
 
+def _quick_scan_fingerprint(config: dict[str, Any]) -> str:
+    """Stable fingerprint of the quick-scan LLM config, for same-day reuse of
+    quick-scan signal/conviction across scans (see run_quick_scan and
+    db.find_reusable_quick_results).
+
+    Deliberately narrower than _deep_dive_fingerprint: the quick-scan prompt
+    (QUICK_SCAN_SYSTEM/QUICK_SCAN_USER) never varies with bias, debate
+    rounds, language, or the analyst set — only with the model actually
+    generating the signal.
+    """
+    quick_provider = (config.get("quick_llm_provider") or config.get("llm_provider") or "").lower()
+    payload: dict[str, Any] = {
+        "v": 1,
+        "quick_provider": quick_provider,
+        "quick_model": config.get("quick_think_llm"),
+        "quick_url": config.get("quick_backend_url") or config.get("backend_url"),
+    }
+    if quick_provider == "switchboard":
+        payload["switchboard_target_agent"] = os.environ.get("SWITCHBOARD_TARGET_AGENT")
+        payload["switchboard_provider"] = os.environ.get("SWITCHBOARD_PROVIDER")
+    encoded = json.dumps(payload, sort_keys=True, default=str).encode()
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
 def run_quick_scan(
     scan_id: int,
     tickers: list[str],
+    trade_date: str,
     config: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Fetch bulk price data then score each ticker with a lightweight LLM call.
@@ -332,9 +359,24 @@ def run_quick_scan(
     limited); tickers missing from the result are scored on empty data and
     come back HOLD/1. quick_count is flushed to the DB every 50 completions,
     and the cancel flag is checked per completed future.
+
+    Same-day reuse (config["quick_scan_reuse"], default on): before scoring,
+    fetch signal/conviction/reasoning for any ticker already scored today by
+    another same-day scan with an identical quick-scan fingerprint (see
+    _quick_scan_fingerprint) and skip the LLM call for those tickers.
+    entry_price is always recomputed from this scan's own price data — never
+    reused — since spy_quick_results doesn't store it and the allocators
+    depend on a current price. The main payoff isn't the quick-LLM savings
+    themselves; it's that identical quick results make every same-day scan
+    converge on the same top-N tickers, which is what drives deep-dive reuse
+    toward a full hit rate.
     """
     log.info("[spy %s] quick scan: fetching price data for %d tickers", scan_id, len(tickers))
-    db.update_spy_scan(scan_id, status="running_quick", quick_total=len(tickers))
+    quick_fingerprint = _quick_scan_fingerprint(config)
+    db.update_spy_scan(
+        scan_id, status="running_quick", quick_total=len(tickers),
+        quick_fingerprint=quick_fingerprint,
+    )
 
     try:
         raw = yf.download(tickers, period="1mo", auto_adjust=True, progress=False, threads=True)
@@ -363,20 +405,52 @@ def run_quick_scan(
     llm = _llm_quick(config)
     results: list[dict[str, Any]] = []
     completed = 0
+    quick_reused = 0
 
     # The thread pool is sized to the max budget; the DynamicGate (resized by
     # the monitor thread) is what actually throttles concurrent LLM calls so
     # single-ticker analyses keep priority. The scan floors at 1 worker.
     budget = _total_budget()
 
+    reuse_map: dict[str, dict[str, Any]] = {}
+    if config.get("quick_scan_reuse", True):
+        try:
+            reuse_map = db.find_reusable_quick_results(
+                trade_date, quick_fingerprint, exclude_scan_id=scan_id,
+                max_age_hours=config.get("deep_dive_reuse_max_age_hours", 6),
+            )
+        except Exception:
+            log.warning("[spy %s] quick-scan reuse lookup failed", scan_id, exc_info=True)
+            reuse_map = {}
+        if reuse_map:
+            log.info(
+                "[spy %s] quick scan: %d/%d tickers have a reusable same-day result",
+                scan_id, len(reuse_map), len(tickers),
+            )
+
     with _GateMonitor(DynamicGate(budget)) as gate:
         def _scan_one(t: str) -> dict[str, Any]:
             if db.is_spy_scan_cancelled(scan_id):
                 return {"ticker": t, "signal": "HOLD", "conviction": 0,
                         "reasoning": "cancelled", "entry_price": 0.0, "skipped": True}
-            return _quick_scan_one(
-                t, price_data_map.get(t, {"close": [], "volume": []}), "Unknown", llm, gate
-            )
+            price_data = price_data_map.get(t, {"close": [], "volume": []})
+            cached = reuse_map.get(t)
+            if cached is not None:
+                closes = price_data.get("close", [])
+                # entry_price is never reused — spy_quick_results doesn't
+                # store it and the allocators need a current price — so a
+                # ticker missing today's price data falls through to the
+                # normal LLM path instead of reusing with a stale/zero price.
+                if len(closes) >= 5:
+                    return {
+                        "ticker": t,
+                        "signal": cached["signal"],
+                        "conviction": cached["conviction"],
+                        "reasoning": cached["reasoning"],
+                        "entry_price": float(closes[-1]),
+                        "reused_quick": True,
+                    }
+            return _quick_scan_one(t, price_data, "Unknown", llm, gate)
 
         with ThreadPoolExecutor(max_workers=budget) as pool:
             futures = {pool.submit(_scan_one, t): t for t in tickers}
@@ -393,6 +467,8 @@ def run_quick_scan(
                 if result.get("skipped"):
                     continue
                 results.append(result)
+                if result.get("reused_quick"):
+                    quick_reused += 1
                 db.upsert_spy_quick_result(
                     scan_id=scan_id,
                     ticker=result["ticker"],
@@ -411,7 +487,56 @@ def run_quick_scan(
                     pool.shutdown(wait=False, cancel_futures=True)
                     raise ScanCancelled()
 
+    if quick_reused:
+        log.info("[spy %s] quick scan: reused %d/%d LLM calls", scan_id, quick_reused, len(results))
+
     return results
+
+
+def _deep_dive_fingerprint(config: dict[str, Any], selected_analysts: list[str]) -> str:
+    """Stable fingerprint of everything in `config` that shapes the SHARED
+    pipeline stage (analysts -> investment debate -> research manager ->
+    trader -> risk debate), for same-day reuse across paper accounts (see
+    _dive_inner and SwitchboardOrchestrator.rerun_decision).
+
+    Deliberately excludes `bias` (re-applied fresh per account on reuse —
+    including it would defeat the point of the feature) and `aggressiveness`
+    itself (fully captured here via the debate/risk round counts it maps to,
+    per web/runner.py's aggressiveness_to_rounds). Also excludes memory-log
+    paths and `deep_dive_store_decisions` — neither changes what the shared
+    stage produces.
+
+    Bump the "v" field to invalidate every existing fingerprint after a
+    change to what the shared stage reads.
+    """
+    deep_provider = (config.get("deep_llm_provider") or config.get("llm_provider") or "").lower()
+    quick_provider = (config.get("quick_llm_provider") or config.get("llm_provider") or "").lower()
+    payload: dict[str, Any] = {
+        "v": 1,
+        "deep_provider": deep_provider,
+        "quick_provider": quick_provider,
+        "deep_model": config.get("deep_think_llm"),
+        "quick_model": config.get("quick_think_llm"),
+        "deep_url": config.get("deep_backend_url") or config.get("backend_url"),
+        "quick_url": config.get("quick_backend_url") or config.get("backend_url"),
+        "debate_rounds": config.get("max_debate_rounds", 1),
+        "risk_rounds": config.get("max_risk_discuss_rounds", 1),
+        "language": config.get("output_language", "English"),
+        "google_thinking_level": config.get("google_thinking_level"),
+        "openai_reasoning_effort": config.get("openai_reasoning_effort"),
+        "anthropic_effort": config.get("anthropic_effort"),
+        "data_vendors": dict(sorted((config.get("data_vendors") or {}).items())),
+        "analysts": sorted(selected_analysts or []),
+    }
+    # The switchboard provider resolves a bare alias ("opus") to whatever
+    # snapshot the bus handler is currently targeting — retargeting the bus
+    # is effectively a model change, so fold its env-driven routing into the
+    # fingerprint too (config alone can't see it).
+    if "switchboard" in (deep_provider, quick_provider):
+        payload["switchboard_target_agent"] = os.environ.get("SWITCHBOARD_TARGET_AGENT")
+        payload["switchboard_provider"] = os.environ.get("SWITCHBOARD_PROVIDER")
+    encoded = json.dumps(payload, sort_keys=True, default=str).encode()
+    return hashlib.sha256(encoded).hexdigest()[:16]
 
 
 def run_deep_dives(
@@ -427,12 +552,23 @@ def run_deep_dives(
     success backfills analysis_id + final signal onto the spy quick result.
     A failed dive is returned with an "error" key rather than raised — the
     allocator just sees fewer usable candidates.
+
+    Same-day reuse (config["deep_dive_reuse"], default on): before running
+    the full pipeline, check for a completed same-day analysis with an
+    identical shared-stage fingerprint (same models/rounds/language/analysts
+    — see _deep_dive_fingerprint) and, if found, rerun only the Portfolio
+    Manager over its saved state instead of the whole graph. This is how
+    multiple paper accounts (or equity + options scans) deep-diving the same
+    ticker on the same day avoid paying for the shared stage more than once.
+    Reuse can never fail a dive: any problem with the donor or the rerun
+    falls straight back to a full pipeline run.
     """
     log.info("[spy %s] deep dive on %d tickers", scan_id, len(candidates))
     db.update_spy_scan(scan_id, status="running_deep", deep_total=len(candidates))
 
     enriched: list[dict[str, Any]] = []
     completed = 0
+    reused = 0
     budget = _total_budget()
 
     def _dive(c: dict[str, Any], gate: DynamicGate) -> dict[str, Any]:
@@ -443,19 +579,24 @@ def run_deep_dives(
             return _dive_inner(c, ticker)
 
     def _dive_inner(c: dict[str, Any], ticker: str) -> dict[str, Any]:
-        analysis_id = db.create_analysis({
-            "ticker": ticker,
-            "trade_date": trade_date,
-            "provider": config.get("llm_provider"),
-            "deep_model": config.get("deep_think_llm"),
-            "quick_model": config.get("quick_think_llm"),
-            "analysts": selected_analysts,
-            "research_depth": config.get("max_debate_rounds", 1),
-            "language": config.get("output_language", "English"),
-        })
-        try:
-            orch = SwitchboardOrchestrator(config=config, selected_analysts=selected_analysts)
-            final_state, signal = orch.run(ticker, trade_date)
+        fingerprint = _deep_dive_fingerprint(config, selected_analysts)
+
+        def _analysis_params() -> dict[str, Any]:
+            return {
+                "ticker": ticker,
+                "trade_date": trade_date,
+                "provider": config.get("llm_provider"),
+                "deep_model": config.get("deep_think_llm"),
+                "quick_model": config.get("quick_think_llm"),
+                "analysts": selected_analysts,
+                "research_depth": config.get("max_debate_rounds", 1),
+                "language": config.get("output_language", "English"),
+                "config_fingerprint": fingerprint,
+            }
+
+        def _finish(analysis_id: int, orch: SwitchboardOrchestrator,
+                     final_state: dict[str, Any], signal: str,
+                     reused_from: int | None) -> dict[str, Any]:
             signal = signal or c.get("signal") or "HOLD"
             db.complete_analysis(analysis_id, final_state, signal)
             db.upsert_spy_quick_result(
@@ -476,12 +617,53 @@ def run_deep_dives(
                     )
                 except Exception:
                     log.exception("[spy %s] memory-log store failed for %s", scan_id, ticker)
-            return {
-                **c,
-                "signal": signal,
-                "analysis_id": analysis_id,
-                "final_decision": final_state.get("final_trade_decision", ""),
-            }
+            out = {**c, "signal": signal, "analysis_id": analysis_id, "final_decision": fd}
+            if reused_from is not None:
+                out["reused_from"] = reused_from
+            return out
+
+        if config.get("deep_dive_reuse", True):
+            try:
+                donor = db.find_reusable_analysis(
+                    ticker, trade_date, fingerprint,
+                    max_age_hours=config.get("deep_dive_reuse_max_age_hours", 6),
+                )
+            except Exception:
+                log.warning("[spy %s] reuse lookup failed for %s", scan_id, ticker, exc_info=True)
+                donor = None
+            if donor is not None:
+                try:
+                    orch = SwitchboardOrchestrator(config=config, selected_analysts=selected_analysts)
+                    final_state, signal = orch.rerun_decision(donor["full_state"], ticker)
+                except Exception:
+                    # Cache path failed for ANY reason (malformed/corrupt donor
+                    # state, empty rerun output, provider error) — never let
+                    # that fail the dive. Fall through to the full pipeline
+                    # below. Nothing was created yet, so there's nothing to
+                    # clean up (see the reaper-orphan note just below).
+                    log.warning(
+                        "[spy %s] reuse rerun failed for %s (donor #%s) — "
+                        "falling back to a full pipeline run",
+                        scan_id, ticker, donor.get("id"), exc_info=True,
+                    )
+                else:
+                    # Only create the row now that the rerun actually
+                    # succeeded — a row created earlier and abandoned on
+                    # failure would sit 'running' and eventually trip the
+                    # stuck-analysis reaper for no reason.
+                    analysis_id = db.create_analysis(_analysis_params())
+                    db.mark_analysis_reused(analysis_id, donor["id"])
+                    log.info(
+                        "[spy %s] %s: reused shared stage from analysis #%s",
+                        scan_id, ticker, donor["id"],
+                    )
+                    return _finish(analysis_id, orch, final_state, signal, donor["id"])
+
+        analysis_id = db.create_analysis(_analysis_params())
+        try:
+            orch = SwitchboardOrchestrator(config=config, selected_analysts=selected_analysts)
+            final_state, signal = orch.run(ticker, trade_date)
+            return _finish(analysis_id, orch, final_state, signal, None)
         except Exception as exc:
             log.exception("[spy %s] deep dive failed for %s", scan_id, ticker)
             db.fail_analysis(analysis_id, str(exc))
@@ -500,13 +682,18 @@ def run_deep_dives(
                     continue
                 enriched.append(result)
                 completed += 1
-                db.update_spy_scan(scan_id, deep_count=completed)
+                if result.get("reused_from") is not None:
+                    reused += 1
+                db.update_spy_scan(scan_id, deep_count=completed, deep_reused_count=reused)
                 log.info("[spy %s] deep dive %d/%d: %s", scan_id, completed, len(candidates), result["ticker"])
 
                 if db.is_spy_scan_cancelled(scan_id):
                     log.info("[spy %s] cancellation requested — stopping deep dives", scan_id)
                     pool.shutdown(wait=False, cancel_futures=True)
                     raise ScanCancelled()
+
+    if reused:
+        log.info("[spy %s] deep dive: reused %d/%d shared-stage analyses", scan_id, reused, len(enriched))
 
     return enriched
 

@@ -642,7 +642,7 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
     log.info("[options %s] quick-scanning %d movers (top %d + %s)",
              scan_id, len(movers), PRESCREEN_TOP, ",".join(ALWAYS_DEEP))
     with _phase("Quick scan failed"):
-        quick_results = spy_scanner.run_quick_scan(scan_id, movers, config)
+        quick_results = spy_scanner.run_quick_scan(scan_id, movers, trade_date, config)
     if db.is_spy_scan_cancelled(scan_id):
         raise spy_scanner.ScanCancelled()
     # Wholesale failure must fail the run, not complete green with an empty

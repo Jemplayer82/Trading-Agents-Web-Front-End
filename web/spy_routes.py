@@ -468,7 +468,7 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
     with _phase("Couldn't fetch the S&P 500 ticker list"):
         tickers = get_sp500_tickers()
     with _phase("Quick scan failed"):
-        quick_results = spy_scanner.run_quick_scan(scan_id, tickers, config)
+        quick_results = spy_scanner.run_quick_scan(scan_id, tickers, trade_date, config)
 
     if db.is_spy_scan_cancelled(scan_id):
         raise spy_scanner.ScanCancelled()
