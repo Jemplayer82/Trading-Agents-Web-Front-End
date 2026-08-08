@@ -28,6 +28,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_DEEP_DIVE_REUSE":                "deep_dive_reuse",
     "TRADINGAGENTS_DEEP_DIVE_REUSE_MAX_AGE_HOURS":  "deep_dive_reuse_max_age_hours",
     "TRADINGAGENTS_QUICK_SCAN_REUSE":               "quick_scan_reuse",
+    "TRADINGAGENTS_MACRO_BRIEF_ENABLED":            "macro_brief_enabled",
     "TRADINGAGENTS_OPTIONS_LESSONS_MIN_CLOSED":    "options_lessons_min_closed",
     "TRADINGAGENTS_OPTIONS_REFLECT_MIN_NEW_CLOSED": "options_reflect_min_new_closed",
     "TRADINGAGENTS_OPTIONS_INTRADAY_STOP":         "options_intraday_stop",
@@ -122,6 +123,17 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # evening ~22:00 ET run is already dated "tomorrow" in UTC and would
     # otherwise look like a fresh same-day donor to the next morning's scan).
     "deep_dive_reuse_max_age_hours": 6,
+    # Scan-level shared macro/global-news brief: web/spy_scanner.py's
+    # run_deep_dives computes ONE macro-news summary per scan run (not once
+    # per ticker) and injects it into every ticker's news analyst, instead
+    # of each dive independently re-fetching/re-summarizing the same
+    # ticker-independent macro news via get_global_news. Kill switch:
+    # env-only rollback, no redeploy needed — with this off (or on any
+    # fetch/summarize failure) a scan falls back to today's per-ticker
+    # get_global_news tool-calling behavior. Interactive single-ticker runs
+    # are unaffected either way — they never call run_deep_dives, so
+    # config['macro_brief'] is never set for them regardless of this flag.
+    "macro_brief_enabled": True,
     # Same-day quick-scan reuse: same idea as deep_dive_reuse but for the
     # cheap per-ticker pre-screen call. The bigger effect isn't the quick-LLM
     # savings — it's that reusing quick-scan signal/conviction across scans
