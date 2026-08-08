@@ -5,13 +5,24 @@ One shared macro/global-news brief is computed ONCE per run_deep_dives call
 news analyst can reuse it instead of independently re-fetching/re-summarizing
 the same ticker-independent macro news.
 """
+import copy
 from types import SimpleNamespace
 
 import pytest
 
+import tradingagents.default_config as default_config
+from tradingagents.dataflows.config import set_config
 from web import db, spy_scanner
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _reset_dataflows_config():
+    """Isolate the module-level dataflow config singleton around each test."""
+    set_config(copy.deepcopy(default_config.DEFAULT_CONFIG))
+    yield
+    set_config(copy.deepcopy(default_config.DEFAULT_CONFIG))
 
 
 @pytest.fixture()
