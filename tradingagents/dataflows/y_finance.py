@@ -10,6 +10,26 @@ from .stockstats_utils import StockstatsUtils, filter_financials_by_date, load_o
 
 logger = logging.getLogger(__name__)
 
+def _downsample_for_csv(data: pd.DataFrame, recent_sessions: int = 60) -> tuple[pd.DataFrame, bool]:
+    """Keep every row for the most recent `recent_sessions` trading days;
+    for anything older, keep only the last trading day of each ISO week.
+
+    Returns (downsampled_df, was_downsampled). Assumes `data` is sorted
+    ascending by date (yfinance's .history() output shape).
+    """
+    if len(data) <= recent_sessions:
+        return data, False
+
+    recent = data.iloc[-recent_sessions:]
+    older = data.iloc[:-recent_sessions].copy()
+
+    iso = older.index.isocalendar()
+    older["_week_key"] = list(zip(iso["year"], iso["week"]))
+    older_weekly = older.groupby("_week_key", sort=False).tail(1).drop(columns=["_week_key"])
+
+    combined = pd.concat([older_weekly, recent])
+    return combined, True
+
 def get_YFin_data_online(
     symbol: Annotated[str, "ticker symbol of the company"],
     start_date: Annotated[str, "Start date in yyyy-mm-dd format"],
@@ -41,12 +61,25 @@ def get_YFin_data_online(
         if col in data.columns:
             data[col] = data[col].round(2)
 
+    # Downsample before serializing: full detail for the most recent ~60
+    # trading sessions, one row per ISO week for anything older. Keeps the
+    # CSV from growing unbounded on multi-month lookbacks without silently
+    # dropping recent detail.
+    downsampled_data, was_downsampled = _downsample_for_csv(data)
+
     # Convert DataFrame to CSV string
-    csv_string = data.to_csv()
+    csv_string = downsampled_data.to_csv()
 
     # Add header information
     header = f"# Stock data for {symbol.upper()} from {start_date} to {end_date}\n"
-    header += f"# Total records: {len(data)}\n"
+    if was_downsampled:
+        header += (
+            f"# Total records: {len(downsampled_data)} (downsampled from {len(data)} "
+            "fetched; data older than the most recent ~60 trading sessions is shown "
+            "as one row per week -- the last trading day of each ISO week)\n"
+        )
+    else:
+        header += f"# Total records: {len(data)}\n"
     header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
     return header + csv_string
