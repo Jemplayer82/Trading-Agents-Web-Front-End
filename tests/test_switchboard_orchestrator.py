@@ -95,3 +95,57 @@ class TestRunAnalystLoopTermination:
         # Still no crash, and the last message is the tool-calling one — the
         # orchestrator's existing "if report:" guard correctly skips emitting.
         assert node.call_count == 20
+
+
+class TestResearchManagerLlmSelection:
+
+    def test_defaults_to_quick_llm(self):
+        stub = _make_orch_stub()
+        stub.config = {}
+        stub._quick_llm = "QUICK_SENTINEL"
+        stub._deep_llm = "DEEP_SENTINEL"
+
+        result = SwitchboardOrchestrator._research_manager_llm(stub)
+
+        assert result == "QUICK_SENTINEL"
+
+    def test_explicit_quick_role_uses_quick_llm(self):
+        stub = _make_orch_stub()
+        stub.config = {"research_manager_role": "quick"}
+        stub._quick_llm = "QUICK_SENTINEL"
+        stub._deep_llm = "DEEP_SENTINEL"
+
+        result = SwitchboardOrchestrator._research_manager_llm(stub)
+
+        assert result == "QUICK_SENTINEL"
+
+    def test_explicit_deep_role_uses_deep_llm(self):
+        stub = _make_orch_stub()
+        stub.config = {"research_manager_role": "deep"}
+        stub._quick_llm = "QUICK_SENTINEL"
+        stub._deep_llm = "DEEP_SENTINEL"
+
+        result = SwitchboardOrchestrator._research_manager_llm(stub)
+
+        assert result == "DEEP_SENTINEL"
+
+    def test_node_receives_selected_llm(self, monkeypatch):
+        """Confirm the Phase-3 call-site wiring: create_research_manager
+        receives whatever _research_manager_llm() returns, not a hardcoded
+        deep client."""
+        import tradingagents.orchestrator.switchboard_orchestrator as sbo_module
+
+        stub = _make_orch_stub()
+        stub.config = {}
+        stub._quick_llm = "QUICK_SENTINEL"
+        stub._deep_llm = "DEEP_SENTINEL"
+        captured = {}
+
+        def fake_create_research_manager(llm):
+            captured["llm"] = llm
+            return lambda state: {}
+
+        monkeypatch.setattr(sbo_module, "create_research_manager", fake_create_research_manager)
+        sbo_module.create_research_manager(SwitchboardOrchestrator._research_manager_llm(stub))
+
+        assert captured["llm"] == "QUICK_SENTINEL"
