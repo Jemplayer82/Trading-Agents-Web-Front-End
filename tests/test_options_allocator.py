@@ -53,7 +53,12 @@ def _mock_llm(monkeypatch, payload):
         llm.invoke.side_effect = payload
     else:
         llm.invoke.return_value = MagicMock(content=json.dumps(payload))
-    monkeypatch.setattr(options_allocator, "llm_for", lambda *a, **k: llm)
+    captured: dict = {}
+    def _fake_llm_for(*args, **kwargs):
+        captured.update(kwargs)
+        return llm
+    monkeypatch.setattr(options_allocator, "llm_for", _fake_llm_for)
+    llm.call_kwargs = captured
     return llm
 
 
@@ -125,6 +130,15 @@ def test_llm_decisions_parsed_and_clamped(monkeypatch):
     assert len(result["opens"]) == 1
     assert result["opens"][0]["contracts"] == 8
     assert result["opens"][0]["cost"] == pytest.approx(8_000)
+
+
+def test_allocator_uses_quick_model(monkeypatch):
+    cand = _cand("AAPL")
+    llm = _mock_llm(monkeypatch, [
+        {"occ_symbol": cand["occ_symbol"], "action": "NEW", "contracts": 1, "rationale": "x"},
+    ])
+    run([cand], [], "2026-07-17", {}, equity=100_000, cash=100_000)
+    assert llm.call_kwargs.get("deep") is False
 
 
 def test_total_premium_cap_across_opens(monkeypatch):
