@@ -2,8 +2,8 @@ import importlib
 
 import pytest
 
-from tradingagents.default_config import _ENV_OVERRIDES, DEFAULT_CONFIG
 import tradingagents.default_config as default_config_module
+from tradingagents.default_config import _ENV_OVERRIDES, DEFAULT_CONFIG
 
 pytestmark = pytest.mark.unit
 
