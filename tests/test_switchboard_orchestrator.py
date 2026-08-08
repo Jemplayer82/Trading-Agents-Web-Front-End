@@ -132,6 +132,17 @@ class TestResearchManagerLlmSelection:
 
         assert result == "DEEP_SENTINEL"
 
+    def test_unrecognized_role_uses_deep_llm(self):
+        """Any non-'quick' value silently falls through to the deep LLM."""
+        stub = _make_orch_stub()
+        stub.config = {"research_manager_role": "Quick"}
+        stub._quick_llm = "QUICK_SENTINEL"
+        stub._deep_llm = "DEEP_SENTINEL"
+
+        result = SwitchboardOrchestrator._research_manager_llm(stub)
+
+        assert result == "DEEP_SENTINEL"
+
     @pytest.mark.parametrize(
         "role_override, expected_attr",
         [
