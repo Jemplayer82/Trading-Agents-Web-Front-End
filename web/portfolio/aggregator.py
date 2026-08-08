@@ -57,7 +57,7 @@ PER_TICKER_TEMPLATE = """
 
 
 def run(per_ticker: list[dict[str, Any]], trade_date: str, config: dict[str, Any]) -> str:
-    """One deep-LLM call over the whole scan; returns the briefing markdown.
+    """One quick-LLM call over the whole scan; returns the briefing markdown.
 
     per_ticker is the payload built in portfolio_main._run_scan (ticker,
     signal, quantity, market_value, trader_plan, final_decision — failed

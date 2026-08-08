@@ -1,7 +1,7 @@
 """LLM allocator for the daily options paper trader.
 
 Turns vetted contract candidates + currently open positions into a decision
-set: NEW (buy contracts), HOLD, CLOSE. One deep-LLM call, wrapped in hard code
+set: NEW (buy contracts), HOLD, CLOSE. One quick-LLM call, wrapped in hard code
 guardrails on both sides:
 
   pre-LLM  — force-CLOSE any open position at DTE <= DTE_FLOOR or with premium
