@@ -133,6 +133,15 @@ def test_news_not_selected_skips_macro_brief(tmp_db, monkeypatch):
     assert "macro_brief" not in config
 
 
+def test_empty_candidates_skips_macro_brief(tmp_db, monkeypatch):
+    """Zero candidates must mean zero news-fetch/LLM cost from run_deep_dives."""
+    calls = _install(monkeypatch)
+    config = _run(tickers=[])
+    assert calls["fetch"] == 0
+    assert calls["summarize"] == 0
+    assert "macro_brief" not in config
+
+
 def test_preexisting_macro_brief_is_never_overwritten(tmp_db, monkeypatch):
     calls = _install(monkeypatch)
     config = _run(tickers=["AAPL"], config_extra={"macro_brief": "already set by caller"})

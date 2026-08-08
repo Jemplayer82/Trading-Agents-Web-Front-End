@@ -669,7 +669,8 @@ def run_deep_dives(
     db.update_spy_scan(scan_id, status="running_deep", deep_total=len(candidates))
 
     if (
-        "news" in selected_analysts
+        candidates
+        and "news" in selected_analysts
         and config.get("macro_brief") is None
         and config.get("macro_brief_enabled", True)
     ):
