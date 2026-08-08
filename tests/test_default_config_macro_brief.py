@@ -1,6 +1,6 @@
 import pytest
 
-from tradingagents.default_config import DEFAULT_CONFIG, _ENV_OVERRIDES
+from tradingagents.default_config import _ENV_OVERRIDES, DEFAULT_CONFIG
 
 pytestmark = pytest.mark.unit
 
