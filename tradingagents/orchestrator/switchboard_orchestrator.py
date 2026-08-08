@@ -158,8 +158,8 @@ class SwitchboardOrchestrator:
         `research_manager_role` config knob (default "quick" — see
         tradingagents/default_config.py). Kept as its own method so the
         selection is unit-testable without a live LLM client."""
-        role = self.config.get("research_manager_role", "quick")
-        return self._quick_llm if role == "quick" else self._deep_llm
+        role = str(self.config.get("research_manager_role", "quick")).strip().lower()
+        return self._deep_llm if role == "deep" else self._quick_llm
 
     def _emit(self, frame: dict[str, Any]) -> None:
         if self.on_progress:

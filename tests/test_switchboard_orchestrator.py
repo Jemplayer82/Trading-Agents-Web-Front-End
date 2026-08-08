@@ -132,16 +132,44 @@ class TestResearchManagerLlmSelection:
 
         assert result == "DEEP_SENTINEL"
 
-    def test_unrecognized_role_uses_deep_llm(self):
-        """Any non-'quick' value silently falls through to the deep LLM."""
-        stub = _make_orch_stub()
-        stub.config = {"research_manager_role": "Quick"}
-        stub._quick_llm = "QUICK_SENTINEL"
-        stub._deep_llm = "DEEP_SENTINEL"
+    def test_case_and_whitespace_variants_of_quick_use_quick_llm(self):
+        """Case differences or surrounding whitespace on 'quick' still route
+        to the quick LLM."""
+        for role in ("Quick", "quick ", " quick"):
+            stub = _make_orch_stub()
+            stub.config = {"research_manager_role": role}
+            stub._quick_llm = "QUICK_SENTINEL"
+            stub._deep_llm = "DEEP_SENTINEL"
 
-        result = SwitchboardOrchestrator._research_manager_llm(stub)
+            result = SwitchboardOrchestrator._research_manager_llm(stub)
 
-        assert result == "DEEP_SENTINEL"
+            assert result == "QUICK_SENTINEL"
+
+    def test_case_and_whitespace_variants_of_deep_use_deep_llm(self):
+        """Case differences or surrounding whitespace on 'deep' still route
+        to the deep LLM."""
+        for role in ("Deep", " deep ", "DEEP"):
+            stub = _make_orch_stub()
+            stub.config = {"research_manager_role": role}
+            stub._quick_llm = "QUICK_SENTINEL"
+            stub._deep_llm = "DEEP_SENTINEL"
+
+            result = SwitchboardOrchestrator._research_manager_llm(stub)
+
+            assert result == "DEEP_SENTINEL"
+
+    def test_unrecognized_role_uses_quick_llm(self):
+        """Any garbage or non-'deep' value safely falls back to the quick LLM
+        so the dangerous deep model is never selected by accident."""
+        for role in ("gpt-5.4", "banana"):
+            stub = _make_orch_stub()
+            stub.config = {"research_manager_role": role}
+            stub._quick_llm = "QUICK_SENTINEL"
+            stub._deep_llm = "DEEP_SENTINEL"
+
+            result = SwitchboardOrchestrator._research_manager_llm(stub)
+
+            assert result == "QUICK_SENTINEL"
 
     @pytest.mark.parametrize(
         "role_override, expected_attr",
