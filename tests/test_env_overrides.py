@@ -119,3 +119,12 @@ def test_options_learning_defaults(monkeypatch):
     assert dc.DEFAULT_CONFIG["options_lessons_min_closed"] == 10
     assert dc.DEFAULT_CONFIG["options_reflect_min_new_closed"] == 5
     assert dc.DEFAULT_CONFIG["memory_log_max_entries"] == 1000
+    assert dc.DEFAULT_CONFIG["research_manager_role"] == "quick"
+
+
+def test_research_manager_role_override(monkeypatch):
+    dc = _reload_with_env(
+        monkeypatch,
+        TRADINGAGENTS_RESEARCH_MANAGER_ROLE="deep",
+    )
+    assert dc.DEFAULT_CONFIG["research_manager_role"] == "deep"
