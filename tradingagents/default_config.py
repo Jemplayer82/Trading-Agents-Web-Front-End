@@ -23,6 +23,9 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_SWEEP_CENSOR_AFTER_DAYS":       "sweep_censor_after_days",
     "TRADINGAGENTS_MEMORY_CONTEXT_MAX_AGE_DAYS":   "memory_context_max_age_days",
     "TRADINGAGENTS_DEEP_DIVE_STORE_DECISIONS":     "deep_dive_store_decisions",
+    "TRADINGAGENTS_DEEP_DIVE_REUSE":                "deep_dive_reuse",
+    "TRADINGAGENTS_DEEP_DIVE_REUSE_MAX_AGE_HOURS":  "deep_dive_reuse_max_age_hours",
+    "TRADINGAGENTS_QUICK_SCAN_REUSE":               "quick_scan_reuse",
     "TRADINGAGENTS_OPTIONS_LESSONS_MIN_CLOSED":    "options_lessons_min_closed",
     "TRADINGAGENTS_OPTIONS_REFLECT_MIN_NEW_CLOSED": "options_reflect_min_new_closed",
     "TRADINGAGENTS_OPTIONS_INTRADAY_STOP":         "options_intraday_stop",
@@ -96,6 +99,29 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Kill switch for deep dives storing their decisions into the memory log
     # (System C). Env-only rollback path: no redeploy needed to stop the flow.
     "deep_dive_store_decisions": True,
+    # Same-day deep-dive reuse: when multiple scans (different paper accounts,
+    # or equity + options) deep-dive the same ticker on the same trade_date
+    # with an identical shared-stage config, run the analyst/debate/research-
+    # manager stage once and rerun only the Portfolio Manager per account
+    # (bias is the only thing it needs that differs per account — see
+    # SwitchboardOrchestrator.rerun_decision). Kill switch: env-only rollback,
+    # no redeploy needed. A reuse attempt can never fail a scan — any problem
+    # with the cached state falls back to a full pipeline run.
+    "deep_dive_reuse": True,
+    # A donor analysis older than this is never reused, however same-day it
+    # is — bounds intraday staleness (an ad-hoc equity scan reusing hours-old
+    # analyst reports) and neutralizes the UTC trade_date rollover case (an
+    # evening ~22:00 ET run is already dated "tomorrow" in UTC and would
+    # otherwise look like a fresh same-day donor to the next morning's scan).
+    "deep_dive_reuse_max_age_hours": 6,
+    # Same-day quick-scan reuse: same idea as deep_dive_reuse but for the
+    # cheap per-ticker pre-screen call. The bigger effect isn't the quick-LLM
+    # savings — it's that reusing quick-scan signal/conviction across scans
+    # makes every account converge on the same top-N tickers, which is what
+    # drives deep_dive_reuse's hit rate toward 100%. entry_price is always
+    # recomputed fresh regardless of this setting (never reused — allocators
+    # depend on it and it isn't stored in spy_quick_results).
+    "quick_scan_reuse": True,
     # Below this many closed positions the allocator gets NO track-record
     # block at all — a handful of trades is noise, and showing it invites
     # overfitting a tiny sample.
