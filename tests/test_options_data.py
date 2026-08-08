@@ -1,6 +1,8 @@
 """Unit tests for web/options_data.py — OCC symbols, chain normalization,
 liquidity gates, and deterministic contract selection."""
 
+import threading
+import time
 from datetime import date, timedelta
 
 import pandas as pd
@@ -259,8 +261,163 @@ def test_fetch_candidates_treats_5tier_overweight_underweight_as_directional(mon
         {"ticker": "HLD", "signal": "Hold", "conviction": 9, "reasoning": "meh"},
     ]
     cands, notes = options_data.fetch_candidates(signals)
-    assert calls == [("OVW", "BUY"), ("UDW", "SELL")]
+    # calls is appended from inside fetch_contract, which now runs in worker
+    # threads, so append order is genuinely nondeterministic. The ordering
+    # guarantee is already covered by the cands assertion below.
+    assert sorted(calls) == [("OVW", "BUY"), ("UDW", "SELL")]
     assert [(c["ticker"], c["put_call"], c["signal"]) for c in cands] == [
         ("OVW", "CALL", "BUY"), ("UDW", "PUT", "SELL"),
     ]
     assert ("HLD", "BUY") not in calls and ("HLD", "SELL") not in calls
+
+
+def test_fetch_candidates_returns_input_order_under_out_of_order_completion(monkeypatch):
+    completion_order: list[str] = []
+
+    def fake_fetch_contract(underlying, direction, spot_hint=None):
+        position = int(underlying[1:])  # T0..T5
+        time.sleep(0.05 * (5 - position))  # T0 sleeps longest, T5 sleeps 0
+        completion_order.append(underlying)
+        return ({"occ_symbol": f"{underlying} X", "underlying": underlying,
+                 "put_call": "CALL", "strike": 100.0, "expiration_date": _exp(21),
+                 "dte": 21, "bid": 1.0, "ask": 1.2, "mid": 1.1, "delta": 0.45,
+                 "open_interest": 500, "underlying_price": 100.0,
+                 "spread": 0.2, "spread_pct": 0.18, "source": "schwab"}, [])
+
+    monkeypatch.setattr(options_data, "fetch_contract", fake_fetch_contract)
+    signals = [{"ticker": f"T{i}", "signal": "BUY", "conviction": 8} for i in range(6)]
+    cands, _ = options_data.fetch_candidates(signals)
+    input_order = [s["ticker"] for s in signals]
+    assert completion_order != input_order
+    assert [c["ticker"] for c in cands] == input_order
+
+
+def test_fetch_candidates_runs_fetches_concurrently(monkeypatch):
+    barrier = threading.Barrier(4, timeout=5)
+
+    def fake_fetch_contract(underlying, direction, spot_hint=None):
+        barrier.wait()
+        return ({"occ_symbol": f"{underlying} X", "underlying": underlying,
+                 "put_call": "CALL", "strike": 100.0, "expiration_date": _exp(21),
+                 "dte": 21, "bid": 1.0, "ask": 1.2, "mid": 1.1, "delta": 0.45,
+                 "open_interest": 500, "underlying_price": 100.0,
+                 "spread": 0.2, "spread_pct": 0.18, "source": "schwab"}, [])
+
+    monkeypatch.setattr(options_data, "fetch_contract", fake_fetch_contract)
+    signals = [{"ticker": f"B{i}", "signal": "BUY", "conviction": 8} for i in range(4)]
+    cands, _ = options_data.fetch_candidates(signals)
+    assert [c["ticker"] for c in cands] == [s["ticker"] for s in signals]
+
+
+def test_fetch_candidates_worker_count_capped_at_six(monkeypatch):
+    lock = threading.Lock()
+    in_flight = 0
+    max_in_flight = 0
+
+    def fake_fetch_contract(underlying, direction, spot_hint=None):
+        nonlocal in_flight, max_in_flight
+        with lock:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+        time.sleep(0.05)
+        with lock:
+            in_flight -= 1
+        return ({"occ_symbol": f"{underlying} X", "underlying": underlying,
+                 "put_call": "CALL", "strike": 100.0, "expiration_date": _exp(21),
+                 "dte": 21, "bid": 1.0, "ask": 1.2, "mid": 1.1, "delta": 0.45,
+                 "open_interest": 500, "underlying_price": 100.0,
+                 "spread": 0.2, "spread_pct": 0.18, "source": "schwab"}, [])
+
+    monkeypatch.setattr(options_data, "fetch_contract", fake_fetch_contract)
+    signals = [{"ticker": f"W{i:02d}", "signal": "BUY", "conviction": 8} for i in range(20)]
+    cands, _ = options_data.fetch_candidates(signals)
+    assert len(cands) == 20
+    assert 1 < max_in_flight <= 6
+
+
+def test_fetch_candidates_notes_stay_in_input_order(monkeypatch):
+    def fake_fetch_contract(underlying, direction, spot_hint=None):
+        return (None, [f"{underlying}: schwab: spread too wide"])
+
+    monkeypatch.setattr(options_data, "fetch_contract", fake_fetch_contract)
+    signals = [
+        {"ticker": "LOW1", "signal": "BUY", "conviction": 4},
+        {"ticker": "HLD1", "signal": "HOLD", "conviction": 9},
+        {"ticker": "TRD1", "signal": "BUY", "conviction": 8},
+        {"ticker": "LOW2", "signal": "SELL", "conviction": 5},
+        {"ticker": "HLD2", "signal": "HOLD", "conviction": 8},
+        {"ticker": "TRD2", "signal": "SELL", "conviction": 8},
+    ]
+    cands, notes = options_data.fetch_candidates(signals)
+    expected = [
+        "LOW1: conviction 4 < 6",
+        "TRD1: schwab: spread too wide",
+        "TRD1: no tradeable contract",
+        "LOW2: conviction 5 < 6",
+        "TRD2: schwab: spread too wide",
+        "TRD2: no tradeable contract",
+    ]
+    assert notes == expected
+    assert cands == []
+
+
+def test_fetch_candidates_propagates_fetch_errors(monkeypatch):
+    def fake_fetch_contract(underlying, direction, spot_hint=None):
+        if underlying == "BAD":
+            raise RuntimeError("chain down")
+        return ({"occ_symbol": f"{underlying} X", "underlying": underlying,
+                 "put_call": "CALL", "strike": 100.0, "expiration_date": _exp(21),
+                 "dte": 21, "bid": 1.0, "ask": 1.2, "mid": 1.1, "delta": 0.45,
+                 "open_interest": 500, "underlying_price": 100.0,
+                 "spread": 0.2, "spread_pct": 0.18, "source": "schwab"}, [])
+
+    monkeypatch.setattr(options_data, "fetch_contract", fake_fetch_contract)
+    signals = [
+        {"ticker": "OK1", "signal": "BUY", "conviction": 8},
+        {"ticker": "BAD", "signal": "BUY", "conviction": 8},
+        {"ticker": "OK2", "signal": "BUY", "conviction": 8},
+    ]
+    with pytest.raises(RuntimeError, match="chain down"):
+        options_data.fetch_candidates(signals)
+
+
+def test_fetch_candidates_progress_cb_called_in_order(monkeypatch):
+    progress_calls: list[tuple[int, int]] = []
+
+    def fake_fetch_contract(underlying, direction, spot_hint=None):
+        return ({"occ_symbol": f"{underlying} X", "underlying": underlying,
+                 "put_call": "CALL", "strike": 100.0, "expiration_date": _exp(21),
+                 "dte": 21, "bid": 1.0, "ask": 1.2, "mid": 1.1, "delta": 0.45,
+                 "open_interest": 500, "underlying_price": 100.0,
+                 "spread": 0.2, "spread_pct": 0.18, "source": "schwab"}, [])
+
+    def progress_cb(done, total):
+        progress_calls.append((done, total))
+
+    monkeypatch.setattr(options_data, "fetch_contract", fake_fetch_contract)
+    signals = [
+        {"ticker": "A", "signal": "BUY", "conviction": 8},
+        {"ticker": "B", "signal": "HOLD", "conviction": 9},
+        {"ticker": "C", "signal": "BUY", "conviction": 4},
+        {"ticker": "D", "signal": "SELL", "conviction": 8},
+    ]
+    cands, _ = options_data.fetch_candidates(signals, progress_cb=progress_cb)
+    assert [c["ticker"] for c in cands] == ["A", "D"]
+    assert progress_calls == [(1, 4), (4, 4)]
+
+
+def test_fetch_candidates_empty_and_all_filtered(monkeypatch):
+    calls: list[str] = []
+
+    def fake_fetch_contract(underlying, direction, spot_hint=None):
+        calls.append(underlying)
+        return ({}, [])
+
+    monkeypatch.setattr(options_data, "fetch_contract", fake_fetch_contract)
+    assert options_data.fetch_candidates([]) == ([], [])
+    signals = [
+        {"ticker": "H1", "signal": "HOLD", "conviction": 9},
+        {"ticker": "H2", "signal": "HOLD", "conviction": 8},
+    ]
+    assert options_data.fetch_candidates(signals) == ([], [])
+    assert calls == []

@@ -12,6 +12,7 @@ lastPrice is never trusted (on illiquid contracts it can be a days-old trade).
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Any
 
@@ -42,6 +43,11 @@ MIN_OPEN_INTEREST = 100     # the liquidity signal that survives weekends
 MAX_SPREAD_ABS = 0.10       # spread ok if <= $0.10 absolute...
 MAX_SPREAD_PCT = 0.20       # ...or <= 20% of mid
 STRIKE_ATTEMPTS = 3         # preferred strike + 2 alternates before skipping
+
+# Max worker threads for the per-ticker chain fetch in fetch_candidates.
+# Bounded because each call can hit the Schwab MCP server plus a yfinance
+# fallback, and concurrent same-day account builds now share that backend.
+_CHAIN_FETCH_WORKERS = 6
 
 # Deep dives return the system-wide 5-tier rating (tradingagents/agents/utils
 # /rating.py: Buy, Overweight, Hold, Underweight, Sell), not raw BUY/SELL/HOLD
@@ -358,6 +364,12 @@ def fetch_contract(
     return None, notes
 
 
+def _fetch_one(row: dict[str, Any], direction: str) -> tuple[dict[str, Any] | None, list[str]]:
+    """Per-row worker target; resolves fetch_contract by bare global name so
+    monkeypatch replacements in tests take effect inside worker threads."""
+    return fetch_contract(row["ticker"], direction, spot_hint=row.get("entry_price"))
+
+
 def fetch_candidates(
     signals: list[dict[str, Any]],
     progress_cb: Any = None,
@@ -368,15 +380,14 @@ def fetch_candidates(
     Overweight|Hold|Underweight|Sell a deep dive's own rating produces —
     see _DIRECTION_BY_SIGNAL) / conviction / reasoning / entry_price. Holds,
     unrecognized labels, and conviction < MIN_CONVICTION are skipped.
-    Returns (candidates, rejection_notes); every candidate carries its
-    (normalized BUY/SELL) signal, conviction and rationale for the allocator
-    prompt.
+    Returns (candidates, rejection_notes) in the same order as the input rows;
+    candidates order and notes order are deterministic regardless of the order
+    in which worker threads complete their chain fetches.
     """
-    candidates: list[dict[str, Any]] = []
-    notes: list[str] = []
-    done = 0
-    for row in signals:
-        done += 1
+    # ── PHASE 1 — FILTER (input order, no network) ──────────────────────────
+    eligible: list[tuple[int, dict[str, Any], str, int]] = []
+    row_notes: list[list[str]] = [[] for _ in signals]
+    for idx, row in enumerate(signals):
         sig_raw = (row.get("signal") or "").upper()
         direction = _DIRECTION_BY_SIGNAL.get(sig_raw)
         conviction = int(row.get("conviction") or 0)
@@ -384,24 +395,50 @@ def fetch_candidates(
         if not ticker or direction is None:
             continue
         if conviction < MIN_CONVICTION:
-            notes.append(f"{ticker}: conviction {conviction} < {MIN_CONVICTION}")
+            row_notes[idx].append(f"{ticker}: conviction {conviction} < {MIN_CONVICTION}")
             continue
-        contract, c_notes = fetch_contract(ticker, direction, spot_hint=row.get("entry_price"))
-        notes += c_notes
-        if contract is None:
-            notes.append(f"{ticker}: no tradeable contract")
-        else:
-            contract.update({
-                "ticker": ticker,
-                "signal": direction,
-                "conviction": conviction,
-                "rationale": (row.get("reasoning") or "")[:500],
-                "final_decision": (row.get("final_decision") or "")[:2000],
-            })
-            candidates.append(contract)
-        if progress_cb:
-            try:
-                progress_cb(done, len(signals))
-            except Exception:  # noqa: BLE001 - progress must never sink a build
-                pass
+        eligible.append((idx, row, direction, conviction))
+
+    # ── PHASE 2 — FETCH concurrently (only if there is work to do) ────────────
+    fetched: dict[int, tuple[dict[str, Any] | None, list[str]]] = {}
+    if eligible:
+        with ThreadPoolExecutor(max_workers=min(_CHAIN_FETCH_WORKERS, len(eligible))) as pool:
+            futures = {pool.submit(_fetch_one, row, direction): idx
+                       for idx, row, direction, _ in eligible}
+            for fut in as_completed(futures):
+                fetched[futures.pop(fut)] = fut.result()
+
+    # ── PHASE 3 — ASSEMBLE in input order ───────────────────────────────────
+    candidates: list[dict[str, Any]] = []
+    notes: list[str] = []
+    done = 0
+    for idx in range(len(signals)):
+        done += 1
+        row = signals[idx]
+        notes.extend(row_notes[idx])
+        if idx in fetched:
+            contract, c_notes = fetched[idx]
+            notes += c_notes
+            ticker = row.get("ticker")
+            _, _, direction, conviction = next(
+                (e for e in eligible if e[0] == idx),
+                (idx, row, _DIRECTION_BY_SIGNAL.get((row.get("signal") or "").upper(), "BUY"),
+                 int(row.get("conviction") or 0)),
+            )
+            if contract is None:
+                notes.append(f"{ticker}: no tradeable contract")
+            else:
+                contract.update({
+                    "ticker": ticker,
+                    "signal": direction,
+                    "conviction": conviction,
+                    "rationale": (row.get("reasoning") or "")[:500],
+                    "final_decision": (row.get("final_decision") or "")[:2000],
+                })
+                candidates.append(contract)
+            if progress_cb:
+                try:
+                    progress_cb(done, len(signals))
+                except Exception:  # noqa: BLE001 - progress must never sink a build
+                    pass
     return candidates, notes
