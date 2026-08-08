@@ -10,6 +10,8 @@ No network access. Run with: uv run pytest tests/test_portfolio_progress.py -v
 from __future__ import annotations
 
 import sqlite3
+import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -211,11 +213,10 @@ class TestRunScanProgress:
 
         row = db.get_portfolio_scan(scan_id)
         assert row["scan_total"] == 3, f"expected scan_total=3, got {row['scan_total']}"
-        # scanned_count is written as i-1 (completed-so-far) at start of each iteration.
-        # With 3 tickers (i=1,2,3), last write is scanned_count=2 (before 3rd ticker).
-        # After the loop completes the scan is done but scanned_count reflects pre-last-ticker state.
+        # scanned_count is written as completed-so-far after each ticker
+        # finishes. With 3 tickers the last write is scanned_count=3.
         assert row["scanned_count"] is not None, "scanned_count should not be None after scan"
-        # current_ticker cycles through all tickers; final value is the last one processed
+        # current_ticker is the most recently completed holding
         assert row["current_ticker"] in ("AAPL", "MSFT", "GOOGL"), (
             f"current_ticker should be one of the positions, got {row['current_ticker']!r}"
         )
@@ -260,3 +261,249 @@ class TestRunScanProgress:
 
         row = db.get_portfolio_scan(scan_id)
         assert row["scan_total"] == 2, f"expected scan_total=2 (options excluded), got {row['scan_total']}"
+
+
+# ---------------------------------------------------------------------------
+# 4. _run_scan parallelism + ordering + fault isolation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestRunScanParallelism:
+    def test_holdings_run_concurrently(self, monkeypatch, tmp_path):
+        """Three holdings must reach a barrier together; sequential execution would time out."""
+        monkeypatch.setenv("OLLAMA_MAX_CONCURRENCY", "3")
+        monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
+        db.init_db()
+
+        barrier = threading.Barrier(3, timeout=5)
+
+        class FakeOrchestrator:
+            def __init__(self, config=None, selected_analysts=None):
+                self.memory_log = MagicMock()
+
+            def run(self, ticker, trade_date):
+                barrier.wait()
+                return ({"trader_investment_plan": "", "final_trade_decision": ""}, "HOLD")
+
+        monkeypatch.setattr(
+            "tradingagents.orchestrator.SwitchboardOrchestrator", FakeOrchestrator
+        )
+
+        from web import portfolio_routes
+
+        monkeypatch.setattr(
+            portfolio_routes,
+            "_mcp_positions",
+            lambda: [
+                _make_fake_position("AAPL"),
+                _make_fake_position("MSFT"),
+                _make_fake_position("GOOGL"),
+            ],
+        )
+        monkeypatch.setattr(
+            portfolio_routes.aggregator,
+            "run",
+            lambda payload, trade_date, config: "stub",
+        )
+
+        scan_id = db.create_portfolio_scan("2026-01-01")
+        portfolio_routes._run_scan(scan_id, "2026-01-01")
+
+        per_ticker = db.get_portfolio_scan(scan_id)["full_payload"]["per_ticker"]
+        assert len(per_ticker) == 3
+        assert all(e["signal"] == "HOLD" for e in per_ticker)
+
+    def test_payload_preserves_input_order(self, monkeypatch, tmp_path):
+        """Completion order is reversed by sleep, but stored payload stays in holdings order."""
+        monkeypatch.setenv("OLLAMA_MAX_CONCURRENCY", "3")
+        monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
+        db.init_db()
+
+        delays = {"AAPL": 0.15, "MSFT": 0.05, "GOOGL": 0.0}
+
+        class FakeOrchestrator:
+            def __init__(self, config=None, selected_analysts=None):
+                self.memory_log = MagicMock()
+
+            def run(self, ticker, trade_date):
+                time.sleep(delays[ticker])
+                return ({"trader_investment_plan": "", "final_trade_decision": ""}, "HOLD")
+
+        monkeypatch.setattr(
+            "tradingagents.orchestrator.SwitchboardOrchestrator", FakeOrchestrator
+        )
+
+        from web import portfolio_routes
+
+        monkeypatch.setattr(
+            portfolio_routes,
+            "_mcp_positions",
+            lambda: [
+                _make_fake_position("AAPL"),
+                _make_fake_position("MSFT"),
+                _make_fake_position("GOOGL"),
+            ],
+        )
+        monkeypatch.setattr(
+            portfolio_routes.aggregator,
+            "run",
+            lambda payload, trade_date, config: "stub",
+        )
+
+        scan_id = db.create_portfolio_scan("2026-01-01")
+        portfolio_routes._run_scan(scan_id, "2026-01-01")
+
+        tickers = [
+            e["ticker"]
+            for e in db.get_portfolio_scan(scan_id)["full_payload"]["per_ticker"]
+        ]
+        assert tickers == ["AAPL", "MSFT", "GOOGL"]
+
+    def test_progress_flushed_per_completion(self, monkeypatch, tmp_path):
+        """scanned_count is written once per completion and ends at scan_total."""
+        monkeypatch.setenv("OLLAMA_MAX_CONCURRENCY", "3")
+        monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
+        db.init_db()
+
+        recorded_counts: list[int] = []
+        real_update = db.update_portfolio_scan
+
+        def recording_update(scan_id, **kwargs):
+            if "scanned_count" in kwargs:
+                recorded_counts.append(kwargs["scanned_count"])
+            return real_update(scan_id, **kwargs)
+
+        monkeypatch.setattr(db, "update_portfolio_scan", recording_update)
+
+        class FakeOrchestrator:
+            def __init__(self, config=None, selected_analysts=None):
+                self.memory_log = MagicMock()
+
+            def run(self, ticker, trade_date):
+                return ({"trader_investment_plan": "", "final_trade_decision": ""}, "HOLD")
+
+        monkeypatch.setattr(
+            "tradingagents.orchestrator.SwitchboardOrchestrator", FakeOrchestrator
+        )
+
+        from web import portfolio_routes
+
+        monkeypatch.setattr(
+            portfolio_routes,
+            "_mcp_positions",
+            lambda: [
+                _make_fake_position("AAPL"),
+                _make_fake_position("MSFT"),
+                _make_fake_position("GOOGL"),
+            ],
+        )
+        monkeypatch.setattr(
+            portfolio_routes.aggregator,
+            "run",
+            lambda payload, trade_date, config: "stub",
+        )
+
+        scan_id = db.create_portfolio_scan("2026-01-01")
+        portfolio_routes._run_scan(scan_id, "2026-01-01")
+
+        assert recorded_counts == sorted(recorded_counts)
+        assert {1, 2, 3}.issubset(set(recorded_counts))
+        assert db.get_portfolio_scan(scan_id)["scanned_count"] == 3
+
+    def test_one_failure_does_not_sink_the_scan(self, monkeypatch, tmp_path):
+        """A single bad holding is recorded as failed; the rest of the scan completes."""
+        monkeypatch.setenv("OLLAMA_MAX_CONCURRENCY", "3")
+        monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
+        db.init_db()
+
+        class FakeOrchestrator:
+            def __init__(self, config=None, selected_analysts=None):
+                self.memory_log = MagicMock()
+
+            def run(self, ticker, trade_date):
+                if ticker == "MSFT":
+                    raise RuntimeError("boom")
+                return (
+                    {"trader_investment_plan": "plan", "final_trade_decision": f"buy {ticker}"},
+                    "BUY",
+                )
+
+        monkeypatch.setattr(
+            "tradingagents.orchestrator.SwitchboardOrchestrator", FakeOrchestrator
+        )
+
+        from web import portfolio_routes
+
+        monkeypatch.setattr(
+            portfolio_routes,
+            "_mcp_positions",
+            lambda: [
+                _make_fake_position("AAPL"),
+                _make_fake_position("MSFT"),
+                _make_fake_position("GOOGL"),
+            ],
+        )
+        monkeypatch.setattr(
+            portfolio_routes.aggregator,
+            "run",
+            lambda payload, trade_date, config: "stub",
+        )
+
+        scan_id = db.create_portfolio_scan("2026-01-01")
+        portfolio_routes._run_scan(scan_id, "2026-01-01")
+
+        row = db.get_portfolio_scan(scan_id)
+        assert row["status"] == "completed"
+        per_ticker = {e["ticker"]: e for e in row["full_payload"]["per_ticker"]}
+        assert per_ticker["MSFT"]["signal"] == ""
+        assert per_ticker["MSFT"]["final_decision"].startswith("(failed:")
+        assert per_ticker["AAPL"]["signal"] == "BUY"
+        assert per_ticker["GOOGL"]["signal"] == "BUY"
+
+        msft_entry = next(t for t in (row.get("tickers") or []) if t["ticker"] == "MSFT")
+        assert msft_entry.get("error") and "boom" in msft_entry["error"]
+
+    def test_signal_counts_are_correct_under_concurrency(self, monkeypatch, tmp_path):
+        """Signal counts are aggregated on the main thread after concurrent analysis."""
+        monkeypatch.setenv("OLLAMA_MAX_CONCURRENCY", "4")
+        monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
+        db.init_db()
+
+        signals = ["BUY", "HOLD", "SELL", "BUY", "HOLD", "SELL", "BUY", "HOLD", "SELL"]
+        positions = [_make_fake_position(f"T{i}") for i in range(1, 10)]
+
+        class FakeOrchestrator:
+            def __init__(self, config=None, selected_analysts=None):
+                self.memory_log = MagicMock()
+
+            def run(self, ticker, trade_date):
+                idx = int(ticker[1:]) - 1
+                return ({"trader_investment_plan": "", "final_trade_decision": ""}, signals[idx])
+
+        monkeypatch.setattr(
+            "tradingagents.orchestrator.SwitchboardOrchestrator", FakeOrchestrator
+        )
+
+        from web import portfolio_routes
+
+        monkeypatch.setattr(portfolio_routes, "_mcp_positions", lambda: positions)
+        monkeypatch.setattr(
+            portfolio_routes.aggregator,
+            "run",
+            lambda payload, trade_date, config: "stub",
+        )
+
+        scan_id = db.create_portfolio_scan("2026-01-01")
+        portfolio_routes._run_scan(scan_id, "2026-01-01")
+
+        counts = db.get_portfolio_scan(scan_id)["signal_counts"]
+        assert counts["BUY"] == 3
+        assert counts["HOLD"] == 3
+        assert counts["SELL"] == 3
+
+    def test_portfolio_routes_does_not_depend_on_spy_scanner(self, monkeypatch, tmp_path):
+        """This file must never import spy_scanner, even lazily — spy_scanner.py is deleted at tier-2 build time."""
+        from web import portfolio_routes
+
+        assert not hasattr(portfolio_routes, "spy_scanner")

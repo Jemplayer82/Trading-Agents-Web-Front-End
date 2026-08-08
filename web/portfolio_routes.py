@@ -14,13 +14,21 @@ then the aggregator briefing. Option positions are display-only on the
 dashboard and are skipped (logged) before the analysis loop.
 
 Progress contract: _run_scan writes scan_total once, then scanned_count /
-current_ticker per ticker; the frontend polls the scan detail endpoint every 5s
-and renders a progress bar from those columns.
+current_ticker per ticker as holdings finish. scanned_count is
+"completed-so-far" and reaches the full scan_total when the last holding
+finishes (previously it topped out at N-1 because it was written before each
+ticker started). current_ticker now reports the most recently completed
+holding, since under concurrency there is no single "in-flight" ticker.
+Concurrency is bounded by the same cross-container OLLAMA_MAX_CONCURRENCY
+budget the S&P scanner uses (via _total_budget/_GateMonitor), so single-ticker
+ad-hoc analyses keep priority and the scan never fully starves (floors at 1
+worker).
 """
 from __future__ import annotations
 
 import logging
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any
 
@@ -30,6 +38,7 @@ from tradingagents.constants import SIGNALS
 from tradingagents.dataflows import schwab_mcp
 
 from . import alerts, brokerages, db, scan_queue
+from .llm_helpers import DynamicGate, _GateMonitor, _total_budget
 from .portfolio import aggregator
 from .runner import build_config
 
@@ -183,12 +192,86 @@ def _mcp_positions() -> list[dict[str, Any]]:
     return list(agg.values())
 
 
+def _analyze_one_holding(scan_id, pos, trade_date, config, selected_analysts, language) -> dict[str, Any]:
+    """Run the Switchboard analysis for a single holding and record its result.
+
+    All DB calls here are safe from worker threads: web/db.py::connect() opens a
+    fresh sqlite3.connect(..., check_same_thread=False) per call in WAL +
+    autocommit (isolation_level=None) mode — no lock is needed around these DB
+    writes, and one must not be added.
+    """
+    ticker = pos["symbol"]
+
+    # Keep this import local. The two existing portfolio-progress tests
+    # monkeypatch "tradingagents.orchestrator.SwitchboardOrchestrator" and
+    # depend on call-time resolution; hoisting it to module level would break
+    # those tests and cause real runs to hit the live LLM.
+    from tradingagents.orchestrator import SwitchboardOrchestrator
+
+    analysis_id = db.create_analysis({
+        "ticker": ticker,
+        "trade_date": trade_date,
+        "provider": config["llm_provider"],
+        "deep_model": config["deep_think_llm"],
+        "quick_model": config["quick_think_llm"],
+        "analysts": selected_analysts,
+        "research_depth": config["max_debate_rounds"],
+        "language": language,
+    })
+    try:
+        orch = SwitchboardOrchestrator(config=config, selected_analysts=selected_analysts)
+        final_state, signal = orch.run(ticker, trade_date)
+        signal = (signal or "").upper()
+        db.complete_analysis(analysis_id, final_state, signal)
+        # Log the decision for deferred outcome grading (nightly sweep in
+        # web/scheduler.py resolves it once the holding window matures).
+        # Best-effort, mirrors web/runner.py — never block the scan on it.
+        try:
+            orch.memory_log.store_decision(
+                ticker=ticker,
+                trade_date=trade_date,
+                final_trade_decision=final_state.get("final_trade_decision", ""),
+            )
+        except Exception:
+            log.exception("[scan %s] memory-log store failed for %s", scan_id, ticker)
+        db.add_scan_ticker(scan_id, ticker, analysis_id, pos["quantity"], pos["market_value"], signal)
+        return {
+            "ticker": ticker,
+            "signal": signal,
+            "quantity": pos["quantity"],
+            "market_value": pos["market_value"],
+            "trader_plan": final_state.get("trader_investment_plan", ""),
+            "final_decision": final_state.get("final_trade_decision", ""),
+        }
+    except Exception as exc:
+        log.exception("[scan %s] failed for %s", scan_id, ticker)
+        db.fail_analysis(analysis_id, str(exc))
+        db.add_scan_ticker(scan_id, ticker, analysis_id, pos["quantity"], pos["market_value"], None, error=str(exc))
+        return {
+            "ticker": ticker,
+            "signal": "",
+            "quantity": pos["quantity"],
+            "market_value": pos["market_value"],
+            "trader_plan": "",
+            "final_decision": f"(failed: {exc})",
+        }
+
+
 def _run_scan(scan_id: int, trade_date: str, aggressiveness: int = 5, bias: str = "neutral") -> None:
-    """Portfolio scan worker: holdings -> per-ticker graph runs -> aggregator.
+    """Portfolio scan worker: holdings -> bounded per-ticker graph runs -> aggregator.
+
+    Holdings are analyzed concurrently across a ThreadPoolExecutor sized to
+    the shared OLLAMA_MAX_CONCURRENCY budget, gated so ad-hoc single-ticker
+    analyses keep priority. The original holdings order is preserved in the
+    payload via index-based result assembly, regardless of completion order.
 
     A per-ticker failure is recorded (fail_analysis + an error row in the
-    payload) and the loop continues; only a failure outside the loop fails
+    payload) and the scan continues; only a failure outside the loop fails
     the whole scan.
+
+    scanned_count is updated after each holding completes and reaches the
+    full scan_total on the final update; current_ticker is the most recently
+    completed holding.
     """
     log.info("[scan %s] starting for %s", scan_id, trade_date)
 
@@ -218,67 +301,35 @@ def _run_scan(scan_id: int, trade_date: str, aggressiveness: int = 5, bias: str 
     config = build_config({**prefs, "aggressiveness": aggressiveness, "bias": bias})
     selected_analysts = prefs.get("analysts") or ["market", "social", "news", "fundamentals"]
 
-    # Step 3: for each position, create an analyses row + run the graph
-    per_ticker_payload: list[dict[str, Any]] = []
-
-    from tradingagents.orchestrator import SwitchboardOrchestrator
-
-    counts = {sig: 0 for sig in SIGNALS}
-    for i, pos in enumerate(pos_dicts, start=1):
-        ticker = pos["symbol"]
-        # scanned_count = completed-so-far (i-1), current_ticker = the one being analyzed now.
-        # This lets the UI read "k/N done, working on TICKER".
-        db.update_portfolio_scan(scan_id, scanned_count=i - 1, current_ticker=ticker)
-        log.info("[scan %s] %d/%d: %s", scan_id, i, len(pos_dicts), ticker)
-        analysis_id = db.create_analysis({
-            "ticker": ticker,
-            "trade_date": trade_date,
-            "provider": config["llm_provider"],
-            "deep_model": config["deep_think_llm"],
-            "quick_model": config["quick_think_llm"],
-            "analysts": selected_analysts,
-            "research_depth": config["max_debate_rounds"],
-            "language": prefs.get("language", "English"),
-        })
-        try:
-            orch = SwitchboardOrchestrator(config=config, selected_analysts=selected_analysts)
-            final_state, signal = orch.run(ticker, trade_date)
-            signal = (signal or "").upper()
-            db.complete_analysis(analysis_id, final_state, signal)
-            # Log the decision for deferred outcome grading (nightly sweep in
-            # web/scheduler.py resolves it once the holding window matures).
-            # Best-effort, mirrors web/runner.py — never block the scan on it.
-            try:
-                orch.memory_log.store_decision(
-                    ticker=ticker,
-                    trade_date=trade_date,
-                    final_trade_decision=final_state.get("final_trade_decision", ""),
+    # Step 3: analyze each position in parallel, bounded by the shared LLM budget.
+    budget = _total_budget()
+    results: list[dict[str, Any] | None] = [None] * len(pos_dicts)
+    completed = 0
+    with _GateMonitor(DynamicGate(budget)) as gate:
+        def _run_one(index, pos):
+            with gate:
+                return index, _analyze_one_holding(
+                    scan_id, pos, trade_date, config, selected_analysts,
+                    prefs.get("language", "English"),
                 )
-            except Exception:
-                log.exception("[scan %s] memory-log store failed for %s", scan_id, ticker)
-            if signal in counts:
-                counts[signal] += 1
-            db.add_scan_ticker(scan_id, ticker, analysis_id, pos["quantity"], pos["market_value"], signal)
-            per_ticker_payload.append({
-                "ticker": ticker,
-                "signal": signal,
-                "quantity": pos["quantity"],
-                "market_value": pos["market_value"],
-                "trader_plan": final_state.get("trader_investment_plan", ""),
-                "final_decision": final_state.get("final_trade_decision", ""),
-            })
-        except Exception as exc:
-            log.exception("[scan %s] failed for %s", scan_id, ticker)
-            db.fail_analysis(analysis_id, str(exc))
-            db.add_scan_ticker(scan_id, ticker, analysis_id, pos["quantity"], pos["market_value"], None, error=str(exc))
-            per_ticker_payload.append({
-                "ticker": ticker,
-                "signal": "",
-                "quantity": pos["quantity"],
-                "market_value": pos["market_value"],
-                "trader_plan": "",
-                "final_decision": f"(failed: {exc})",
-            })
+
+        with ThreadPoolExecutor(max_workers=budget) as pool:
+            futures = {pool.submit(_run_one, i, p): i for i, p in enumerate(pos_dicts)}
+            for fut in as_completed(futures):
+                futures.pop(fut)  # drop as consumed once handled — same memory reason as run_deep_dives
+                index, entry = fut.result()
+                results[index] = entry
+                completed += 1
+                db.update_portfolio_scan(scan_id, scanned_count=completed, current_ticker=entry["ticker"])
+                log.info("[scan %s] %d/%d: %s", scan_id, completed, len(pos_dicts), entry["ticker"])
+
+    per_ticker_payload = [e for e in results if e is not None]
+
+    # Aggregate signal counts on the main thread only.
+    counts = {sig: 0 for sig in SIGNALS}
+    for entry in per_ticker_payload:
+        if entry["signal"] in counts:
+            counts[entry["signal"]] += 1
 
     # Step 4: aggregator pass
     log.info("[scan %s] running aggregator over %d tickers", scan_id, len(per_ticker_payload))
@@ -301,7 +352,7 @@ def _accounts_split() -> list[dict[str, Any]]:
     """Per-account live holdings for the live-holdings UI panel.
 
     Returns [all_entry, ...per_account] from all enabled brokerage providers
-    (see web.brokerages). Each entry has: id, brokerage, label, positions,
+    (see web/brokerages). Each entry has: id, brokerage, label, positions,
     total_value, cash, cost_basis, gain_dollars, gain_percent. Each position
     is the normalized brokerages shape (incl. option fields), optionally with
     signal/analysis_id merged from the latest completed portfolio scan.
