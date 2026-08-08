@@ -119,10 +119,15 @@ CREATE TABLE IF NOT EXISTS analyses (
     trader_plan TEXT,
     risk_judge TEXT,
     full_state TEXT,
-    error TEXT
+    error TEXT,
+    config_fingerprint TEXT,
+    reused_from_analysis_id INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_analyses_created_at ON analyses (created_at DESC);
+-- Same-day deep-dive reuse: looks up a completed analysis for the same
+-- ticker/date to reuse the shared pipeline stage (see find_reusable_analysis).
+CREATE INDEX IF NOT EXISTS idx_analyses_ticker_date ON analyses (ticker, trade_date);
 
 CREATE TABLE IF NOT EXISTS portfolio_scans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -166,7 +171,9 @@ CREATE TABLE IF NOT EXISTS spy_scans (
     updated_at TEXT,
     paper_account_id INTEGER,
     aggressiveness INTEGER DEFAULT 5,
-    bias TEXT DEFAULT 'neutral'
+    bias TEXT DEFAULT 'neutral',
+    quick_fingerprint TEXT,
+    deep_reused_count INTEGER DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_spy_scans_created_at ON spy_scans (created_at DESC);
@@ -343,6 +350,16 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     # Trailing stop: highest premium ever marked (seeded at entry). Enables
     # "lock gains once armed" without a full mark-history table.
     ("options_positions", "peak_premium", "REAL"),
+    # Same-day deep-dive reuse: shared-stage config fingerprint (see
+    # web/spy_scanner.py _deep_dive_fingerprint) + provenance pointer to the
+    # donor analysis a row's portfolio-manager rerun was based on.
+    ("analyses", "config_fingerprint", "TEXT"),
+    ("analyses", "reused_from_analysis_id", "INTEGER"),
+    # Quick-scan reuse: fingerprint the LLM-relevant quick-scan config so a
+    # later same-day scan can tell whether this scan's spy_quick_results rows
+    # are safe to copy (see web/spy_scanner.py _quick_scan_fingerprint).
+    ("spy_scans", "quick_fingerprint", "TEXT"),
+    ("spy_scans", "deep_reused_count", "INTEGER DEFAULT 0"),
 ]
 
 
@@ -668,8 +685,9 @@ def create_analysis(params: dict[str, Any]) -> int:
             """
             INSERT INTO analyses (
                 created_at, ticker, trade_date, status,
-                provider, deep_model, quick_model, analysts, research_depth, language
-            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)
+                provider, deep_model, quick_model, analysts, research_depth, language,
+                config_fingerprint
+            ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 datetime.utcnow().isoformat(timespec="seconds") + "Z",
@@ -681,6 +699,7 @@ def create_analysis(params: dict[str, Any]) -> int:
                 json.dumps(params.get("analysts", [])),
                 params.get("research_depth"),
                 params.get("language"),
+                params.get("config_fingerprint"),
             ),
         )
         return int(cur.lastrowid)
@@ -779,6 +798,65 @@ def get_analysis(analysis_id: int) -> dict[str, Any] | None:
             except (TypeError, ValueError):
                 pass
     return data
+
+
+def find_reusable_analysis(
+    ticker: str,
+    trade_date: str,
+    config_fingerprint: str,
+    max_age_hours: float,
+) -> dict[str, Any] | None:
+    """Latest completed same-day analysis with a matching shared-stage fingerprint.
+
+    Donates the shared pipeline stage (analyst reports, debate, research-plan)
+    to a same-day scan for a different paper account so only the portfolio
+    manager needs to rerun (see SwitchboardOrchestrator.rerun_decision).
+
+    Only original runs qualify — ``reused_from_analysis_id IS NULL`` — so a
+    reused row never becomes a donor itself (copies never chain off copies).
+    ``full_state`` must be present and decode to a dict; a corrupt/legacy
+    row is treated as a miss, never an error, so the caller always has a
+    full-pipeline fallback.
+    """
+    cutoff = (datetime.utcnow() - timedelta(hours=max_age_hours)).isoformat(timespec="seconds") + "Z"
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM analyses
+            WHERE ticker = ? AND trade_date = ? AND status = 'completed'
+              AND config_fingerprint = ? AND reused_from_analysis_id IS NULL
+              AND full_state IS NOT NULL AND created_at >= ?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (ticker, trade_date, config_fingerprint, cutoff),
+        ).fetchone()
+    if not row:
+        return None
+    data = dict(row)
+    try:
+        full_state = json.loads(data["full_state"])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(full_state, dict):
+        return None
+    data["full_state"] = full_state
+    if data.get("analysts"):
+        try:
+            data["analysts"] = json.loads(data["analysts"])
+        except (TypeError, ValueError):
+            pass
+    return data
+
+
+def mark_analysis_reused(analysis_id: int, source_analysis_id: int) -> None:
+    """Record that ``analysis_id`` was produced by rerunning the portfolio
+    manager over ``source_analysis_id``'s shared-stage state (provenance
+    only — does not touch status/reports, which complete_analysis sets)."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE analyses SET reused_from_analysis_id = ? WHERE id = ?",
+            (source_analysis_id, analysis_id),
+        )
 
 
 # ---------- portfolio scans (nightly holdings sweep) ----------
@@ -963,6 +1041,7 @@ _SPY_SCAN_UPDATABLE = {
     "status", "quick_count", "quick_total", "deep_count", "deep_total",
     "current_value", "last_price_check", "rebalance_notes", "error",
     "paper_account_id", "aggressiveness", "bias",
+    "quick_fingerprint", "deep_reused_count",
 }
 
 
@@ -1153,6 +1232,48 @@ def upsert_spy_quick_result(
             """,
             (scan_id, ticker, signal, conviction, reasoning, analysis_id, error),
         )
+
+
+def find_reusable_quick_results(
+    trade_date: str,
+    quick_fingerprint: str,
+    exclude_scan_id: int,
+    max_age_hours: float,
+) -> dict[str, dict[str, Any]]:
+    """``{ticker: {signal, conviction, reasoning}}`` from same-day completed
+    scans with a matching quick-scan fingerprint.
+
+    Only rows from ``status = 'completed'`` source scans donate — a
+    failed/cancelled scan's coverage is partial and not trustworthy for
+    reuse. Error rows (the quick LLM call itself failed) and rows with no
+    signal are excluded so they can never poison another scan's top-N
+    selection. ``entry_price`` is deliberately not stored here or returned —
+    callers must always recompute it fresh. Ordered oldest-donor-first so
+    that when more than one same-day scan qualifies, the most recent one's
+    values win as the dict is built.
+    """
+    cutoff = (datetime.utcnow() - timedelta(hours=max_age_hours)).isoformat(timespec="seconds") + "Z"
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT r.ticker, r.signal, r.conviction, r.reasoning
+            FROM spy_quick_results r
+            JOIN spy_scans s ON s.id = r.scan_id
+            WHERE s.trade_date = ? AND s.quick_fingerprint = ? AND s.status = 'completed'
+              AND s.id != ? AND s.created_at >= ?
+              AND r.error IS NULL AND r.signal IS NOT NULL
+            ORDER BY s.id ASC
+            """,
+            (trade_date, quick_fingerprint, exclude_scan_id, cutoff),
+        ).fetchall()
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        out[row["ticker"]] = {
+            "signal": row["signal"],
+            "conviction": row["conviction"],
+            "reasoning": row["reasoning"],
+        }
+    return out
 
 
 def list_spy_scans(
