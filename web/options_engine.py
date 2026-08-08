@@ -23,6 +23,7 @@ exposes market data and account reads exclusively.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time as time_mod
 from collections.abc import Iterator
@@ -34,7 +35,7 @@ import yfinance as yf
 
 from tradingagents.dataflows import schwab_mcp
 
-from . import db, options_allocator, options_data, options_learning, spy_scanner
+from . import db, options_allocator, options_data, options_learning, scan_queue, spy_scanner
 from .runner import build_config
 from .spy_tickers import get_sp500_tickers
 
@@ -63,6 +64,34 @@ STALE_ALERT_THRESHOLD = 3
 _ALLOC_LOCK = threading.Lock()
 _ALLOC_POLL_SECONDS = 30.0
 _ALLOC_TIMEOUT_SECONDS = 3600.0
+
+
+def _slot_release_enabled() -> bool:
+    """Kill switch for the proactive queue hand-off (env, read at call time).
+
+    Three concurrent full pipelines in one 4g-capped container is exactly
+    the shape that reproduced the host OOM the scan queue was built to
+    prevent (see the _SCAN_LOCK comment in portfolio_routes.start_scan),
+    so a no-code-change rollback has to exist. Note it only stops the
+    PROACTIVE dequeue — scan_queue no longer counts a waiter as busy
+    either way, so a newly REQUESTED scan can still start beside one.
+    """
+    return os.environ.get("OPTIONS_RELEASE_SLOT_DURING_WAIT", "1").strip().lower() not in {
+        "0", "false", "no", "off"
+    }
+
+
+def _release_scan_slot(scan_id: int) -> None:
+    """Best-effort hand-off of the scan-queue slot when a build starts waiting.
+
+    A queue error must never sink a live build.
+    """
+    if not _slot_release_enabled():
+        return
+    try:
+        scan_queue._dequeue_next_scan()
+    except Exception:
+        log.exception("[options %s] queue advance on wait entry failed", scan_id)
 
 
 @contextmanager
@@ -586,6 +615,14 @@ def _wait_for_market_open(scan_id: int) -> None:
     couldn't tell "blocked" from "working" and polled the full scan payload
     every 5s for up to 2 hours a day for zero new information. See
     run_options_build for where the label flips back once real work starts.
+
+    The first time the loop actually blocks it hands the container-wide scan
+    queue slot to the next queued options account. Because all three daily
+    accounts' rows are usually created in one request loop, accounts 2 and 3
+    land 'queued' behind account 1's 'pending'; account 1 parking dequeues
+    account 2, and account 2 parking dequeues account 3. Allocation is still
+    re-serialized by _allocation_slot(), so parallel compute cannot double-
+    allocate.
     """
     ticks = 0
     while True:
@@ -594,6 +631,13 @@ def _wait_for_market_open(scan_id: int) -> None:
             return
         if db.is_spy_scan_cancelled(scan_id):
             raise spy_scanner.ScanCancelled()
+        if ticks == 0:
+            # This wait is a sleep, not work — hand the container-wide scan slot
+            # to the next queued options account so it can run its own compute
+            # phase now instead of after this whole build. Allocation is
+            # re-serialized by _allocation_slot(), so parallel compute cannot
+            # double-allocate.
+            _release_scan_slot(scan_id)
         if ticks % 6 == 0:  # every ~3 minutes
             db.update_spy_scan(scan_id, status="running_wait_market")
         ticks += 1

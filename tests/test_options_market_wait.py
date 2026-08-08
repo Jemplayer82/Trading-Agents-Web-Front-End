@@ -225,3 +225,155 @@ class TestAllocationSlot:
             assert elapsed < 2
         finally:
             self._release_lock()
+
+
+class TestWaitReleasesTheQueueSlot:
+    """_wait_for_market_open should hand its scan-queue slot to the next queued
+    options account the moment it actually starts blocking, so the next account
+    can begin its own compute phase immediately. Allocation is still serialized
+    by _allocation_slot()."""
+
+    def _make_blocking_clock(self, monkeypatch, scan_id: int):
+        """Monday 07:30 ET; requests cancel after a couple of ticks."""
+        from datetime import datetime
+
+        calls = {"n": 0}
+
+        def fake_now_et():
+            calls["n"] += 1
+            if calls["n"] > 2:
+                db.request_spy_scan_cancel(scan_id)
+            return datetime(2026, 6, 1, 7, 30)  # Monday, before MARKET_OPEN_ET
+
+        monkeypatch.setattr(options_engine.options_data, "now_et", fake_now_et)
+        monkeypatch.setattr(options_engine.time_mod, "sleep", lambda _s: None)
+
+    def test_dequeue_called_once_on_entering_the_wait(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
+        db.init_db()
+        scan_id = db.create_spy_scan("2026-06-01", kind="options")
+        self._make_blocking_clock(monkeypatch, scan_id)
+
+        dequeues = {"n": 0}
+
+        def fake_dequeue():
+            dequeues["n"] += 1
+
+        monkeypatch.setattr(options_engine.scan_queue, "_dequeue_next_scan", fake_dequeue)
+
+        with pytest.raises(options_engine.spy_scanner.ScanCancelled):
+            options_engine._wait_for_market_open(scan_id)
+
+        assert dequeues["n"] == 1
+
+    def test_no_dequeue_when_the_wait_returns_immediately(self, monkeypatch, tmp_path):
+        from datetime import datetime
+
+        monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
+        db.init_db()
+        scan_id = db.create_spy_scan("2026-06-01", kind="options")
+
+        monkeypatch.setattr(
+            options_engine.options_data, "now_et",
+            lambda: datetime(2026, 6, 1, 10, 0),  # Monday, after MARKET_OPEN_ET
+        )
+        monkeypatch.setattr(
+            options_engine.time_mod, "sleep",
+            lambda _s: (_ for _ in ()).throw(AssertionError("should not sleep")),
+        )
+
+        dequeues = {"n": 0}
+
+        def fake_dequeue():
+            dequeues["n"] += 1
+
+        monkeypatch.setattr(options_engine.scan_queue, "_dequeue_next_scan", fake_dequeue)
+
+        options_engine._wait_for_market_open(scan_id)
+
+        assert dequeues["n"] == 0
+
+    def test_dequeue_failure_does_not_break_the_wait(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
+        db.init_db()
+        scan_id = db.create_spy_scan("2026-06-01", kind="options")
+        self._make_blocking_clock(monkeypatch, scan_id)
+
+        dequeues = {"n": 0}
+
+        def boom_dequeue():
+            dequeues["n"] += 1
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(options_engine.scan_queue, "_dequeue_next_scan", boom_dequeue)
+
+        with pytest.raises(options_engine.spy_scanner.ScanCancelled):
+            options_engine._wait_for_market_open(scan_id)
+
+        assert dequeues["n"] == 1
+
+    def test_kill_switch_disables_the_handoff(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("OPTIONS_RELEASE_SLOT_DURING_WAIT", "0")
+        monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
+        db.init_db()
+        scan_id = db.create_spy_scan("2026-06-01", kind="options")
+        self._make_blocking_clock(monkeypatch, scan_id)
+
+        dequeues = {"n": 0}
+
+        def fake_dequeue():
+            dequeues["n"] += 1
+
+        monkeypatch.setattr(options_engine.scan_queue, "_dequeue_next_scan", fake_dequeue)
+
+        with pytest.raises(options_engine.spy_scanner.ScanCancelled):
+            options_engine._wait_for_market_open(scan_id)
+
+        assert dequeues["n"] == 0
+
+    def test_wait_entry_actually_starts_the_next_queued_scan(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
+        db.init_db()
+
+        # Importing options_routes registers the 'options' runner with scan_queue.
+        from web import options_routes, scan_queue
+
+        account_id = db.create_paper_account(
+            "wait-release-e2e", 100_000.0, "options"
+        )
+        scan1 = db.create_spy_scan(
+            "2026-06-01", kind="options", paper_account_id=account_id
+        )
+        scan2 = db.create_spy_scan(
+            "2026-06-01", kind="options", paper_account_id=account_id
+        )
+        db.update_spy_scan(scan2, status="queued")
+
+        started = threading.Event()
+        recorded: dict[str, Any] = {}
+
+        def recorder(scan_id: int, *args: Any, **kwargs: Any) -> None:
+            recorded["scan_id"] = scan_id
+            # Mirror what the real thread wrapper does on entry so the test can
+            # observe the queued row has genuinely been handed off to a runner.
+            db.update_spy_scan(scan_id, status="running_quick")
+            started.set()
+
+        # The registry dispatches via live getattr(module, func_name), so patch
+        # the function on options_routes and point the registry back at it.
+        monkeypatch.setattr(options_routes, "_run_options_scan_thread", recorder)
+        scan_queue.register_runner("options", options_routes, "_run_options_scan_thread")
+
+        self._make_blocking_clock(monkeypatch, scan1)
+
+        wait_thread = threading.Thread(
+            target=options_engine._wait_for_market_open, args=(scan1,)
+        )
+        wait_thread.start()
+        try:
+            assert started.wait(timeout=5), "queued scan runner did not start"
+            assert recorded["scan_id"] == scan2
+            assert db.get_spy_scan_status(scan2)["status"] == "running_quick"
+        finally:
+            wait_thread.join(timeout=5)
+            assert not wait_thread.is_alive()
