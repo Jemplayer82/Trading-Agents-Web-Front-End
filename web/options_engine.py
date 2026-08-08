@@ -23,6 +23,7 @@ exposes market data and account reads exclusively.
 from __future__ import annotations
 
 import logging
+import threading
 import time as time_mod
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -46,6 +47,23 @@ MARKET_OPEN_ET = (9, 35)  # allocation waits for live quotes on trading days
 SETTLE_HOUR_ET = 17     # expiry-day positions settle only after this hour
 STALE_ALERT_THRESHOLD = 3
 
+# Serializes the POST-WAIT phase (mark-to-market -> chain fetch ->
+# allocator -> open/close -> complete_spy_scan) across concurrent
+# options builds. A build parked in _wait_for_market_open no longer
+# holds the scan-queue slot (see scan_queue._is_any_scan_running), so
+# all three daily accounts can be computing at once; this lock is what
+# keeps them from allocating against each other's cash and position
+# reads. Acquired only AFTER the wait returns, so accounts allocate one
+# at a time in the order they finish waiting.
+#
+# Deadlock-free by construction: it is acquired at exactly ONE call
+# site, nothing inside the guarded region re-acquires it, and
+# scan_queue._SCAN_LOCK is never held while this is taken
+# (_dequeue_next_scan starts its worker thread outside its own hold).
+_ALLOC_LOCK = threading.Lock()
+_ALLOC_POLL_SECONDS = 30.0
+_ALLOC_TIMEOUT_SECONDS = 3600.0
+
 
 @contextmanager
 def _phase(label: str) -> Iterator[None]:
@@ -56,6 +74,38 @@ def _phase(label: str) -> Iterator[None]:
         raise
     except Exception as exc:  # noqa: BLE001 — re-raised with friendlier context
         raise RuntimeError(f"{label}: {exc}") from exc
+
+
+@contextmanager
+def _allocation_slot(scan_id: int) -> Iterator[None]:
+    """Hold the global allocation lock for one build's post-wait phase.
+
+    Blocks in _ALLOC_POLL_SECONDS slices rather than one open-ended
+    acquire so a queued waiter (a) keeps writing updated_at and cannot
+    be mistaken for a crashed worker by the stuck-run reaper
+    (web/scheduler.py STUCK_SCAN_STALL_MIN, default 60 min) and (b)
+    still honours a cancel request while blocked. Fails loudly past
+    _ALLOC_TIMEOUT_SECONDS instead of hanging a thread forever.
+    """
+    waited = 0.0
+    while not _ALLOC_LOCK.acquire(timeout=_ALLOC_POLL_SECONDS):
+        waited += _ALLOC_POLL_SECONDS
+        if db.is_spy_scan_cancelled(scan_id):
+            raise spy_scanner.ScanCancelled()
+        if waited >= _ALLOC_TIMEOUT_SECONDS:
+            raise RuntimeError(
+                f"timed out after {waited:.0f}s waiting for the allocation slot")
+        # Heartbeat: reuses the existing running_wait_market label on
+        # purpose -- this IS a wait, no new status vocabulary needed.
+        db.update_spy_scan(scan_id, status="running_wait_market")
+        log.info("[options %s] waiting for the allocation slot (%.0fs)", scan_id, waited)
+    try:
+        # A cancel requested while queued must not still allocate.
+        if db.is_spy_scan_cancelled(scan_id):
+            raise spy_scanner.ScanCancelled()
+        yield
+    finally:
+        _ALLOC_LOCK.release()
 
 
 # ── Pre-screen ───────────────────────────────────────────────────────────────
@@ -565,7 +615,7 @@ def _zero_candidate_reason(
     never misattribute a failure as "nothing passed vetting".
 
     Reachable only when the run was not TOTALLY broken — the guards in
-    run_options_build fail the scan outright in that case.
+    run_options_build fail the run outright in that case.
     """
     if candidates:
         return None
@@ -674,154 +724,155 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
     # bounce, not an extra poll cycle.
     db.update_spy_scan(scan_id, status="running_wait_market")
     _wait_for_market_open(scan_id)
-    db.update_spy_scan(scan_id, status="running_alloc")
-    with _phase("Position mark-to-market failed"):
-        refresh_positions(account_id)
+    with _allocation_slot(scan_id):
+        db.update_spy_scan(scan_id, status="running_alloc")
+        with _phase("Position mark-to-market failed"):
+            refresh_positions(account_id)
 
-    # A FAILED deep dive still carries its quick-scan signal/conviction
-    # (run_deep_dives returns {**candidate, "error": ...}), and fetch_candidates
-    # filters only on signal/conviction — so without this, contracts get vetted
-    # and real paper positions opened off analyses that crashed. Drop them.
-    usable = [e for e in enriched if not e.get("error")]
-    if len(usable) != len(enriched):
-        log.warning("[options %s] dropping %d failed deep dives before vetting",
-                    scan_id, len(enriched) - len(usable))
-    with _phase("Chain fetch failed"):
-        candidates, chain_notes = options_data.fetch_candidates(usable)
-    log.info("[options %s] %d vetted candidates from %d usable deep dives (%d total)",
-             scan_id, len(candidates), len(usable), len(enriched))
+        # A FAILED deep dive still carries its quick-scan signal/conviction
+        # (run_deep_dives returns {**candidate, "error": ...}), and fetch_candidates
+        # filters only on signal/conviction — so without this, contracts get vetted
+        # and real paper positions opened off analyses that crashed. Drop them.
+        usable = [e for e in enriched if not e.get("error")]
+        if len(usable) != len(enriched):
+            log.warning("[options %s] dropping %d failed deep dives before vetting",
+                        scan_id, len(enriched) - len(usable))
+        with _phase("Chain fetch failed"):
+            candidates, chain_notes = options_data.fetch_candidates(usable)
+        log.info("[options %s] %d vetted candidates from %d usable deep dives (%d total)",
+                 scan_id, len(candidates), len(usable), len(enriched))
 
-    open_positions = db.list_options_positions(account_id, status="open")
-    eq = account_equity(account_id)
-    realized = db.options_realized_pnl(account_id)
-    starting_equity = eq["equity"]
-    fresh_signals = {
-        (r.get("ticker") or "").upper(): {"signal": (r.get("signal") or "").upper(),
-                                          "conviction": r.get("conviction")}
-        for r in quick_results if r.get("ticker")
-    }
+        open_positions = db.list_options_positions(account_id, status="open")
+        eq = account_equity(account_id)
+        realized = db.options_realized_pnl(account_id)
+        starting_equity = eq["equity"]
+        fresh_signals = {
+            (r.get("ticker") or "").upper(): {"signal": (r.get("signal") or "").upper(),
+                                              "conviction": r.get("conviction")}
+            for r in quick_results if r.get("ticker")
+        }
 
-    # Learning loop, read side: latest batch-reflected lessons + mechanical
-    # track record for THIS account (options_learning). Pure Python + one DB
-    # read — zero LLM cost at scan time; "" until enough closes exist.
-    lessons_context = ""
-    try:
-        settled = db.list_options_positions(account_id, status="settled")
-        last_lesson = db.latest_options_lesson(account_id)
-        stats = options_learning.compute_options_stats(
-            settled, min_closed=int(config.get("options_lessons_min_closed", 10)))
-        lessons_context = options_learning.format_track_record(
-            stats, (last_lesson or {}).get("lessons_md"),
-            max_chars=int(config.get("options_lessons_max_chars", 1200)))
-        log.info("[options %s] lessons block: %d chars (%d closed)",
-                 scan_id, len(lessons_context), len(settled))
-    except Exception:
-        log.exception("[options %s] lessons context failed — allocating without it", scan_id)
+        # Learning loop, read side: latest batch-reflected lessons + mechanical
+        # track record for THIS account (options_learning). Pure Python + one DB
+        # read — zero LLM cost at scan time; "" until enough closes exist.
+        lessons_context = ""
+        try:
+            settled = db.list_options_positions(account_id, status="settled")
+            last_lesson = db.latest_options_lesson(account_id)
+            stats = options_learning.compute_options_stats(
+                settled, min_closed=int(config.get("options_lessons_min_closed", 10)))
+            lessons_context = options_learning.format_track_record(
+                stats, (last_lesson or {}).get("lessons_md"),
+                max_chars=int(config.get("options_lessons_max_chars", 1200)))
+            log.info("[options %s] lessons block: %d chars (%d closed)",
+                     scan_id, len(lessons_context), len(settled))
+        except Exception:
+            log.exception("[options %s] lessons context failed — allocating without it", scan_id)
 
-    with _phase("Options allocation failed"):
-        alloc = options_allocator.run(
-            candidates, open_positions, trade_date, config,
-            equity=eq["equity"], cash=eq["cash"], realized_pnl=realized,
-            aggressiveness=aggressiveness, bias=bias, fresh_signals=fresh_signals,
-            lessons_context=lessons_context,
+        with _phase("Options allocation failed"):
+            alloc = options_allocator.run(
+                candidates, open_positions, trade_date, config,
+                equity=eq["equity"], cash=eq["cash"], realized_pnl=realized,
+                aggressiveness=aggressiveness, bias=bias, fresh_signals=fresh_signals,
+                lessons_context=lessons_context,
+            )
+
+        # Learning loop, write side: today's chain data carries the underlying spot
+        # for every candidate — capture it on closes so attribution doesn't have to
+        # backfill with a less precise EOD close.
+        spot_by_underlying = {
+            c["underlying"]: c.get("underlying_price")
+            for c in candidates if c.get("underlying_price")
+        }
+
+        # Phase 4: apply decisions through the transactional helpers.
+        decisions_log: list[dict[str, Any]] = []
+        for c in alloc["closes"]:
+            pos = db.get_options_position(int(c["position_id"])) or {}
+            exit_premium = float(c.get("exit_premium") or pos.get("current_premium")
+                                 or pos.get("entry_premium") or 0)
+            exit_spot = spot_by_underlying.get(pos.get("underlying"))
+            if db.close_options_position(int(c["position_id"]), exit_premium,
+                                         c["exit_reason"], close_scan_id=scan_id,
+                                         exit_underlying=exit_spot,
+                                         exit_underlying_source="live" if exit_spot else None):
+                decisions_log.append({
+                    "occ_symbol": c["occ_symbol"], "action": "CLOSE",
+                    "exit_reason": c["exit_reason"], "exit_premium": exit_premium,
+                    "contracts": pos.get("contracts"), "rationale": c.get("rationale"),
+                    # Contract identity for the dashboard's decisions table — without
+                    # these the row renders as "? $0?" (the display can't name the
+                    # contract from an OCC symbol alone on old browsers/rows).
+                    "underlying": pos.get("underlying"), "put_call": pos.get("put_call"),
+                    "strike": pos.get("strike"), "expiration_date": pos.get("expiration_date"),
+                })
+        skipped_opens: list[str] = []
+        for o in alloc["opens"]:
+            contract = o["contract"]
+            cash_now = db.options_cash_balance(account_id)
+            if o["cost"] > cash_now + 0.01:
+                skipped_opens.append(f"{contract['occ_symbol']}: cost ${o['cost']:,.0f} > cash ${cash_now:,.0f}")
+                continue
+            db.open_options_position(account_id, scan_id, {
+                "occ_symbol": contract["occ_symbol"],
+                "underlying": contract["underlying"],
+                "put_call": contract["put_call"],
+                "strike": contract["strike"],
+                "expiration_date": contract["expiration_date"],
+                "contracts": o["contracts"],
+                "entry_premium": contract["mid"],
+                "entry_underlying": contract.get("underlying_price"),
+                "entry_delta": contract.get("delta"),
+                "entry_bid": contract.get("bid"),
+                "entry_ask": contract.get("ask"),
+                "entry_oi": contract.get("open_interest"),
+                "signal": contract.get("signal"),
+                "conviction": contract.get("conviction"),
+                "rationale": o.get("rationale"),
+                "data_source": contract.get("source"),
+            })
+            decisions_log.append({
+                "occ_symbol": contract["occ_symbol"], "action": "NEW",
+                "contracts": o["contracts"], "entry_premium": contract["mid"],
+                "cost": o["cost"], "rationale": o.get("rationale"),
+                "underlying": contract["underlying"], "put_call": contract["put_call"],
+                "strike": contract["strike"], "expiration_date": contract["expiration_date"],
+            })
+        for h in alloc["holds"]:
+            hp = db.get_options_position(int(h["position_id"])) if h.get("position_id") else None
+            hp = hp or {}
+            decisions_log.append({"occ_symbol": h["occ_symbol"], "action": "HOLD",
+                                  "rationale": h.get("rationale"),
+                                  "underlying": hp.get("underlying"), "put_call": hp.get("put_call"),
+                                  "strike": hp.get("strike"),
+                                  "expiration_date": hp.get("expiration_date")})
+
+        report = alloc["report_md"]
+        reason = _zero_candidate_reason(quick_results, top, enriched, usable, candidates)
+        if reason:
+            report += f"\n## Why no new positions\n{reason}\n"
+        if skipped_opens:
+            report += "\n## Skipped opens (cash)\n" + "\n".join(f"- {s}" for s in skipped_opens) + "\n"
+        if chain_notes:
+            report += ("\n## Contract vetting notes\n"
+                       + "\n".join(f"- {n}" for n in chain_notes[:40]) + "\n")
+
+        prev = db.get_latest_completed_spy_scan(exclude_id=scan_id,
+                                                paper_account_id=account_id, kind="options")
+        db.complete_spy_scan(
+            scan_id=scan_id,
+            allocator_report=report,
+            portfolio_json=decisions_log,
+            previous_scan_id=int(prev["id"]) if prev else None,
+            starting_value=starting_equity,
         )
 
-    # Learning loop, write side: today's chain data carries the underlying spot
-    # for every candidate — capture it on closes so attribution doesn't have to
-    # backfill with a less precise EOD close.
-    spot_by_underlying = {
-        c["underlying"]: c.get("underlying_price")
-        for c in candidates if c.get("underlying_price")
-    }
-
-    # Phase 4: apply decisions through the transactional helpers.
-    decisions_log: list[dict[str, Any]] = []
-    for c in alloc["closes"]:
-        pos = db.get_options_position(int(c["position_id"])) or {}
-        exit_premium = float(c.get("exit_premium") or pos.get("current_premium")
-                             or pos.get("entry_premium") or 0)
-        exit_spot = spot_by_underlying.get(pos.get("underlying"))
-        if db.close_options_position(int(c["position_id"]), exit_premium,
-                                     c["exit_reason"], close_scan_id=scan_id,
-                                     exit_underlying=exit_spot,
-                                     exit_underlying_source="live" if exit_spot else None):
-            decisions_log.append({
-                "occ_symbol": c["occ_symbol"], "action": "CLOSE",
-                "exit_reason": c["exit_reason"], "exit_premium": exit_premium,
-                "contracts": pos.get("contracts"), "rationale": c.get("rationale"),
-                # Contract identity for the dashboard's decisions table — without
-                # these the row renders as "? $0?" (the display can't name the
-                # contract from an OCC symbol alone on old browsers/rows).
-                "underlying": pos.get("underlying"), "put_call": pos.get("put_call"),
-                "strike": pos.get("strike"), "expiration_date": pos.get("expiration_date"),
-            })
-    skipped_opens: list[str] = []
-    for o in alloc["opens"]:
-        contract = o["contract"]
-        cash_now = db.options_cash_balance(account_id)
-        if o["cost"] > cash_now + 0.01:
-            skipped_opens.append(f"{contract['occ_symbol']}: cost ${o['cost']:,.0f} > cash ${cash_now:,.0f}")
-            continue
-        db.open_options_position(account_id, scan_id, {
-            "occ_symbol": contract["occ_symbol"],
-            "underlying": contract["underlying"],
-            "put_call": contract["put_call"],
-            "strike": contract["strike"],
-            "expiration_date": contract["expiration_date"],
-            "contracts": o["contracts"],
-            "entry_premium": contract["mid"],
-            "entry_underlying": contract.get("underlying_price"),
-            "entry_delta": contract.get("delta"),
-            "entry_bid": contract.get("bid"),
-            "entry_ask": contract.get("ask"),
-            "entry_oi": contract.get("open_interest"),
-            "signal": contract.get("signal"),
-            "conviction": contract.get("conviction"),
-            "rationale": o.get("rationale"),
-            "data_source": contract.get("source"),
-        })
-        decisions_log.append({
-            "occ_symbol": contract["occ_symbol"], "action": "NEW",
-            "contracts": o["contracts"], "entry_premium": contract["mid"],
-            "cost": o["cost"], "rationale": o.get("rationale"),
-            "underlying": contract["underlying"], "put_call": contract["put_call"],
-            "strike": contract["strike"], "expiration_date": contract["expiration_date"],
-        })
-    for h in alloc["holds"]:
-        hp = db.get_options_position(int(h["position_id"])) if h.get("position_id") else None
-        hp = hp or {}
-        decisions_log.append({"occ_symbol": h["occ_symbol"], "action": "HOLD",
-                              "rationale": h.get("rationale"),
-                              "underlying": hp.get("underlying"), "put_call": hp.get("put_call"),
-                              "strike": hp.get("strike"),
-                              "expiration_date": hp.get("expiration_date")})
-
-    report = alloc["report_md"]
-    reason = _zero_candidate_reason(quick_results, top, enriched, usable, candidates)
-    if reason:
-        report += f"\n## Why no new positions\n{reason}\n"
-    if skipped_opens:
-        report += "\n## Skipped opens (cash)\n" + "\n".join(f"- {s}" for s in skipped_opens) + "\n"
-    if chain_notes:
-        report += ("\n## Contract vetting notes\n"
-                   + "\n".join(f"- {n}" for n in chain_notes[:40]) + "\n")
-
-    prev = db.get_latest_completed_spy_scan(exclude_id=scan_id,
-                                            paper_account_id=account_id, kind="options")
-    db.complete_spy_scan(
-        scan_id=scan_id,
-        allocator_report=report,
-        portfolio_json=decisions_log,
-        previous_scan_id=int(prev["id"]) if prev else None,
-        starting_value=starting_equity,
-    )
-
-    final = account_equity(account_id)
-    db.update_spy_scan(scan_id, current_value=final["equity"],
-                       last_price_check=datetime.utcnow().isoformat(timespec="seconds") + "Z")
-    if final["cash"] < -0.01:
-        log.error("[options %s] LEDGER INVARIANT VIOLATION: cash $%.2f < 0 on account %s",
-                  scan_id, final["cash"], account_id)
-    log.info("[options %s] done — %d closes / %d opens / %d holds, equity $%s (cash $%s)",
-             scan_id, len(alloc["closes"]), len(alloc["opens"]), len(alloc["holds"]),
-             f"{final['equity']:,.0f}", f"{final['cash']:,.0f}")
+        final = account_equity(account_id)
+        db.update_spy_scan(scan_id, current_value=final["equity"],
+                           last_price_check=datetime.utcnow().isoformat(timespec="seconds") + "Z")
+        if final["cash"] < -0.01:
+            log.error("[options %s] LEDGER INVARIANT VIOLATION: cash $%.2f < 0 on account %s",
+                      scan_id, final["cash"], account_id)
+        log.info("[options %s] done — %d closes / %d opens / %d holds, equity $%s (cash $%s)",
+                 scan_id, len(alloc["closes"]), len(alloc["opens"]), len(alloc["holds"]),
+                 f"{final['equity']:,.0f}", f"{final['cash']:,.0f}")
