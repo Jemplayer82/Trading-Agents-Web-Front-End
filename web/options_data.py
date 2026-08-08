@@ -12,6 +12,7 @@ lastPrice is never trusted (on illiquid contracts it can be a days-old trade).
 from __future__ import annotations
 
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Any
@@ -19,6 +20,8 @@ from typing import Any
 import yfinance as yf
 
 from tradingagents.dataflows import schwab_mcp
+
+from . import market_cache
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +51,24 @@ STRIKE_ATTEMPTS = 3         # preferred strike + 2 alternates before skipping
 # Bounded because each call can hit the Schwab MCP server plus a yfinance
 # fallback, and concurrent same-day account builds now share that backend.
 _CHAIN_FETCH_WORKERS = 6
+
+# Same-day cache of the SELECTED contract — one that already passed the
+# liquidity gates — keyed (underlying, side) within a trade_date scope.
+# All three daily options accounts vet the same converged ticker set, so
+# builds 2 and 3 would otherwise re-pull the identical full option
+# chain. A hit is NEVER served blind: bid/ask are refreshed from one
+# Schwab bulk-quotes call and re-run through passes_liquidity_gates
+# before the contract is returned.
+CONTRACT_CACHE_TTL_SECONDS = 2 * 3600
+_CONTRACT_CACHE = market_cache.SameDayCache("options-contract",
+                                            ttl_seconds=CONTRACT_CACHE_TTL_SECONDS)
+
+
+def _contract_cache_enabled() -> bool:
+    """Kill switch (env, read at call time). This cache sits directly
+    upstream of paper-order placement, so it needs a no-code rollback."""
+    value = os.environ.get("OPTIONS_CONTRACT_CACHE", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
 
 # Deep dives return the system-wide 5-tier rating (tradingagents/agents/utils
 # /rating.py: Buy, Overweight, Hold, Underweight, Sell), not raw BUY/SELL/HOLD
@@ -300,7 +321,7 @@ def _yf_spot(ticker: yf.Ticker, fallback: float | None) -> float | None:
     return fallback
 
 
-def fetch_contract(
+def _fetch_contract_uncached(
     underlying: str,
     direction: str,
     spot_hint: float | None = None,
@@ -362,6 +383,80 @@ def fetch_contract(
         log.warning("[options] yfinance chain fetch failed for %s: %s", underlying, exc)
         notes.append(f"yfinance: {exc}")
     return None, notes
+
+
+def _revalidate_cached_contract(cached: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    """Refresh bid/ask for a cached contract and re-run the liquidity gates.
+
+    Returns (validated_contract, "") on success, or (None, reason_note) when
+    the cached contract can no longer be served safely and must be refetched.
+    """
+    occ = cached["occ_symbol"]
+    if not schwab_mcp.market_data_enabled():
+        return None, f"{occ}: cached contract not re-validated (Schwab market data off) — refetching"
+
+    try:
+        quotes = schwab_mcp.get_quotes([occ])
+    except Exception:
+        log.debug("[options] re-validation quote refresh failed for %s", occ, exc_info=True)
+        return None, f"{occ}: quote refresh failed — refetching"
+
+    q = (quotes or {}).get(occ, {}).get("quote") or {}
+    bid, ask = q.get("bidPrice"), q.get("askPrice")
+    mid = _mid(bid, ask)
+    if mid is None:
+        return None, f"{occ}: no usable bid/ask — refetching"
+
+    refreshed = dict(cached)
+    refreshed["bid"] = float(bid)
+    refreshed["ask"] = float(ask)
+    refreshed["mid"] = mid
+    refreshed["spread"] = round(float(ask) - float(bid), 4)
+    refreshed["spread_pct"] = round(refreshed["spread"] / mid, 4) if mid else None
+
+    ok, reason = passes_liquidity_gates(refreshed)
+    if ok:
+        return refreshed, ""
+    return None, f"{occ}: cached contract failed re-validation ({reason}) — refetching"
+
+
+def fetch_contract(
+    underlying: str,
+    direction: str,
+    spot_hint: float | None = None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Fetch chain data for one underlying and pick a contract.
+
+    direction: BUY -> CALL, SELL -> PUT. Schwab first (delta pick), yfinance
+    fallback (moneyness pick). Returns (contract | None, notes).
+
+    Same-day caching: a previously selected contract is reused only after a
+    fresh bid/ask quote from Schwab is re-run through the liquidity gates.
+    The per-ticker fetch_candidates worker pool (ThreadPoolExecutor with up
+    to 6 workers) calls this concurrently; the cache lock is never held across the
+    underlying chain fetch, so concurrent misses fetch independently. Tests that
+    monkeypatch this function wholesale bypass the cache entirely, which is
+    expected and supported.
+    """
+    if not _contract_cache_enabled():
+        return _fetch_contract_uncached(underlying, direction, spot_hint)
+
+    side = "CALL" if str(direction).upper() == "BUY" else "PUT"
+    trade_date = today_et().isoformat()
+    key = (underlying.upper(), side)
+
+    prefix_notes: list[str] = []
+    cached = _CONTRACT_CACHE.get(trade_date, key)
+    if cached is not None:
+        refreshed, note = _revalidate_cached_contract(cached)
+        if refreshed is not None:
+            return refreshed, []
+        prefix_notes = [note]
+
+    contract, notes = _fetch_contract_uncached(underlying, direction, spot_hint)
+    if contract is not None:
+        _CONTRACT_CACHE.put(trade_date, key, dict(contract))
+    return contract, prefix_notes + notes
 
 
 def _fetch_one(row: dict[str, Any], direction: str) -> tuple[dict[str, Any] | None, list[str]]:

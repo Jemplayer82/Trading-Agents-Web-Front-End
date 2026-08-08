@@ -1,9 +1,10 @@
 """Unit tests for web/options_data.py — OCC symbols, chain normalization,
-liquidity gates, and deterministic contract selection."""
+liquidity gates, deterministic contract selection, and selected-contract caching."""
 
 import threading
 import time
 from datetime import date, timedelta
+from typing import Any
 
 import pandas as pd
 import pytest
@@ -207,6 +208,381 @@ def test_normalize_yf_chain():
 
 def test_normalize_yf_chain_empty():
     assert normalize_yf_chain("AAPL", _exp(35), None, "CALL", spot=None) == []
+
+
+# ── Selected-contract same-day cache ───────────────────────────────────────────
+
+class TestContractCache:
+    @pytest.fixture(autouse=True)
+    def _reset_cache_and_env(self, monkeypatch):
+        monkeypatch.setenv("OPTIONS_CONTRACT_CACHE", "1")
+        options_data._CONTRACT_CACHE.clear()
+        yield
+        options_data._CONTRACT_CACHE.clear()
+
+    def _contract(self, underlying="AAPL", put_call="CALL", strike=230.0, bid=4.1, ask=4.3):
+        exp = _exp(21)
+        occ = build_occ_symbol(underlying, exp, put_call, strike)
+        mid = options_data._mid(bid, ask)
+        spread = round(float(ask) - float(bid), 4) if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) else None
+        return {
+            "occ_symbol": occ,
+            "underlying": underlying.upper(),
+            "put_call": put_call,
+            "strike": float(strike),
+            "expiration_date": exp,
+            "dte": 21,
+            "bid": float(bid),
+            "ask": float(ask),
+            "mid": mid,
+            "delta": 0.45,
+            "open_interest": 500,
+            "underlying_price": 230.0,
+            "spread": spread,
+            "spread_pct": round(spread / mid, 4) if spread is not None and mid else None,
+            "source": "schwab",
+        }
+
+    def test_first_call_is_a_miss_and_caches(self, monkeypatch):
+        calls = []
+
+        def fake_fetch(underlying, direction, spot_hint=None):
+            calls.append((underlying, direction))
+            return (self._contract(), [])
+
+        monkeypatch.setattr(options_data, "today_et", lambda: TODAY)
+        monkeypatch.setattr(options_data, "_fetch_contract_uncached", fake_fetch)
+
+        contract, notes = options_data.fetch_contract("AAPL", "BUY")
+        assert contract is not None
+        assert notes == []
+        assert len(calls) == 1
+        assert options_data._CONTRACT_CACHE.stats()["size"] == 1
+
+    def test_same_day_hit_refreshes_bid_ask_and_skips_the_chain_fetch(self, monkeypatch):
+        calls = []
+        quote_calls = []
+
+        def fake_fetch(underlying, direction, spot_hint=None):
+            calls.append((underlying, direction))
+            return (self._contract(), [])
+
+        def fake_quotes(symbols):
+            quote_calls.append(list(symbols))
+            occ = self._contract()["occ_symbol"]
+            return {occ: {"quote": {"bidPrice": 4.2, "askPrice": 4.4}}}
+
+        monkeypatch.setattr(options_data, "today_et", lambda: TODAY)
+        monkeypatch.setattr(options_data, "_fetch_contract_uncached", fake_fetch)
+        monkeypatch.setattr(options_data.schwab_mcp, "market_data_enabled", lambda: True)
+        monkeypatch.setattr(options_data.schwab_mcp, "get_quotes", fake_quotes)
+
+        c1, _ = options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 1
+
+        c2, notes2 = options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 1  # hit: no second chain fetch
+        assert len(quote_calls) == 1
+        assert quote_calls[0] == [c1["occ_symbol"]]
+        assert c2["bid"] == pytest.approx(4.2)
+        assert c2["ask"] == pytest.approx(4.4)
+        assert c2["mid"] == pytest.approx(4.3)
+        assert c2["spread"] == pytest.approx(0.2)
+        assert c2["spread_pct"] == pytest.approx(round(0.2 / 4.3, 4))
+        # Non-price fields are carried over unchanged.
+        assert c2["open_interest"] == 500
+        assert c2["delta"] == pytest.approx(0.45)
+        assert c2["source"] == "schwab"
+        assert notes2 == []
+
+    def test_hit_that_fails_the_gates_falls_back_to_a_full_refetch(self, monkeypatch):
+        calls = []
+
+        def fake_fetch(underlying, direction, spot_hint=None):
+            calls.append((underlying, direction))
+            return (self._contract(), [])
+
+        monkeypatch.setattr(options_data, "today_et", lambda: TODAY)
+        monkeypatch.setattr(options_data, "_fetch_contract_uncached", fake_fetch)
+        monkeypatch.setattr(options_data.schwab_mcp, "market_data_enabled", lambda: True)
+
+        # Populate the cache.
+        options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 1
+
+        # Spread too wide -> re-validation fails against the gates.
+        def wide_quotes(symbols):
+            occ = self._contract()["occ_symbol"]
+            return {occ: {"quote": {"bidPrice": 2.0, "askPrice": 3.2}}}
+
+        monkeypatch.setattr(options_data.schwab_mcp, "get_quotes", wide_quotes)
+        c, notes = options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 2
+        assert c is not None
+        assert any("re-validation" in n for n in notes)
+
+        # Zero bid -> no usable mid, also falls back.
+        def zero_quotes(symbols):
+            occ = self._contract()["occ_symbol"]
+            return {occ: {"quote": {"bidPrice": 0.0, "askPrice": 0.05}}}
+
+        monkeypatch.setattr(options_data.schwab_mcp, "get_quotes", zero_quotes)
+        c, notes = options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 3
+        assert c is not None
+        assert any("refetching" in n for n in notes)
+
+    def test_no_quote_for_the_symbol_falls_back(self, monkeypatch):
+        calls = []
+
+        def fake_fetch(underlying, direction, spot_hint=None):
+            calls.append((underlying, direction))
+            return (self._contract(), [])
+
+        monkeypatch.setattr(options_data, "today_et", lambda: TODAY)
+        monkeypatch.setattr(options_data, "_fetch_contract_uncached", fake_fetch)
+        monkeypatch.setattr(options_data.schwab_mcp, "market_data_enabled", lambda: True)
+
+        options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 1
+
+        monkeypatch.setattr(options_data.schwab_mcp, "get_quotes", lambda symbols: {})
+        c, notes = options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 2
+        assert c is not None
+        assert any("refetching" in n for n in notes)
+
+    def test_quotes_none_falls_back(self, monkeypatch):
+        calls = []
+
+        def fake_fetch(underlying, direction, spot_hint=None):
+            calls.append((underlying, direction))
+            return (self._contract(), [])
+
+        monkeypatch.setattr(options_data, "today_et", lambda: TODAY)
+        monkeypatch.setattr(options_data, "_fetch_contract_uncached", fake_fetch)
+        monkeypatch.setattr(options_data.schwab_mcp, "market_data_enabled", lambda: True)
+
+        options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 1
+
+        monkeypatch.setattr(options_data.schwab_mcp, "get_quotes", lambda symbols: None)
+        c, notes = options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 2
+        assert c is not None
+        assert any("refetching" in n for n in notes)
+
+    def test_market_data_disabled_falls_back(self, monkeypatch):
+        calls = []
+        quote_calls = []
+
+        def fake_fetch(underlying, direction, spot_hint=None):
+            calls.append((underlying, direction))
+            return (self._contract(), [])
+
+        def fake_quotes(symbols):
+            quote_calls.append(symbols)
+            return None
+
+        monkeypatch.setattr(options_data, "today_et", lambda: TODAY)
+        monkeypatch.setattr(options_data, "_fetch_contract_uncached", fake_fetch)
+        monkeypatch.setattr(options_data.schwab_mcp, "market_data_enabled", lambda: False)
+        monkeypatch.setattr(options_data.schwab_mcp, "get_quotes", fake_quotes)
+
+        options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 1
+        assert not quote_calls  # no quote attempt when market data is off
+
+        c, notes = options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 2
+        assert not quote_calls
+        assert c is not None
+        assert any("refetching" in n for n in notes)
+
+    def test_get_quotes_exception_falls_back(self, monkeypatch):
+        calls = []
+
+        def fake_fetch(underlying, direction, spot_hint=None):
+            calls.append((underlying, direction))
+            return (self._contract(), [])
+
+        monkeypatch.setattr(options_data, "today_et", lambda: TODAY)
+        monkeypatch.setattr(options_data, "_fetch_contract_uncached", fake_fetch)
+        monkeypatch.setattr(options_data.schwab_mcp, "market_data_enabled", lambda: True)
+
+        options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 1
+
+        def boom(symbols):
+            raise RuntimeError("schwab unavailable")
+
+        monkeypatch.setattr(options_data.schwab_mcp, "get_quotes", boom)
+        c, notes = options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 2
+        assert c is not None
+        assert any("refetching" in n for n in notes)
+
+    def test_ttl_expiry_refetches(self, monkeypatch):
+        calls = []
+        clock = [0.0]
+
+        def fake_fetch(underlying, direction, spot_hint=None):
+            calls.append((underlying, direction))
+            return (self._contract(), [])
+
+        def fake_now():
+            return clock[0]
+
+        monkeypatch.setattr(options_data, "today_et", lambda: TODAY)
+        monkeypatch.setattr(options_data, "_fetch_contract_uncached", fake_fetch)
+        monkeypatch.setattr("web.market_cache._now", fake_now)
+
+        options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 1
+
+        clock[0] += options_data.CONTRACT_CACHE_TTL_SECONDS + 1
+        options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 2
+
+    def test_date_rollover_refetches_and_evicts(self, monkeypatch):
+        calls = []
+        dates = [TODAY]
+
+        def fake_fetch(underlying, direction, spot_hint=None):
+            calls.append((underlying, direction))
+            return (self._contract(), [])
+
+        monkeypatch.setattr(options_data, "today_et", lambda: dates[-1])
+        monkeypatch.setattr(options_data, "_fetch_contract_uncached", fake_fetch)
+
+        options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 1
+        assert options_data._CONTRACT_CACHE.stats()["size"] == 1
+
+        dates.append(TODAY + timedelta(days=1))
+        options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 2
+        assert options_data._CONTRACT_CACHE.stats()["size"] == 1
+
+    def test_call_and_put_are_separate_keys(self, monkeypatch):
+        calls = []
+
+        def fake_fetch(underlying, direction, spot_hint=None):
+            calls.append((underlying, direction))
+            side = "CALL" if str(direction).upper() == "BUY" else "PUT"
+            return (self._contract(put_call=side), [])
+
+        monkeypatch.setattr(options_data, "today_et", lambda: TODAY)
+        monkeypatch.setattr(options_data, "_fetch_contract_uncached", fake_fetch)
+
+        options_data.fetch_contract("AAPL", "BUY")
+        options_data.fetch_contract("AAPL", "SELL")
+        assert len(calls) == 2
+        assert options_data._CONTRACT_CACHE.stats()["size"] == 2
+
+    def test_returned_contract_is_a_copy(self, monkeypatch):
+        quote_calls = []
+
+        def fake_fetch(underlying, direction, spot_hint=None):
+            return (self._contract(), [])
+
+        def fake_quotes(symbols):
+            quote_calls.append(symbols)
+            occ = self._contract()["occ_symbol"]
+            return {occ: {"quote": {"bidPrice": 4.2, "askPrice": 4.4}}}
+
+        monkeypatch.setattr(options_data, "today_et", lambda: TODAY)
+        monkeypatch.setattr(options_data, "_fetch_contract_uncached", fake_fetch)
+        monkeypatch.setattr(options_data.schwab_mcp, "market_data_enabled", lambda: True)
+        monkeypatch.setattr(options_data.schwab_mcp, "get_quotes", fake_quotes)
+
+        c1, _ = options_data.fetch_contract("AAPL", "BUY")
+        c1["ticker"] = "AAA"  # mutation that fetch_candidates performs
+        c1["mid"] = 999.0
+
+        c2, _ = options_data.fetch_contract("AAPL", "BUY")
+        assert "ticker" not in c2
+        assert c2["mid"] != 999.0
+        assert c2["mid"] == pytest.approx(options_data._mid(c2["bid"], c2["ask"]))
+
+    def test_none_result_is_not_cached(self, monkeypatch):
+        calls = []
+
+        def fake_fetch(underlying, direction, spot_hint=None):
+            calls.append((underlying, direction))
+            return (None, ["no chain data"])
+
+        monkeypatch.setattr(options_data, "today_et", lambda: TODAY)
+        monkeypatch.setattr(options_data, "_fetch_contract_uncached", fake_fetch)
+
+        c1, notes1 = options_data.fetch_contract("AAPL", "BUY")
+        assert c1 is None
+        assert notes1 == ["no chain data"]
+        assert options_data._CONTRACT_CACHE.stats()["size"] == 0
+
+        c2, notes2 = options_data.fetch_contract("AAPL", "BUY")
+        assert c2 is None
+        assert notes2 == ["no chain data"]
+        assert len(calls) == 2
+
+    def test_kill_switch_bypasses_the_cache(self, monkeypatch):
+        monkeypatch.setenv("OPTIONS_CONTRACT_CACHE", "0")
+        calls = []
+        quote_calls = []
+
+        def fake_fetch(underlying, direction, spot_hint=None):
+            calls.append((underlying, direction))
+            return (self._contract(), [])
+
+        def fake_quotes(symbols):
+            quote_calls.append(symbols)
+            return None
+
+        monkeypatch.setattr(options_data, "today_et", lambda: TODAY)
+        monkeypatch.setattr(options_data, "_fetch_contract_uncached", fake_fetch)
+        monkeypatch.setattr(options_data.schwab_mcp, "market_data_enabled", lambda: True)
+        monkeypatch.setattr(options_data.schwab_mcp, "get_quotes", fake_quotes)
+
+        options_data.fetch_contract("AAPL", "BUY")
+        options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 2
+        assert not quote_calls
+        assert options_data._CONTRACT_CACHE.stats()["size"] == 0
+
+    def test_concurrent_misses_do_not_deadlock(self, monkeypatch):
+        barrier = threading.Barrier(4, timeout=5)
+
+        def fake_fetch(underlying, direction, spot_hint=None):
+            barrier.wait(timeout=5)
+            return (self._contract(), [])
+
+        monkeypatch.setattr(options_data, "today_et", lambda: TODAY)
+        monkeypatch.setattr(options_data, "_fetch_contract_uncached", fake_fetch)
+
+        results: list[dict[str, Any] | None] = []
+        errors: list[Exception] = []
+        threads: list[threading.Thread] = []
+
+        def worker():
+            try:
+                contract, _ = options_data.fetch_contract("AAPL", "BUY")
+                results.append(contract)
+            except Exception as exc:  # noqa: BLE001 - test harness
+                errors.append(exc)
+
+        for _ in range(4):
+            t = threading.Thread(target=worker)
+            t.start()
+            threads.append(t)
+
+        for t in threads:
+            t.join(timeout=5)
+
+        assert all(not t.is_alive() for t in threads)
+        assert not errors
+        assert len(results) == 4
+        assert all(c is not None for c in results)
+        assert options_data._CONTRACT_CACHE.stats()["size"] == 1
 
 
 # ── fetch_candidates filtering ───────────────────────────────────────────────
