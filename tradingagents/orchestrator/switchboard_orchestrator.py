@@ -294,7 +294,7 @@ class SwitchboardOrchestrator:
         analyst_factories = {
             "market": lambda: create_market_analyst(self._quick_llm),
             "social": lambda: create_sentiment_analyst(self._quick_llm),
-            "news": lambda: create_news_analyst(self._quick_llm),
+            "news": lambda: create_news_analyst(self._quick_llm, macro_brief=self.config.get("macro_brief")),
             "fundamentals": lambda: create_fundamentals_analyst(self._quick_llm),
         }
         report_key_map = {
