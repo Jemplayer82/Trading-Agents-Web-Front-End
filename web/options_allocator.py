@@ -335,7 +335,7 @@ def run(
     # ── LLM call (deterministic fallback on any failure) ─────────────────────
     deployable = max(0.0, min(est_cash, total_cap - held_cost))
     try:
-        llm = llm_for({**DEFAULT_CONFIG, **config}, deep=True, temperature=0.1)
+        llm = llm_for({**DEFAULT_CONFIG, **config}, deep=False, temperature=0.1)
         resp = llm.invoke([
             {"role": "system", "content": system},
             {"role": "user", "content": user},
