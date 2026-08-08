@@ -28,8 +28,8 @@ from tradingagents.agents import (
     create_conservative_debator,
     create_fundamentals_analyst,
     create_market_analyst,
-    create_neutral_debator,
     create_news_analyst,
+    create_neutral_debator,
     create_portfolio_manager,
     create_research_manager,
     create_sentiment_analyst,
@@ -152,6 +152,14 @@ class SwitchboardOrchestrator:
             effort = self.config.get("anthropic_effort")
             return {"effort": effort} if effort else {}
         return {}
+
+    def _research_manager_llm(self) -> Any:
+        """Pick which LLM instance drives the Research Manager, per the
+        `research_manager_role` config knob (default "quick" — see
+        tradingagents/default_config.py). Kept as its own method so the
+        selection is unit-testable without a live LLM client."""
+        role = self.config.get("research_manager_role", "quick")
+        return self._quick_llm if role == "quick" else self._deep_llm
 
     def _emit(self, frame: dict[str, Any]) -> None:
         if self.on_progress:
@@ -335,7 +343,7 @@ class SwitchboardOrchestrator:
 
         # ── Phase 3: Research Manager ────────────────────────────────────────────
         self._emit({"type": "status", "message": "Research Manager synthesising debate…", "agent": "research_debate"})
-        rm_node = create_research_manager(self._deep_llm)
+        rm_node = create_research_manager(self._research_manager_llm())
         self._current_node = "research_manager"
         self._merge(state, rm_node(state))
         self._current_node = None
