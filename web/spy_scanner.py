@@ -27,7 +27,6 @@ import json
 import logging
 import os
 import re
-import threading
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -43,7 +42,7 @@ from tradingagents.llm_clients import create_llm_client
 from tradingagents.orchestrator import SwitchboardOrchestrator
 
 from . import db
-from .llm_helpers import llm_for
+from .llm_helpers import DynamicGate, _GateMonitor, _total_budget, llm_for
 
 log = logging.getLogger(__name__)
 
@@ -120,96 +119,6 @@ def assert_deep_dives_healthy(enriched: list[dict[str, Any]]) -> None:
         f"Most common error: {_dominant_error(errored)}"
     )
 
-
-def _total_budget() -> int:
-    """Max concurrent LLM calls shared with single-ticker analyses.
-
-    Read at call time so a value set via the Settings UI (OLLAMA_MAX_CONCURRENCY)
-    takes effect on the next scan without a redeploy.
-    """
-    try:
-        return max(1, int(os.environ.get("OLLAMA_MAX_CONCURRENCY", "5")))
-    except (TypeError, ValueError):
-        return 5
-
-
-class DynamicGate:
-    """A resizable concurrency limiter.
-
-    Workers wrap their LLM call in `with gate:`. A monitor thread calls
-    set_limit() to shrink/grow the number of permitted concurrent calls.
-    Shrinking below the in-flight count is allowed — in-flight calls finish,
-    and no new ones are admitted until usage drops below the new limit.
-    """
-
-    def __init__(self, limit: int) -> None:
-        self._cv = threading.Condition()
-        self._limit = max(1, limit)
-        self._in_use = 0
-
-    def set_limit(self, n: int) -> None:
-        with self._cv:
-            self._limit = max(1, n)
-            self._cv.notify_all()
-
-    @property
-    def limit(self) -> int:
-        return self._limit
-
-    def __enter__(self) -> DynamicGate:
-        with self._cv:
-            while self._in_use >= self._limit:
-                self._cv.wait(timeout=1.0)
-            self._in_use += 1
-        return self
-
-    def __exit__(self, *exc: Any) -> None:
-        with self._cv:
-            self._in_use -= 1
-            self._cv.notify_all()
-
-
-class _GateMonitor:
-    """Background thread that keeps a DynamicGate sized to the live budget.
-
-    scan_limit = max(1, TOTAL - active_single_ticker_analyses)
-    so single-ticker analyses always get priority and the scan floors at 1.
-    The active count comes from the shared llm_activity table (written by the
-    api container, heartbeat TTL pruning), which is what makes the throttling
-    work across containers.
-    """
-
-    def __init__(self, gate: DynamicGate, poll_seconds: float = 3.0) -> None:
-        self._gate = gate
-        self._poll = poll_seconds
-        self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-
-    def _recompute(self) -> int:
-        total = _total_budget()
-        active = 0
-        try:
-            active = db.count_active_single()
-        except Exception:
-            log.debug("[gate] count_active_single failed", exc_info=True)
-        return max(1, total - active)
-
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            limit = self._recompute()
-            if limit != self._gate.limit:
-                log.info("[gate] resizing scan concurrency to %d", limit)
-            self._gate.set_limit(limit)
-            self._stop.wait(self._poll)
-
-    def __enter__(self) -> DynamicGate:
-        # Apply an initial limit synchronously before any work starts.
-        self._gate.set_limit(self._recompute())
-        self._thread.start()
-        return self._gate
-
-    def __exit__(self, *exc: Any) -> None:
-        self._stop.set()
 
 QUICK_SCAN_SYSTEM = (
     "You are a momentum-based equity screener. Given recent price "
