@@ -5,8 +5,10 @@ context but never stored its own decisions — the highest-volume decision path
 (options + S&P scans) contributed nothing to nightly outcome grading.
 """
 
+import threading
 from unittest.mock import MagicMock
 
+import pandas as pd
 import pytest
 
 from tradingagents.agents.utils.memory import TradingMemoryLog
@@ -92,3 +94,169 @@ def test_same_day_rerun_dedupes(tmp_db, monkeypatch, tmp_path):
     _run(tmp_db, monkeypatch, tmp_path)
     _, log = _run(tmp_db, monkeypatch, tmp_path)
     assert len(log.load_entries()) == 1
+
+
+class TestQuickScanPriceDataCache:
+    """Same-day TTL cache for the bulk price fetch that feeds run_quick_scan."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        spy_scanner._PRICE_DATA_CACHE.clear()
+        yield
+        spy_scanner._PRICE_DATA_CACHE.clear()
+
+    @staticmethod
+    def _frame(tickers, n=5):
+        data = {}
+        for i, t in enumerate(tickers):
+            data[("Close", t)] = [float(100 + i * 10 + j) for j in range(n)]
+            data[("Volume", t)] = [1000] * n
+        return pd.DataFrame(data)
+
+    def test_same_day_same_tickers_downloads_once(self, monkeypatch):
+        calls = {"count": 0}
+
+        def _download(tickers, *a, **kw):
+            calls["count"] += 1
+            return self._frame(tickers)
+
+        monkeypatch.setattr(spy_scanner.yf, "download", _download)
+
+        m1 = spy_scanner._fetch_price_data_map(1, ["AAA", "BBB"], "2026-08-08")
+        m2 = spy_scanner._fetch_price_data_map(2, ["AAA", "BBB"], "2026-08-08")
+
+        assert calls["count"] == 1
+        assert m1 is m2
+
+    def test_ticker_order_does_not_matter(self, monkeypatch):
+        calls = {"count": 0}
+
+        def _download(tickers, *a, **kw):
+            calls["count"] += 1
+            return self._frame(tickers)
+
+        monkeypatch.setattr(spy_scanner.yf, "download", _download)
+
+        m1 = spy_scanner._fetch_price_data_map(1, ["AAA", "BBB"], "2026-08-08")
+        m2 = spy_scanner._fetch_price_data_map(2, ["BBB", "AAA"], "2026-08-08")
+
+        assert calls["count"] == 1
+        assert m1 == m2
+
+    def test_different_ticker_set_is_a_separate_key(self, monkeypatch):
+        calls = {"count": 0}
+
+        def _download(tickers, *a, **kw):
+            calls["count"] += 1
+            return self._frame(tickers)
+
+        monkeypatch.setattr(spy_scanner.yf, "download", _download)
+
+        spy_scanner._fetch_price_data_map(1, ["AAA", "BBB"], "2026-08-08")
+        spy_scanner._fetch_price_data_map(2, ["AAA", "BBB", "CCC"], "2026-08-08")
+
+        assert calls["count"] == 2
+
+    def test_different_trade_date_refetches(self, monkeypatch):
+        calls = {"count": 0}
+
+        def _download(tickers, *a, **kw):
+            calls["count"] += 1
+            return self._frame(tickers)
+
+        monkeypatch.setattr(spy_scanner.yf, "download", _download)
+
+        spy_scanner._fetch_price_data_map(1, ["AAA", "BBB"], "2026-08-08")
+        spy_scanner._fetch_price_data_map(2, ["AAA", "BBB"], "2026-08-09")
+
+        assert calls["count"] == 2
+        assert spy_scanner._PRICE_DATA_CACHE.stats()["size"] == 1
+
+    def test_prior_day_entries_are_evicted(self, monkeypatch):
+        calls = {"count": 0}
+
+        def _download(tickers, *a, **kw):
+            calls["count"] += 1
+            return self._frame(tickers)
+
+        monkeypatch.setattr(spy_scanner.yf, "download", _download)
+
+        spy_scanner._fetch_price_data_map(1, ["AAA", "BBB"], "2026-08-08")
+        spy_scanner._fetch_price_data_map(2, ["AAA", "BBB"], "2026-08-09")
+
+        assert spy_scanner._PRICE_DATA_CACHE.stats()["size"] == 1
+
+        spy_scanner._fetch_price_data_map(3, ["AAA", "BBB"], "2026-08-08")
+
+        assert calls["count"] == 3
+
+    def test_ttl_expiry_refetches(self, monkeypatch):
+        now = [0.0]
+        monkeypatch.setattr(spy_scanner.market_cache, "_now", lambda: now[0])
+
+        calls = {"count": 0}
+
+        def _download(tickers, *a, **kw):
+            calls["count"] += 1
+            return self._frame(tickers)
+
+        monkeypatch.setattr(spy_scanner.yf, "download", _download)
+
+        spy_scanner._fetch_price_data_map(1, ["AAA"], "2026-08-08")
+        now[0] += spy_scanner._PRICE_DATA_TTL_SECONDS + 1
+        spy_scanner._fetch_price_data_map(2, ["AAA"], "2026-08-08")
+
+        assert calls["count"] == 2
+
+    @pytest.mark.parametrize("behavior", ["exception", "empty"])
+    def test_failed_download_is_not_cached(self, monkeypatch, behavior):
+        calls = {"count": 0}
+
+        def _download(*a, **kw):
+            calls["count"] += 1
+            if behavior == "exception":
+                raise RuntimeError("boom")
+            return pd.DataFrame()
+
+        monkeypatch.setattr(spy_scanner.yf, "download", _download)
+
+        m1 = spy_scanner._fetch_price_data_map(1, ["AAA"], "2026-08-08")
+        assert m1 == {}
+        assert spy_scanner._PRICE_DATA_CACHE.stats()["size"] == 0
+
+        m2 = spy_scanner._fetch_price_data_map(2, ["AAA"], "2026-08-08")
+        assert m2 == {}
+        assert calls["count"] == 2
+
+    def test_concurrent_callers_share_the_cache(self, monkeypatch):
+        calls = {"count": 0}
+
+        def _download(tickers, *a, **kw):
+            calls["count"] += 1
+            return self._frame(tickers, n=3)
+
+        monkeypatch.setattr(spy_scanner.yf, "download", _download)
+
+        results = [None, None]
+        errors = [None, None]
+
+        def worker(idx):
+            try:
+                results[idx] = spy_scanner._fetch_price_data_map(
+                    idx + 10, ["X", "Y"], "2026-08-08"
+                )
+            except Exception as exc:
+                errors[idx] = exc
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert all(not t.is_alive() for t in threads)
+        assert errors == [None, None]
+        assert results[0] is not None
+        assert results[0] == results[1]
+        assert calls["count"] <= 2
+        assert spy_scanner._PRICE_DATA_CACHE.stats()["size"] == 1

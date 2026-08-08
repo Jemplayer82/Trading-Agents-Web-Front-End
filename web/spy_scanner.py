@@ -41,7 +41,7 @@ from tradingagents.dataflows.config import set_config
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.orchestrator import SwitchboardOrchestrator
 
-from . import db
+from . import db, market_cache
 from .llm_helpers import DynamicGate, _GateMonitor, _total_budget, llm_for
 
 log = logging.getLogger(__name__)
@@ -58,6 +58,17 @@ class ScanInfrastructureError(RuntimeError):
     thread wrappers routes it to fail_spy_scan + alerts.notify_run_failed
     without any new plumbing.
     """
+
+
+# Same-day cache of the bulk price download that feeds the quick scan.
+# Key is (trade_date, hash of the sorted ticker set) so the equity
+# scan's ~500-ticker request and an options build's ~151-ticker movers
+# request are separate entries, while the three daily options builds
+# converge on the same movers set and therefore the same key. 4h TTL so
+# an intraday cache-clear or a long-running day eventually refreshes.
+_PRICE_DATA_TTL_SECONDS = 4 * 3600
+_PRICE_DATA_CACHE = market_cache.SameDayCache("spy-price-data",
+                                              ttl_seconds=_PRICE_DATA_TTL_SECONDS)
 
 
 def _dominant_error(rows: list[dict[str, Any]]) -> str:
@@ -259,6 +270,61 @@ def _quick_scan_fingerprint(config: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()[:16]
 
 
+def _price_data_key(tickers: list[str]) -> str:
+    payload = "\n".join(sorted(tickers)).encode()
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def _fetch_price_data_map(
+    scan_id: int,
+    tickers: list[str],
+    trade_date: str,
+) -> dict[str, dict[str, list]]:
+    """Bulk-download price data and cache it by (trade_date, ticker-set hash).
+    On a cache hit, return the stored map; on a miss, run the single
+    yf.download for the whole ticker set and build the per-ticker close/volume
+    map exactly as run_quick_scan used to.
+    The returned map is SHARED BY REFERENCE across same-day scans and must be
+    treated as read-only. Verified today's only consumers are reads
+    (price_data_map.get(...) and price_data.get("close"/"volume") inside
+    _quick_scan_one), so we deliberately do not copy it.
+    """
+    key = _price_data_key(tickers)
+    cached = _PRICE_DATA_CACHE.get(trade_date, key)
+    if cached is not None:
+        log.info("[spy %s] price data: same-day cache hit (%d tickers)", scan_id, len(tickers))
+        return cached
+
+    price_data_map: dict[str, dict[str, list]] = {}
+    try:
+        raw = yf.download(tickers, period="1mo", auto_adjust=True, progress=False, threads=True)
+    except Exception as exc:
+        log.exception("[spy %s] yfinance bulk download failed: %s", scan_id, exc)
+        raw = None
+
+    if raw is not None and not raw.empty:
+        # yfinance returns MultiIndex columns ("Close", ticker) for multi-ticker
+        # downloads but flat columns for a single ticker — handle both.
+        if hasattr(raw.columns, "levels"):
+            for t in tickers:
+                try:
+                    closes = raw["Close"][t].dropna().tolist()
+                    volumes = raw["Volume"][t].dropna().tolist()
+                    price_data_map[t] = {"close": closes, "volume": volumes}
+                except (KeyError, TypeError):
+                    pass
+        else:
+            closes = raw["Close"].dropna().tolist()
+            volumes = raw["Volume"].dropna().tolist()
+            if tickers:
+                price_data_map[tickers[0]] = {"close": closes, "volume": volumes}
+
+    if price_data_map:
+        _PRICE_DATA_CACHE.put(trade_date, key, price_data_map)
+
+    return price_data_map
+
+
 def run_quick_scan(
     scan_id: int,
     tickers: list[str],
@@ -282,6 +348,12 @@ def run_quick_scan(
     themselves; it's that identical quick results make every same-day scan
     converge on the same top-N tickers, which is what drives deep-dive reuse
     toward a full hit rate.
+
+    The bulk price download is cached in-process for the same trading day:
+    key = (trade_date, sha256 of the sorted ticker set), TTL ~4 hours.
+    Prior-day entries are evicted on the first write for a new date, and
+    empty or failed fetches are never cached so a transient yfinance outage
+    does not poison every same-day scan.
     """
     log.info("[spy %s] quick scan: fetching price data for %d tickers", scan_id, len(tickers))
     quick_fingerprint = _quick_scan_fingerprint(config)
@@ -290,29 +362,7 @@ def run_quick_scan(
         quick_fingerprint=quick_fingerprint,
     )
 
-    try:
-        raw = yf.download(tickers, period="1mo", auto_adjust=True, progress=False, threads=True)
-    except Exception as exc:
-        log.exception("[spy %s] yfinance bulk download failed: %s", scan_id, exc)
-        raw = None
-
-    price_data_map: dict[str, dict[str, list]] = {}
-    if raw is not None and not raw.empty:
-        # yfinance returns MultiIndex columns ("Close", ticker) for multi-ticker
-        # downloads but flat columns for a single ticker — handle both.
-        if hasattr(raw.columns, "levels"):
-            for t in tickers:
-                try:
-                    closes = raw["Close"][t].dropna().tolist()
-                    volumes = raw["Volume"][t].dropna().tolist()
-                    price_data_map[t] = {"close": closes, "volume": volumes}
-                except (KeyError, TypeError):
-                    pass
-        else:
-            closes = raw["Close"].dropna().tolist()
-            volumes = raw["Volume"].dropna().tolist()
-            if tickers:
-                price_data_map[tickers[0]] = {"close": closes, "volume": volumes}
+    price_data_map = _fetch_price_data_map(scan_id, tickers, trade_date)
 
     llm = _llm_quick(config)
     results: list[dict[str, Any]] = []

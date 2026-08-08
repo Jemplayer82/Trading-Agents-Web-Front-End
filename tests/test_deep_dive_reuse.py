@@ -22,6 +22,13 @@ DECISION = "Rating: Buy\nStrong momentum thesis; enter on pullback."
 REUSED_DECISION = "Rating: Sell\nBias-shifted call from the rerun."
 
 
+@pytest.fixture(autouse=True)
+def _clear_spy_price_cache():
+    spy_scanner._PRICE_DATA_CACHE.clear()
+    yield
+    spy_scanner._PRICE_DATA_CACHE.clear()
+
+
 @pytest.fixture()
 def tmp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
