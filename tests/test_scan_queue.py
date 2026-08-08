@@ -186,3 +186,62 @@ class TestPortfolioAppTierGating:
         paths = app_paths(TIER="1")
         assert {"/api/portfolio/status", "/api/portfolio/advance-queue"} <= paths
         assert not [p for p in paths if p.startswith(("/api/spy", "/api/options", "/api/portfolio-"))]
+
+
+class TestWaitMarketReleasesTheQueue:
+    """A scan in running_wait_market is alive but idle; it must not block the
+    queue from dispatching real work behind it."""
+
+    def test_running_portfolio_still_busy(self, tmp_db):
+        scan_id = db.create_portfolio_scan("2026-08-03")
+        db.update_portfolio_scan(scan_id, status="running")
+
+        with db.connect() as conn:
+            busy = scan_queue._is_any_scan_running(conn)
+
+        assert busy is not None
+        assert busy["scan_type"] == "portfolio"
+
+    def test_waiter_does_not_block_dequeue(self, tmp_db, monkeypatch, thread_spy):
+        holder = SimpleNamespace(_worker=lambda scan_id, trade_date: None)
+        monkeypatch.setattr(scan_queue, "_RUNNERS", {})
+        scan_queue.register_runner("spy", holder, "_worker")
+
+        waiter_id = db.create_spy_scan("2026-08-03", status="running_wait_market")
+        queued_id = db.create_spy_scan("2026-08-03", status="queued")
+
+        scan_queue._dequeue_next_scan()
+
+        assert len(thread_spy) == 1
+        assert thread_spy[0]["args"][0] == queued_id
+        assert db.get_spy_scan(queued_id)["status"] == "running_quick"
+        assert db.get_spy_scan(waiter_id)["status"] == "running_wait_market"
+
+    def test_advance_queue_starts_next_while_a_scan_waits(self, tmp_db, monkeypatch, thread_spy):
+        holder = SimpleNamespace(_worker=lambda scan_id, trade_date: None)
+        monkeypatch.setattr(scan_queue, "_RUNNERS", {})
+        scan_queue.register_runner("spy", holder, "_worker")
+
+        waiter_id = db.create_spy_scan("2026-08-03", status="running_wait_market")
+        queued_id = db.create_spy_scan("2026-08-03", status="queued")
+
+        running = scan_queue._advance_queue_if_idle()
+
+        assert running is not None
+        assert running["id"] == queued_id
+        assert len(thread_spy) == 1
+        assert db.get_spy_scan(queued_id)["status"] == "running_quick"
+        assert db.get_spy_scan(waiter_id)["status"] == "running_wait_market"
+
+    def test_status_endpoint_reports_waiters(self, tmp_db):
+        waiter_id = db.create_spy_scan("2026-08-03", status="running_wait_market")
+        queued_id = db.create_spy_scan("2026-08-03", status="queued")
+
+        result = portfolio_main.scan_status()
+
+        assert result["running"] is None
+        assert len(result["waiting"]) == 1
+        assert result["waiting"][0]["id"] == waiter_id
+        assert result["waiting"][0]["status"] == "running_wait_market"
+        assert len(result["queued"]) == 1
+        assert result["queued"][0]["id"] == queued_id

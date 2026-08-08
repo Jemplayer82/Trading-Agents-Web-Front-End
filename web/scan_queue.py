@@ -55,13 +55,25 @@ def _is_any_scan_running(conn) -> dict | None:  # type: ignore[type-arg]
     back-to-back requests would both see "not busy" and run concurrently. A
     pending row whose worker never started is closed out by the stuck-run
     reaper, so it can't wedge the queue.
+
+    'running_wait_market' does NOT count as busy: a scan parked in
+    ``options_engine._wait_for_market_open()`` sits from ~07:30 to 09:35 ET
+    doing nothing but sleeping in 30s ticks, consuming no LLM budget and no CPU.
+    Counting it busy meant the next queued options account could not begin its
+    compute phase for 25-45 minutes. Serialization of the phase that actually
+    matters — allocation and order placement — is now enforced by
+    ``options_engine._ALLOC_LOCK`` (step 3), not by this busy check.
+
+    Stuck-waiter detection is unaffected: ``db.find_stuck_spy_scans``
+    (web/db.py:1149) keys off ``status NOT IN ('completed','cancelled','failed','queued')``
+    plus a heartbeat-staleness cutoff, entirely independent of this list, so a
+    genuinely dead waiter is still reaped.
     """
     row = conn.execute(
         "SELECT 'portfolio' AS scan_type, id, trade_date, 'equity' AS kind, created_at"
         " FROM portfolio_scans WHERE status = 'running'"
         " UNION SELECT 'spy', id, trade_date, kind, created_at FROM spy_scans"
-        " WHERE status IN ('pending','running_quick','running_deep','running_alloc',"
-        " 'running_wait_market')"
+        " WHERE status IN ('pending','running_quick','running_deep','running_alloc')"
         " LIMIT 1"
     ).fetchone()
     return dict(row) if row else None

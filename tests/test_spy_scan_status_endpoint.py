@@ -10,8 +10,9 @@ Covers:
   - get_spy_scan_status: payload stays small regardless of row count, returns
     None for a missing scan, includes kind (needed by the options 404 guard)
   - upsert_spy_quick_result: reasoning/error get truncated at write time
-  - _is_any_scan_running: running_wait_market counts as busy (a scan sitting
-    in the daily market-open wait must not let a second scan start concurrently)
+  - _is_any_scan_running: running_wait_market does NOT count as busy (a scan
+    sitting in the daily market-open wait is doing no work; serialization of
+    the real allocation phase is handled by options_engine._ALLOC_LOCK)
 
 See test_options_market_wait.py for the options_engine running_wait_market /
 running_alloc status-split tests around _wait_for_market_open — those moved
@@ -26,7 +27,7 @@ import json
 
 import pytest
 
-from web import db
+from web import db, scan_queue
 
 
 @pytest.mark.unit
@@ -128,31 +129,44 @@ class TestQuickResultTruncation:
 
 
 @pytest.mark.unit
-class TestIsAnyScanRunningCoversWaitMarket:
-    """A scan sitting in running_wait_market (up to ~2h/day, doing nothing but
-    waiting for 09:35 ET) must still count as 'busy' — otherwise the queue-busy
-    check would think nothing is running and let a second scan start
-    concurrently during the wait."""
+class TestIsAnyScanRunningIgnoresWaitMarket:
+    """A scan parked in running_wait_market (up to ~2h/day, doing nothing but
+    sleeping while waiting for 09:35 ET) must NOT count as 'busy' — it is
+    consuming no compute, LLM budget, or CPU. Serialization of the real
+    allocation phase is handled by options_engine._ALLOC_LOCK, not by this
+    busy check."""
 
-    def test_wait_market_status_counts_as_running(self, monkeypatch, tmp_path):
+    def test_wait_market_status_does_not_count_as_running(self, monkeypatch, tmp_path):
         monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
         db.init_db()
         scan_id = db.create_spy_scan("2026-01-01", kind="options")
         db.update_spy_scan(scan_id, status="running_wait_market")
 
-        from web import scan_queue
         with db.connect() as conn:
             busy = scan_queue._is_any_scan_running(conn)
-        assert busy is not None, "running_wait_market must be treated as busy"
-        assert busy["id"] == scan_id
+        assert busy is None, "running_wait_market must not hold the queue slot"
 
     def test_terminal_statuses_do_not_count_as_running(self, monkeypatch, tmp_path):
         monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
         db.init_db()
         scan_id = db.create_spy_scan("2026-01-01", kind="options", status="completed")
 
-        from web import scan_queue
         with db.connect() as conn:
             busy = scan_queue._is_any_scan_running(conn)
         assert busy is None
         assert scan_id  # keep the id referenced; the assertion is on `busy`
+
+    @pytest.mark.parametrize(
+        "status", ("pending", "running_quick", "running_deep", "running_alloc")
+    )
+    def test_active_statuses_still_count_as_running(self, status, monkeypatch, tmp_path):
+        monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
+        db.init_db()
+        scan_id = db.create_spy_scan("2026-01-01")
+        db.update_spy_scan(scan_id, status=status)
+
+        with db.connect() as conn:
+            busy = scan_queue._is_any_scan_running(conn)
+        assert busy is not None, f"{status} must still be treated as busy"
+        assert isinstance(busy, dict)
+        assert busy["id"] == scan_id

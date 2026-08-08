@@ -80,7 +80,9 @@ def _startup() -> None:
 def scan_status() -> dict[str, Any]:
     """Current scan queue state — used by the frontend and by agents before triggering.
 
-    Returns the actively running scan (if any) and the ordered queue of waiting scans.
+    Returns the actively running scan (if any), the ordered queue of waiting scans,
+    and a ``waiting`` list of scans parked in the market-open (or allocation-slot)
+    wait — alive and heartbeating, but not holding the compute slot.
     The nginx /api/portfolio prefix block routes this to the portfolio app.
     """
     with db.connect() as conn:
@@ -92,9 +94,14 @@ def scan_status() -> dict[str, Any]:
             " FROM spy_scans WHERE status = 'queued'"
             " ORDER BY created_at"
         ).fetchall()
+        waiting_rows = conn.execute(
+            "SELECT 'spy' AS scan_type, id, trade_date, kind, created_at, status"
+            " FROM spy_scans WHERE status = 'running_wait_market' ORDER BY created_at"
+        ).fetchall()
     return {
         "running": dict(running_row) if running_row else None,
         "queued": [dict(r) for r in queued_rows],
+        "waiting": [dict(r) for r in waiting_rows],
     }
 
 
