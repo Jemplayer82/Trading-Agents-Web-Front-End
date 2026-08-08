@@ -13,8 +13,11 @@ doesn't recover — so this failure mode is never invisible again.
 import logging
 from unittest.mock import MagicMock
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.orchestrator import switchboard_orchestrator as sbo_module
 from tradingagents.orchestrator.switchboard_orchestrator import SwitchboardOrchestrator
 
 
@@ -129,23 +132,133 @@ class TestResearchManagerLlmSelection:
 
         assert result == "DEEP_SENTINEL"
 
-    def test_node_receives_selected_llm(self, monkeypatch):
-        """Confirm the Phase-3 call-site wiring: create_research_manager
-        receives whatever _research_manager_llm() returns, not a hardcoded
-        deep client."""
-        import tradingagents.orchestrator.switchboard_orchestrator as sbo_module
+    @pytest.mark.parametrize(
+        "role_override, expected_attr",
+        [
+            (None, "_quick_llm"),
+            ({"research_manager_role": "deep"}, "_deep_llm"),
+        ],
+    )
+    def test_run_passes_selected_llm_to_create_research_manager(
+        self, tmp_path, monkeypatch, role_override, expected_attr
+    ):
+        """Regression: the Phase-3 call site must call create_research_manager
+        with the LLM selected by _research_manager_llm(), not a hardcoded
+        deep client. Exercises a real SwitchboardOrchestrator.run() end-to-end
+        with all downstream nodes faked so no real LLM calls are made."""
+        config = {
+            **DEFAULT_CONFIG,
+            "llm_provider": "openai",
+            "deep_think_llm": "gpt-4o-mini",
+            "quick_think_llm": "gpt-4o-mini",
+            "memory_log_path": str(tmp_path / "mem.md"),
+            "data_cache_dir": str(tmp_path / "cache"),
+            "results_dir": str(tmp_path / "results"),
+            "max_debate_rounds": 1,
+            "max_risk_discuss_rounds": 1,
+        }
+        if role_override is not None:
+            config.update(role_override)
 
-        stub = _make_orch_stub()
-        stub.config = {}
-        stub._quick_llm = "QUICK_SENTINEL"
-        stub._deep_llm = "DEEP_SENTINEL"
+        orchestrator = SwitchboardOrchestrator(
+            config=config, selected_analysts=["market"]
+        )
+        # Avoid a real LLM call when the final signal is parsed.
+        orchestrator.signal_processor.process_signal = lambda decision: "Buy"
+
         captured = {}
 
         def fake_create_research_manager(llm):
             captured["llm"] = llm
-            return lambda state: {}
+            return lambda state: {
+                "messages": [AIMessage(content="plan", tool_calls=[])],
+                "investment_plan": "research manager plan",
+            }
 
-        monkeypatch.setattr(sbo_module, "create_research_manager", fake_create_research_manager)
-        sbo_module.create_research_manager(SwitchboardOrchestrator._research_manager_llm(stub))
+        def fake_node_factory(update):
+            def factory(llm):
+                def node(state):
+                    return update
+                return node
+            return factory
 
-        assert captured["llm"] == "QUICK_SENTINEL"
+        investment_debate_state = {
+            "count": 1,
+            "history": "bull vs bear debate",
+            "bull_history": "",
+            "bear_history": "",
+            "current_response": "",
+            "judge_decision": "",
+        }
+        risk_debate_state = {
+            "count": 1,
+            "history": "risk debate",
+            "aggressive_history": "",
+            "conservative_history": "",
+            "neutral_history": "",
+            "latest_speaker": "",
+            "current_aggressive_response": "",
+            "current_conservative_response": "",
+            "current_neutral_response": "",
+            "judge_decision": "",
+        }
+
+        monkeypatch.setattr(
+            sbo_module,
+            "create_market_analyst",
+            fake_node_factory({
+                "messages": [AIMessage(content="market report", tool_calls=[])],
+                "market_report": "market report",
+            }),
+        )
+        monkeypatch.setattr(
+            sbo_module,
+            "create_bull_researcher",
+            fake_node_factory({"investment_debate_state": investment_debate_state}),
+        )
+        monkeypatch.setattr(
+            sbo_module,
+            "create_bear_researcher",
+            fake_node_factory({"investment_debate_state": investment_debate_state}),
+        )
+        monkeypatch.setattr(
+            sbo_module,
+            "create_research_manager",
+            fake_create_research_manager,
+        )
+        monkeypatch.setattr(
+            sbo_module,
+            "create_trader",
+            fake_node_factory({"trader_investment_plan": "trader plan"}),
+        )
+        monkeypatch.setattr(
+            sbo_module,
+            "create_aggressive_debator",
+            fake_node_factory({"risk_debate_state": risk_debate_state}),
+        )
+        monkeypatch.setattr(
+            sbo_module,
+            "create_conservative_debator",
+            fake_node_factory({"risk_debate_state": risk_debate_state}),
+        )
+        monkeypatch.setattr(
+            sbo_module,
+            "create_neutral_debator",
+            fake_node_factory({"risk_debate_state": risk_debate_state}),
+        )
+        monkeypatch.setattr(
+            sbo_module,
+            "create_portfolio_manager",
+            fake_node_factory({
+                "messages": [AIMessage(content="decision", tool_calls=[])],
+                "final_trade_decision": "**Rating**: Buy\n\nRationale.",
+            }),
+        )
+
+        state, signal = orchestrator.run("AAPL", "2026-08-08")
+
+        expected_llm = getattr(orchestrator, expected_attr)
+        assert captured["llm"] is expected_llm
+        if role_override is None:
+            assert captured["llm"] is not orchestrator._deep_llm
+        assert signal == "Buy"
