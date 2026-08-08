@@ -962,3 +962,42 @@ class TestConcurrentWriters:
 
         monkeypatch.setattr(Path, "read_text", always_fail)
         assert log.load_entries() == []  # degraded, not raised
+
+
+@pytest.mark.unit
+class TestMemoryDecisionTruncation:
+    def test_decision_truncates_at_configured_length_reflection_untouched(self, tmp_path):
+        long_decision = "D" * 1000
+        long_reflection = "R" * 1000
+        config = {
+            "memory_log_path": str(tmp_path / "trading_memory.md"),
+            "memory_context_decision_max_chars": 50,
+        }
+        log = TradingMemoryLog(config)
+        _seed_completed(tmp_path, "NVDA", "2026-01-01", long_decision, long_reflection)
+        context = log.get_past_context("NVDA")
+        assert "D" * 50 in context
+        assert "D" * 51 not in context
+        assert "...(truncated)" in context
+        assert long_reflection in context
+
+    def test_decision_not_truncated_when_under_limit(self, tmp_path):
+        short_decision = "Rating: Buy\nShort thesis."
+        config = {
+            "memory_log_path": str(tmp_path / "trading_memory.md"),
+            "memory_context_decision_max_chars": 400,
+        }
+        log = TradingMemoryLog(config)
+        _seed_completed(tmp_path, "NVDA", "2026-01-01", short_decision, "Reflection text.")
+        context = log.get_past_context("NVDA")
+        assert short_decision in context
+        assert "...(truncated)" not in context
+
+    def test_default_max_chars_is_400_when_key_absent(self, tmp_path):
+        long_decision = "X" * 1000
+        config = {"memory_log_path": str(tmp_path / "trading_memory.md")}
+        log = TradingMemoryLog(config)
+        _seed_completed(tmp_path, "NVDA", "2026-01-01", long_decision, "Reflection.")
+        context = log.get_past_context("NVDA")
+        assert "X" * 400 in context
+        assert "X" * 401 not in context

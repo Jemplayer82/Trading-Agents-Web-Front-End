@@ -128,3 +128,14 @@ def test_research_manager_role_override(monkeypatch):
         TRADINGAGENTS_RESEARCH_MANAGER_ROLE="deep",
     )
     assert dc.DEFAULT_CONFIG["research_manager_role"] == "deep"
+
+
+def test_memory_context_decision_max_chars_default_and_override(monkeypatch):
+    dc = _reload_with_env(monkeypatch)
+    assert dc.DEFAULT_CONFIG["memory_context_decision_max_chars"] == 400
+    dc = _reload_with_env(
+        monkeypatch,
+        TRADINGAGENTS_MEMORY_CONTEXT_DECISION_MAX_CHARS="150",
+    )
+    assert dc.DEFAULT_CONFIG["memory_context_decision_max_chars"] == 150
+    assert isinstance(dc.DEFAULT_CONFIG["memory_context_decision_max_chars"], int)

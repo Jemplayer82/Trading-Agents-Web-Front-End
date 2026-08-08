@@ -49,6 +49,10 @@ class TradingMemoryLog:
             self._log_path.parent.mkdir(parents=True, exist_ok=True)
         # Optional cap on resolved entries. None disables rotation.
         self._max_entries = cfg.get("memory_log_max_entries")
+        # Cap on the DECISION body length embedded per past entry by
+        # _format_full. Defaults to 400 (matching DEFAULT_CONFIG) so a bare
+        # config dict — as used directly in tests — still truncates sanely.
+        self._decision_max_chars = cfg.get("memory_context_decision_max_chars", 400)
 
     def _read_log_text(self) -> str | None:
         """Read the log, retrying once on OSError.
@@ -417,7 +421,11 @@ class TradingMemoryLog:
         alpha = e["alpha"] or "n/a"
         holding = e["holding"] or "n/a"
         tag = f"[{e['date']} | {e['ticker']} | {e['rating']} | {raw} | {alpha} | {holding}]"
-        parts = [tag, f"DECISION:\n{e['decision']}"]
+        decision_body = e["decision"]
+        max_chars = self._decision_max_chars
+        if max_chars and max_chars > 0 and len(decision_body) > max_chars:
+            decision_body = decision_body[:max_chars] + "...(truncated)"
+        parts = [tag, f"DECISION:\n{decision_body}"]
         if e["reflection"]:
             parts.append(f"REFLECTION:\n{e['reflection']}")
         return "\n\n".join(parts)

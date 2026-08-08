@@ -22,6 +22,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_SWEEP_MAX_REFLECTIONS_PER_RUN": "sweep_max_reflections_per_run",
     "TRADINGAGENTS_SWEEP_CENSOR_AFTER_DAYS":       "sweep_censor_after_days",
     "TRADINGAGENTS_MEMORY_CONTEXT_MAX_AGE_DAYS":   "memory_context_max_age_days",
+    "TRADINGAGENTS_MEMORY_CONTEXT_DECISION_MAX_CHARS": "memory_context_decision_max_chars",
     "TRADINGAGENTS_DEEP_DIVE_STORE_DECISIONS":     "deep_dive_store_decisions",
     "TRADINGAGENTS_RESEARCH_MANAGER_ROLE":         "research_manager_role",
     "TRADINGAGENTS_DEEP_DIVE_REUSE":                "deep_dive_reuse",
@@ -96,6 +97,12 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Resolved entries older than this are excluded from injected context so
     # a dead regime's lessons expire. None disables the cutoff.
     "memory_context_max_age_days": 180,
+    # Cap on the DECISION body length (characters) embedded per past entry in
+    # get_past_context -> _format_full. Only the long-form DECISION body is
+    # truncated; the tag line and REFLECTION are never truncated. Keeps up to
+    # 5 same-ticker rendered Portfolio Manager decisions (commonly 300-600+
+    # chars each) from dominating the PM prompt.
+    "memory_context_decision_max_chars": 400,
     # --- Options learning (web/options_learning.py) ---
     # Kill switch for deep dives storing their decisions into the memory log
     # (System C). Env-only rollback path: no redeploy needed to stop the flow.
