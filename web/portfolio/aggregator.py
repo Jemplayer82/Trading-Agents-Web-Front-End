@@ -17,8 +17,8 @@ from ..llm_helpers import llm_for
 log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are a portfolio risk officer reviewing a multi-agent
-analysis of every ticker the user currently holds at Schwab. Your job is to
-look at the portfolio as a WHOLE and produce a short, actionable briefing.
+analysis of every ticker the user currently holds at Schwab. Your job is to look
+at the portfolio as a WHOLE and produce a short, actionable briefing.
 
 You ALWAYS return Markdown with EXACTLY these four `##` sections, in order:
 
