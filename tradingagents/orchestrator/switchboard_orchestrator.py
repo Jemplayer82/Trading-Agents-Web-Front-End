@@ -72,6 +72,31 @@ _BIAS_CONTEXT: dict[str, str] = {
     "neutral": "",
 }
 
+# Keys tradingagents/agents/managers/portfolio_manager.py reads off
+# risk_debate_state with bare `[]` access — a cached state missing any of
+# these would KeyError mid-LLM-call instead of failing the validation gate.
+_PM_RISK_KEYS = (
+    "history", "aggressive_history", "conservative_history", "neutral_history",
+    "current_aggressive_response", "current_conservative_response",
+    "current_neutral_response", "count",
+)
+# Below this length a "completed" risk_debate_state['history'] is almost
+# certainly an empty/degenerate draw (tool-loop exhaustion, provider outage
+# mid-run) rather than a real debate — reject it rather than let one bad
+# pipeline run get amplified into every account that reuses it same-day.
+_MIN_RISK_HISTORY_CHARS = 200
+
+
+class CachedStateInvalid(ValueError):
+    """A cached ``final_state`` is missing or has malformed data the
+    Portfolio Manager needs, or its rerun produced an empty decision.
+
+    Reserved for problems with the cached-state *contract* — never for
+    provider/network errors, which surface as their own exception types.
+    Callers (see web/spy_scanner.py) catch this alongside any other
+    cache-path exception and fall back to a full ``run()``.
+    """
+
 
 class SwitchboardOrchestrator:
     """In-process pipeline replacing TradingAgentsGraph."""
@@ -360,4 +385,92 @@ class SwitchboardOrchestrator:
             self._emit({"type": "report_update", "reports": {"final_trade_decision": state["final_trade_decision"]}})
 
         signal = self.signal_processor.process_signal(state.get("final_trade_decision", ""))
+        return state, signal
+
+    def rerun_decision(self, cached_state: dict[str, Any], ticker: str) -> tuple[dict[str, Any], str]:
+        """Re-run only the Portfolio Manager over a previously completed
+        pipeline state, substituting THIS orchestrator's bias and a freshly
+        loaded memory context.
+
+        Everything upstream of the Portfolio Manager — analysts, the
+        investment debate, the research manager, the trader, the risk debate
+        — is a pure function of (ticker, trade_date, shared-stage config): no
+        agent up to and including the risk debate reads ``bias``/
+        ``bias_context`` or the memory log's ``past_context`` (see
+        tradingagents/agents/utils/memory.py's injection-point invariant).
+        So a same-day analysis produced for one paper account can donate that
+        entire shared stage to another account; only the Portfolio Manager
+        — the one node that reads ``bias_context`` and ``past_context`` —
+        needs to run again, with this account's own values.
+
+        Builds the Portfolio Manager's input explicitly from validated
+        fields rather than shallow-copying ``cached_state``, so the donor's
+        own ``bias_context``, ``past_context``, ``final_trade_decision``, and
+        serialized ``messages`` can never leak into this account's decision.
+
+        Raises CachedStateInvalid if ``cached_state`` doesn't carry what the
+        Portfolio Manager needs, or if the rerun produces an empty decision.
+        Callers should catch this (and any other cache-path exception) and
+        fall back to a full ``run()`` — reuse must never be able to fail a
+        scan, only skip its own savings.
+        """
+        if not isinstance(cached_state, dict):
+            raise CachedStateInvalid("cached_state is not a dict")
+        if cached_state.get("company_of_interest") != ticker:
+            raise CachedStateInvalid(
+                f"cached_state ticker mismatch: expected {ticker!r}, "
+                f"got {cached_state.get('company_of_interest')!r}"
+            )
+        investment_plan = cached_state.get("investment_plan")
+        trader_plan = cached_state.get("trader_investment_plan")
+        if not isinstance(investment_plan, str) or not investment_plan.strip():
+            raise CachedStateInvalid("cached_state['investment_plan'] is empty")
+        if not isinstance(trader_plan, str) or not trader_plan.strip():
+            raise CachedStateInvalid("cached_state['trader_investment_plan'] is empty")
+        risk_debate_state = cached_state.get("risk_debate_state")
+        if not isinstance(risk_debate_state, dict):
+            raise CachedStateInvalid("cached_state['risk_debate_state'] is not a dict")
+        missing = [k for k in _PM_RISK_KEYS if k not in risk_debate_state]
+        if missing:
+            raise CachedStateInvalid(f"cached_state['risk_debate_state'] missing keys: {missing}")
+        history = risk_debate_state.get("history")
+        if not isinstance(history, str) or len(history) < _MIN_RISK_HISTORY_CHARS:
+            raise CachedStateInvalid(
+                "cached_state['risk_debate_state']['history'] is too short to be a real debate"
+            )
+
+        bias = self.config.get("bias", "neutral")
+        state: dict[str, Any] = {
+            "messages": [("human", ticker)],
+            "company_of_interest": ticker,
+            "asset_type": cached_state.get("asset_type", "stock"),
+            "trade_date": cached_state.get("trade_date", ""),
+            "past_context": self.memory_log.get_past_context(ticker),
+            "bias_context": _BIAS_CONTEXT.get(bias, ""),
+            "investment_debate_state": cached_state.get("investment_debate_state", {}),
+            "risk_debate_state": dict(risk_debate_state),
+            "market_report": cached_state.get("market_report", ""),
+            "fundamentals_report": cached_state.get("fundamentals_report", ""),
+            "sentiment_report": cached_state.get("sentiment_report", ""),
+            "news_report": cached_state.get("news_report", ""),
+            "investment_plan": investment_plan,
+            "trader_investment_plan": trader_plan,
+            "final_trade_decision": "",
+        }
+
+        self._emit({"type": "status", "message": "Portfolio Manager making final decision…", "agent": "portfolio_manager"})
+        pm_node = create_portfolio_manager(self._deep_llm)
+        self._current_node = "portfolio_manager"
+        self._merge(state, pm_node(state))
+        self._current_node = None
+
+        final_trade_decision = state.get("final_trade_decision", "")
+        if not isinstance(final_trade_decision, str) or not final_trade_decision.strip():
+            # Zero-exception failure mode (e.g. a half-broken provider returning
+            # empty content): without this check the scan would "succeed" as a
+            # silent all-Hold instead of falling back to a full pipeline run.
+            raise CachedStateInvalid("Portfolio Manager returned an empty decision on rerun")
+        self._emit({"type": "report_update", "reports": {"final_trade_decision": final_trade_decision}})
+
+        signal = self.signal_processor.process_signal(final_trade_decision)
         return state, signal
