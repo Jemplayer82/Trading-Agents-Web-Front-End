@@ -17,8 +17,8 @@ from ..llm_helpers import llm_for
 log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are a portfolio risk officer reviewing a multi-agent
-analysis of every ticker the user currently holds at Schwab. Your job is to look
-at the portfolio as a WHOLE and produce a short, actionable briefing.
+analysis of every ticker the user currently holds at Schwab. Your job is to
+look at the portfolio as a WHOLE and produce a short, actionable briefing.
 
 You ALWAYS return Markdown with EXACTLY these four `##` sections, in order:
 
@@ -89,7 +89,7 @@ def run(per_ticker: list[dict[str, Any]], trade_date: str, config: dict[str, Any
             trader_plan=(p.get("trader_plan") or "(no trader plan)")[:2000],
             final_decision=(p.get("final_decision") or "(no decision)")[:2000],
         )
-    llm = llm_for({**DEFAULT_CONFIG, **config}, deep=True, temperature=0.2)
+    llm = llm_for({**DEFAULT_CONFIG, **config}, deep=False, temperature=0.2)
     try:
         resp = llm.invoke([
             {"role": "system", "content": SYSTEM_PROMPT},
