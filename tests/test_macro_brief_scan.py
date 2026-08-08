@@ -98,9 +98,11 @@ def test_fetch_failure_leaves_macro_brief_unset_and_does_not_raise(tmp_db, monke
 
 
 def test_summarizer_failure_leaves_macro_brief_unset_and_does_not_raise(tmp_db, monkeypatch):
-    _install(monkeypatch, summarize_raises=True)
+    calls = _install(monkeypatch, summarize_raises=True)
     config = _run(tickers=["AAPL"])
     assert config.get("macro_brief") is None
+    assert calls["fetch"] == 1
+    assert calls["summarize"] == 1
 
 
 def test_macro_brief_enabled_false_skips_computation_entirely(tmp_db, monkeypatch):
