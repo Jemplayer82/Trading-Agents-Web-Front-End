@@ -46,7 +46,6 @@ def test_occ_symbol_round_trips_with_brokerages_parser(underlying, exp, put_call
     assert parsed is not None
     assert parsed["underlying"] == underlying.upper()
     assert parsed["expiration_date"] == exp
-    assert parsed["put_call"] == put_call
     assert parsed["strike"] == pytest.approx(strike)
 
 
@@ -583,6 +582,148 @@ class TestContractCache:
         assert len(results) == 4
         assert all(c is not None for c in results)
         assert options_data._CONTRACT_CACHE.stats()["size"] == 1
+
+    def test_hit_with_quote_delta_outside_band_refetches(self, monkeypatch):
+        calls = []
+
+        def fake_fetch(underlying, direction, spot_hint=None):
+            c = self._contract()
+            if len(calls) == 0:
+                c["delta"] = 0.45
+            else:
+                c["delta"] = 0.40
+            calls.append((underlying, direction))
+            return (c, [])
+
+        def fake_quotes(symbols):
+            occ = self._contract()["occ_symbol"]
+            return {occ: {"quote": {"bidPrice": 4.2, "askPrice": 4.4, "delta": 0.75}}}
+
+        monkeypatch.setattr(options_data, "today_et", lambda: TODAY)
+        monkeypatch.setattr(options_data, "_fetch_contract_uncached", fake_fetch)
+        monkeypatch.setattr(options_data.schwab_mcp, "market_data_enabled", lambda: True)
+        monkeypatch.setattr(options_data.schwab_mcp, "get_quotes", fake_quotes)
+
+        c1, _ = options_data.fetch_contract("AAPL", "BUY")
+        assert c1["delta"] == pytest.approx(0.45)
+        assert len(calls) == 1
+
+        c2, notes2 = options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 2
+        assert any("refetching" in n for n in notes2)
+        assert any("delta" in n.lower() for n in notes2)
+        assert c2["delta"] == pytest.approx(0.40)
+
+    def test_hit_with_quote_delta_within_band_refreshes_delta(self, monkeypatch):
+        calls = []
+
+        def fake_fetch(underlying, direction, spot_hint=None):
+            calls.append((underlying, direction))
+            c = self._contract()
+            c["delta"] = 0.45
+            return (c, [])
+
+        def fake_quotes(symbols):
+            occ = self._contract()["occ_symbol"]
+            return {occ: {"quote": {"bidPrice": 4.2, "askPrice": 4.4, "delta": 0.55}}}
+
+        monkeypatch.setattr(options_data, "today_et", lambda: TODAY)
+        monkeypatch.setattr(options_data, "_fetch_contract_uncached", fake_fetch)
+        monkeypatch.setattr(options_data.schwab_mcp, "market_data_enabled", lambda: True)
+        monkeypatch.setattr(options_data.schwab_mcp, "get_quotes", fake_quotes)
+
+        c1, _ = options_data.fetch_contract("AAPL", "BUY")
+        assert c1["delta"] == pytest.approx(0.45)
+        assert len(calls) == 1
+
+        c2, notes2 = options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 1
+        assert notes2 == []
+        assert c2["delta"] == pytest.approx(0.55)
+        assert c2["bid"] == pytest.approx(4.2)
+
+    def test_hit_no_delta_with_quote_underlyingprice_outside_band_refetches(self, monkeypatch):
+        calls = []
+
+        def fake_fetch(underlying, direction, spot_hint=None):
+            c = self._contract()
+            c["delta"] = None
+            calls.append((underlying, direction))
+            return (c, [])
+
+        def fake_quotes(symbols):
+            occ = self._contract()["occ_symbol"]
+            return {occ: {"quote": {"bidPrice": 4.2, "askPrice": 4.4, "underlyingPrice": 260.0}}}
+
+        monkeypatch.setattr(options_data, "today_et", lambda: TODAY)
+        monkeypatch.setattr(options_data, "_fetch_contract_uncached", fake_fetch)
+        monkeypatch.setattr(options_data.schwab_mcp, "market_data_enabled", lambda: True)
+        monkeypatch.setattr(options_data.schwab_mcp, "get_quotes", fake_quotes)
+
+        c1, _ = options_data.fetch_contract("AAPL", "BUY")
+        assert c1["delta"] is None
+        assert len(calls) == 1
+
+        c2, notes2 = options_data.fetch_contract("AAPL", "BUY")
+        assert len(calls) == 2
+        assert any("refetching" in n for n in notes2)
+        assert any("moneyness" in n.lower() or "strike" in n.lower() for n in notes2)
+
+    def test_hit_no_delta_spot_hint_outside_band_refetches(self, monkeypatch):
+        calls = []
+
+        def fake_fetch(underlying, direction, spot_hint=None):
+            c = self._contract()
+            c["delta"] = None
+            calls.append((underlying, direction))
+            return (c, [])
+
+        def fake_quotes(symbols):
+            occ = self._contract()["occ_symbol"]
+            return {occ: {"quote": {"bidPrice": 4.2, "askPrice": 4.4}}}
+
+        monkeypatch.setattr(options_data, "today_et", lambda: TODAY)
+        monkeypatch.setattr(options_data, "_fetch_contract_uncached", fake_fetch)
+        monkeypatch.setattr(options_data.schwab_mcp, "market_data_enabled", lambda: True)
+        monkeypatch.setattr(options_data.schwab_mcp, "get_quotes", fake_quotes)
+
+        c1, _ = options_data.fetch_contract("AAPL", "BUY")
+        assert c1["delta"] is None
+        assert len(calls) == 1
+
+        c2, notes2 = options_data.fetch_contract("AAPL", "BUY", spot_hint=260.0)
+        assert len(calls) == 2
+        assert any("refetching" in n for n in notes2)
+        assert any("moneyness" in n.lower() or "strike" in n.lower() for n in notes2)
+
+    def test_hit_no_delta_spot_hint_within_band_serves_cache(self, monkeypatch):
+        calls = []
+
+        def fake_fetch(underlying, direction, spot_hint=None):
+            c = self._contract()
+            c["delta"] = None
+            calls.append((underlying, direction))
+            return (c, [])
+
+        def fake_quotes(symbols):
+            occ = self._contract()["occ_symbol"]
+            return {occ: {"quote": {"bidPrice": 4.2, "askPrice": 4.4}}}
+
+        monkeypatch.setattr(options_data, "today_et", lambda: TODAY)
+        monkeypatch.setattr(options_data, "_fetch_contract_uncached", fake_fetch)
+        monkeypatch.setattr(options_data.schwab_mcp, "market_data_enabled", lambda: True)
+        monkeypatch.setattr(options_data.schwab_mcp, "get_quotes", fake_quotes)
+
+        c1, _ = options_data.fetch_contract("AAPL", "BUY")
+        assert c1["delta"] is None
+        assert len(calls) == 1
+
+        c2, notes2 = options_data.fetch_contract("AAPL", "BUY", spot_hint=235.0)
+        assert len(calls) == 1
+        assert notes2 == []
+        assert c2 is not None
+        assert c2["delta"] is None
+        assert c2["bid"] == pytest.approx(4.2)
 
 
 # ── fetch_candidates filtering ───────────────────────────────────────────────

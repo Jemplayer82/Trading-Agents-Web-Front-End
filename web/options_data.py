@@ -385,7 +385,7 @@ def _fetch_contract_uncached(
     return None, notes
 
 
-def _revalidate_cached_contract(cached: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+def _revalidate_cached_contract(cached: dict[str, Any], spot_hint: float | None = None) -> tuple[dict[str, Any] | None, str]:
     """Refresh bid/ask for a cached contract and re-run the liquidity gates.
 
     Returns (validated_contract, "") on success, or (None, reason_note) when
@@ -413,6 +413,38 @@ def _revalidate_cached_contract(cached: dict[str, Any]) -> tuple[dict[str, Any] 
     refreshed["mid"] = mid
     refreshed["spread"] = round(float(ask) - float(bid), 4)
     refreshed["spread_pct"] = round(refreshed["spread"] / mid, 4) if mid else None
+
+    # Refresh greeks/spot from the quote payload when the quote actually
+    # carries usable values; otherwise preserve the cached values.
+    raw_delta = q.get("delta")
+    if isinstance(raw_delta, (int, float)) and -1.0 <= raw_delta <= 1.0 and raw_delta != 0:
+        refreshed["delta"] = float(raw_delta)
+
+    quote_spot = None
+    raw_underlying = q.get("underlyingPrice")
+    if isinstance(raw_underlying, (int, float)) and raw_underlying > 0:
+        refreshed["underlying_price"] = float(raw_underlying)
+        quote_spot = float(raw_underlying)
+
+    # Moneyness/delta sanity recheck BEFORE the liquidity gates. Use the
+    # freshest available spot signal and reject contracts that have drifted
+    # far ITM/OTM since they were originally selected.
+    delta = refreshed.get("delta")
+    if delta is not None:
+        if not (DELTA_MIN <= abs(delta) <= DELTA_MAX):
+            return None, f"{occ}: cached contract delta drifted out of profile — refetching"
+    else:
+        current_spot = None
+        if isinstance(quote_spot, (int, float)) and quote_spot > 0:
+            current_spot = float(quote_spot)
+        elif isinstance(spot_hint, (int, float)) and spot_hint > 0:
+            current_spot = float(spot_hint)
+        elif isinstance(refreshed.get("underlying_price"), (int, float)) and refreshed["underlying_price"] > 0:
+            current_spot = float(refreshed["underlying_price"])
+        if current_spot is not None:
+            moneyness = abs(refreshed["strike"] / current_spot - 1)
+            if moneyness > MONEYNESS_BAND:
+                return None, f"{occ}: cached contract strike drifted out of moneyness band — refetching"
 
     ok, reason = passes_liquidity_gates(refreshed)
     if ok:
@@ -448,7 +480,7 @@ def fetch_contract(
     prefix_notes: list[str] = []
     cached = _CONTRACT_CACHE.get(trade_date, key)
     if cached is not None:
-        refreshed, note = _revalidate_cached_contract(cached)
+        refreshed, note = _revalidate_cached_contract(cached, spot_hint)
         if refreshed is not None:
             return refreshed, []
         prefix_notes = [note]
