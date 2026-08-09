@@ -274,9 +274,9 @@ def test_gated_construction_wraps_both_roles(offline_orchestrator_factory):
     gate = CountingGate()
     orch, fake_deep, fake_quick = offline_orchestrator_factory(gate=gate)
     assert isinstance(orch._quick_llm, GatedLLM)
-    assert orch._quick_llm.inner is fake_quick
+    assert orch._quick_llm._inner is fake_quick
     assert isinstance(orch._deep_llm, GatedLLM)
-    assert orch._deep_llm.inner is fake_deep
+    assert orch._deep_llm._inner is fake_deep
 
 
 def test_every_llm_call_in_a_full_run_takes_a_permit(offline_orchestrator_factory, monkeypatch):
@@ -486,7 +486,7 @@ def test_gate_is_released_when_a_node_raises_mid_run(offline_orchestrator_factor
     )
     # Make the first quick-LLM invocation fail so the GatedLLM finally-block
     # is exercised.
-    orch._quick_llm.inner.raise_on_invoke = True
+    orch._quick_llm._inner.raise_on_invoke = True
     _patch_all_factories(monkeypatch)
 
     with pytest.raises(RuntimeError, match="invoke failed"):

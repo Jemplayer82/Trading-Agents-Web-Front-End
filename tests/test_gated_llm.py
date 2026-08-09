@@ -108,7 +108,7 @@ def test_wrap_llm_wraps_when_a_gate_is_given() -> None:
     gate = CountingGate()
     wrapped = wrap_llm(model, gate)
     assert isinstance(wrapped, GatedLLM)
-    assert wrapped.inner is model
+    assert wrapped._inner is model
 
 
 def test_direct_invoke_takes_exactly_one_permit() -> None:

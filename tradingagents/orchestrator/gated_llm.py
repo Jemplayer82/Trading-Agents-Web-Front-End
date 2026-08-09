@@ -67,10 +67,6 @@ class GatedLLM(Runnable):
         self._inner = inner
         self._gate = gate
 
-    @property
-    def inner(self) -> Any:
-        return self._inner
-
     def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
         self._gate.acquire(1)
         try:
