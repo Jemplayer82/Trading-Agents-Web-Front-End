@@ -747,17 +747,19 @@ class TestSweepFetchBudget:
         assert len(log.get_pending_entries()) == 1
 
     def test_results_identical_to_per_entry_fetch(self, tmp_path):
-        """Batching must not change any resolved value compared to fresh fetches."""
+        """Batching must not change any resolved value and must not let one
+        entry's ticker or window bleed into another's."""
         log = make_log(tmp_path)
         d1, d2 = _recent_date(22), _recent_date(18)
         log.store_decision("NVDA", d1, DECISION_BUY)
-        log.store_decision("NVDA", d2, DECISION_SELL)
+        log.store_decision("AAPL", d2, DECISION_SELL)
 
         reflector = MagicMock()
         reflector.reflect_on_final_decision.return_value = "CLASS: CONFIRMED-THESIS"
 
         price_map = {
-            "NVDA": self._wide_frame(100, 120),
+            "NVDA": self._wide_frame(100, 300),
+            "AAPL": self._wide_frame(300, 100),
             "SPY": self._wide_frame(400, 401),
         }
 
@@ -778,36 +780,17 @@ class TestSweepFetchBudget:
 
         assert summary["resolved"] == 2
 
-        def _entry_value(entry, primary, secondary):
-            if primary in entry:
-                return entry[primary]
-            if secondary in entry:
-                return entry[secondary]
-            raise KeyError(f"entry missing {primary!r} and {secondary!r}")
+        by_ticker = {e["ticker"]: e for e in log.load_entries()}
 
-        def _as_float(val):
-            if isinstance(val, (int, float)):
-                return float(val)
-            s = str(val).replace("+", "").replace("%", "").strip()
-            v = float(s)
-            return v / 100 if "%" in str(val) else v
-
-        def _as_int(val):
-            if isinstance(val, int):
-                return val
-            return int(str(val).replace("d", "").strip())
-
-        by_date = {e["date"]: e for e in log.load_entries()}
-
-        for d in (d1, d2):
+        for ticker, date in (("NVDA", d1), ("AAPL", d2)):
             with patch("yfinance.Ticker") as cls2:
                 cls2.side_effect = mock_make
-                raw, alpha, days, _ = fetch_returns("NVDA", d, 5, "SPY")
+                raw, alpha, days, _ = fetch_returns(ticker, date, 5, "SPY")
 
-            e = by_date[d]
-            assert _as_float(_entry_value(e, "raw_return", "raw")) == pytest.approx(raw, abs=0.0005)
-            assert _as_float(_entry_value(e, "alpha_return", "alpha")) == pytest.approx(alpha, abs=0.0005)
-            assert _as_int(_entry_value(e, "holding_days", "holding")) == days
+            e = by_ticker[ticker]
+            assert e["raw"] == f"{raw:+.1%}"
+            assert e["alpha"] == f"{alpha:+.1%}"
+            assert e["holding"] == f"{days}d"
 
 
 # ---------------------------------------------------------------------------
