@@ -392,8 +392,6 @@ def _revalidate_cached_contract(cached: dict[str, Any], spot_hint: float | None 
     the cached contract can no longer be served safely and must be refetched.
     """
     occ = cached["occ_symbol"]
-    if not schwab_mcp.market_data_enabled():
-        return None, f"{occ}: cached contract not re-validated (Schwab market data off) — refetching"
 
     try:
         quotes = schwab_mcp.get_quotes([occ])
@@ -472,6 +470,9 @@ def fetch_contract(
     expected and supported.
     """
     if not _contract_cache_enabled():
+        return _fetch_contract_uncached(underlying, direction, spot_hint)
+
+    if not schwab_mcp.market_data_enabled():
         return _fetch_contract_uncached(underlying, direction, spot_hint)
 
     side = "CALL" if str(direction).upper() == "BUY" else "PUT"

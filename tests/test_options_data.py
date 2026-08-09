@@ -390,15 +390,15 @@ class TestContractCache:
         monkeypatch.setattr(options_data.schwab_mcp, "market_data_enabled", lambda: False)
         monkeypatch.setattr(options_data.schwab_mcp, "get_quotes", fake_quotes)
 
-        options_data.fetch_contract("AAPL", "BUY")
-        assert len(calls) == 1
-        assert not quote_calls  # no quote attempt when market data is off
-
-        c, notes = options_data.fetch_contract("AAPL", "BUY")
+        c1, notes1 = options_data.fetch_contract("AAPL", "BUY")
+        c2, notes2 = options_data.fetch_contract("AAPL", "BUY")
         assert len(calls) == 2
         assert not quote_calls
-        assert c is not None
-        assert any("refetching" in n for n in notes)
+        assert c1 is not None
+        assert c2 is not None
+        assert notes1 == []
+        assert notes2 == []
+        assert options_data._CONTRACT_CACHE.stats()["size"] == 0
 
     def test_get_quotes_exception_falls_back(self, monkeypatch):
         calls = []
