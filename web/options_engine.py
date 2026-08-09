@@ -106,14 +106,20 @@ _ALLOC_TIMEOUT_SECONDS = _parse_alloc_timeout_seconds()
 
 
 def _slot_release_enabled() -> bool:
-    """Kill switch for the proactive queue hand-off (env, read at call time).
+    """Kill switch for the proactive queue hand-off AND the busy predicate (env, read at call time).
 
     Three concurrent full pipelines in one 4g-capped container is exactly
     the shape that reproduced the host OOM the scan queue was built to
     prevent (see the _SCAN_LOCK comment in portfolio_routes.start_scan),
-    so a no-code-change rollback has to exist. Note it only stops the
-    PROACTIVE dequeue — scan_queue no longer counts a waiter as busy
-    either way, so a newly REQUESTED scan can still start beside one.
+    so a no-code-change rollback has to exist. Flipping this to 0 does two
+    things together: it stops the PROACTIVE dequeue below, AND (via
+    scan_queue._wait_market_release_enabled reading this same env var) it
+    puts 'running_wait_market' back into scan_queue._is_any_scan_running's
+    busy set, so a newly REQUESTED scan queues behind a parked waiter again
+    instead of starting beside it. Both halves have to move together —
+    stopping only the proactive hand-off while the busy check still ignored
+    waiters would leave the container reading as idle for the whole ~2h
+    daily wait window, which defeats the rollback this switch exists for.
     """
     return os.environ.get("OPTIONS_RELEASE_SLOT_DURING_WAIT", "1").strip().lower() not in {
         "0", "false", "no", "off"

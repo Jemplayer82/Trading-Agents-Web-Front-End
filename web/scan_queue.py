@@ -20,6 +20,7 @@ row of an unsupported kind is failed and skipped.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Any
 
@@ -46,6 +47,22 @@ def register_runner(key: str, module: Any, func_name: str) -> None:
     _RUNNERS[key] = (module, func_name)
 
 
+def _wait_market_release_enabled() -> bool:
+    """Whether a 'running_wait_market' scan should be treated as idle (env, read at call time).
+
+    Mirrors options_engine._slot_release_enabled's kill switch
+    byte-for-byte (same env var, same default, same falsy set) rather
+    than importing it: options_engine.py is a tier-4-only module (see
+    scripts/make_tier.py's TIER_ONLY_FILES), while this module ships at
+    every tier >= 2, so an import here would break the tier 2/3 builds
+    that delete options_engine.py entirely. Keep the two functions in
+    sync if the env var name, default, or falsy set ever changes.
+    """
+    return os.environ.get("OPTIONS_RELEASE_SLOT_DURING_WAIT", "1").strip().lower() not in {
+        "0", "false", "no", "off"
+    }
+
+
 def _is_any_scan_running(conn) -> dict | None:  # type: ignore[type-arg]
     """Return info dict if any scan is actively running, else None.
 
@@ -56,7 +73,7 @@ def _is_any_scan_running(conn) -> dict | None:  # type: ignore[type-arg]
     pending row whose worker never started is closed out by the stuck-run
     reaper, so it can't wedge the queue.
 
-    'running_wait_market' does NOT count as busy: a scan parked in
+    'running_wait_market' does NOT count as busy BY DEFAULT: a scan parked in
     ``options_engine._wait_for_market_open()`` sits from ~07:30 to 09:35 ET
     doing nothing but sleeping in 30s ticks, consuming no LLM budget and no CPU.
     Counting it busy meant the next queued options account could not begin its
@@ -64,17 +81,30 @@ def _is_any_scan_running(conn) -> dict | None:  # type: ignore[type-arg]
     matters — allocation and order placement — is now enforced by
     ``options_engine._ALLOC_LOCK`` (step 3), not by this busy check.
 
+    That default is exactly what ``OPTIONS_RELEASE_SLOT_DURING_WAIT=0`` rolls
+    back (see options_engine._slot_release_enabled): with the switch off,
+    'running_wait_market' goes back into the busy set below, so a container
+    with a parked build reads busy again for the whole ~2h daily wait window —
+    the invariant the kill switch's own docstring names the 4GB-container OOM
+    risk against. ``_wait_market_release_enabled()`` above reads the same env
+    var so this predicate and the proactive dequeue it guards can't disagree.
+
     Stuck-waiter detection is unaffected: ``db.find_stuck_spy_scans``
     (web/db.py:1149) keys off ``status NOT IN ('completed','cancelled','failed','queued')``
     plus a heartbeat-staleness cutoff, entirely independent of this list, so a
     genuinely dead waiter is still reaped.
     """
+    busy_statuses = ["pending", "running_quick", "running_deep", "running_alloc"]
+    if not _wait_market_release_enabled():
+        busy_statuses.append("running_wait_market")
+    placeholders = ",".join("?" for _ in busy_statuses)
     row = conn.execute(
         "SELECT 'portfolio' AS scan_type, id, trade_date, 'equity' AS kind, created_at"
         " FROM portfolio_scans WHERE status = 'running'"
         " UNION SELECT 'spy', id, trade_date, kind, created_at FROM spy_scans"
-        " WHERE status IN ('pending','running_quick','running_deep','running_alloc')"
-        " LIMIT 1"
+        f" WHERE status IN ({placeholders})"
+        " LIMIT 1",
+        busy_statuses,
     ).fetchone()
     return dict(row) if row else None
 

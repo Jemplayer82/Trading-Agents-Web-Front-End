@@ -245,3 +245,59 @@ class TestWaitMarketReleasesTheQueue:
         assert result["waiting"][0]["status"] == "running_wait_market"
         assert len(result["queued"]) == 1
         assert result["queued"][0]["id"] == queued_id
+
+
+class TestWaitMarketKillSwitchRestoresBusy:
+    """OPTIONS_RELEASE_SLOT_DURING_WAIT=0 must roll back the whole
+    concurrency guard, not just the proactive dequeue — a parked build
+    has to read busy again so nothing else can start beside it."""
+
+    def test_running_wait_market_counts_as_busy_when_switch_off(self, tmp_db, monkeypatch):
+        monkeypatch.setenv("OPTIONS_RELEASE_SLOT_DURING_WAIT", "0")
+        waiter_id = db.create_spy_scan("2026-08-03", status="running_wait_market")
+
+        with db.connect() as conn:
+            busy = scan_queue._is_any_scan_running(conn)
+
+        assert busy is not None
+        assert busy["id"] == waiter_id
+
+    def test_advance_queue_does_not_start_next_while_a_scan_waits_and_switch_off(
+        self, tmp_db, monkeypatch, thread_spy
+    ):
+        monkeypatch.setenv("OPTIONS_RELEASE_SLOT_DURING_WAIT", "0")
+        holder = SimpleNamespace(_worker=lambda scan_id, trade_date: None)
+        monkeypatch.setattr(scan_queue, "_RUNNERS", {})
+        scan_queue.register_runner("spy", holder, "_worker")
+
+        db.create_spy_scan("2026-08-03", status="running_wait_market")
+        queued_id = db.create_spy_scan("2026-08-03", status="queued")
+
+        running = scan_queue._advance_queue_if_idle()
+
+        assert running is None
+        assert thread_spy == []
+        assert db.get_spy_scan(queued_id)["status"] == "queued"
+
+    def test_falsy_variants_all_restore_busy(self, tmp_db, monkeypatch):
+        """"0", "false", "no", "off" (any case) all disable release,
+        matching options_engine._slot_release_enabled's exact falsy set."""
+        for value in ("0", "false", "No", "OFF"):
+            monkeypatch.setenv("OPTIONS_RELEASE_SLOT_DURING_WAIT", value)
+            scan_id = db.create_spy_scan("2026-08-03", status="running_wait_market")
+            with db.connect() as conn:
+                busy = scan_queue._is_any_scan_running(conn)
+            assert busy is not None, f"value={value!r} must count the waiter as busy"
+            db.update_spy_scan(scan_id, status="completed")
+
+    def test_default_and_explicit_1_still_release(self, tmp_db, monkeypatch):
+        for value in (None, "1"):
+            if value is None:
+                monkeypatch.delenv("OPTIONS_RELEASE_SLOT_DURING_WAIT", raising=False)
+            else:
+                monkeypatch.setenv("OPTIONS_RELEASE_SLOT_DURING_WAIT", value)
+            scan_id = db.create_spy_scan("2026-08-03", status="running_wait_market")
+            with db.connect() as conn:
+                busy = scan_queue._is_any_scan_running(conn)
+            assert busy is None, f"value={value!r} must NOT count the waiter as busy"
+            db.update_spy_scan(scan_id, status="completed")
