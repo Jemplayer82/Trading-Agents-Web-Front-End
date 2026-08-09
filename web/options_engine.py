@@ -541,7 +541,7 @@ def _apply_intraday_stops(
     quoted positions and closes breaches immediately.
 
     Fill convention (standard backtest rule):
-      - previous mark ABOVE the stop, fresh quote at/below it -> the price
+      - previous mark ABOVE the stop, new quote at/below it -> the price
         crossed the level sometime this interval, so fill AT the stop level,
         like a working stop order would have;
       - first observation already below the stop (overnight gap / never
@@ -702,7 +702,7 @@ def _zero_candidate_reason(
     never misattribute a failure as "nothing passed vetting".
 
     Reachable only when the run was not TOTALLY broken — the guards in
-    run_options_build fail the run outright in that case.
+    run_options_build fail the scan outright in that case.
     """
     if candidates:
         return None
@@ -963,4 +963,3 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
         log.info("[options %s] done — %d closes / %d opens / %d holds, equity $%s (cash $%s)",
                  scan_id, len(alloc["closes"]), len(alloc["opens"]), len(alloc["holds"]),
                  f"{final['equity']:,.0f}", f"{final['cash']:,.0f}")
-

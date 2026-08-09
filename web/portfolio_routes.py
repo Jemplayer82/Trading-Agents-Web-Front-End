@@ -367,7 +367,7 @@ def _accounts_split() -> list[dict[str, Any]]:
     """Per-account live holdings for the live-holdings UI panel.
 
     Returns [all_entry, ...per_account] from all enabled brokerage providers
-    (see web/brokerages). Each entry has: id, brokerage, label, positions,
+    (see web.brokerages). Each entry has: id, brokerage, label, positions,
     total_value, cash, cost_basis, gain_dollars, gain_percent. Each position
     is the normalized brokerages shape (incl. option fields), optionally with
     signal/analysis_id merged from the latest completed portfolio scan.
