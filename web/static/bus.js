@@ -37,6 +37,12 @@
   // ===== Auto-scroll state =====
   let stuckToBottom = true;
 
+  // ===== Test-only debug probe =====
+  // Exposes backoff state read-only so VM smoke tests can assert on it.
+  globalThis.__bus_debug = {
+    get reconnectAttempt() { return reconnectAttempt; }
+  };
+
   // ===== DOM helpers =====
   // `$` (getElementById) is the global from utils.js, which loads first; this IIFE
   // closes over it. No local redefinition needed.
