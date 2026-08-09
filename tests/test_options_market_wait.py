@@ -150,7 +150,7 @@ class TestAllocationSlot:
         try:
             time_mod.sleep(0.3)
             status = db.get_spy_scan_status(scan_id)["status"]
-            assert status == "running_wait_market"
+            assert status == "running_wait_alloc"
             options_engine._ALLOC_LOCK.release()
             lock_held = False
             t.join(timeout=5)

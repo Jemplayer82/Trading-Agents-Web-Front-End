@@ -544,9 +544,11 @@ function optProgressHtml(scan) {
   const dc = scan.deep_count || 0;
   const gateNote = scan.status === "running_wait_market"
     ? "<p class=\"dim\" style=\"font-size:11px;margin:8px 0 0;\">Waiting for market open (09:35 ET) so entries fill at live quotes.</p>"
-    : (scan.status === "running_alloc"
-        ? "<p class=\"dim\" style=\"font-size:11px;margin:8px 0 0;\">Allocating — vetting contracts and sizing positions.</p>"
-        : "");
+    : (scan.status === "running_wait_alloc"
+        ? "<p class=\"dim\" style=\"font-size:11px;margin:8px 0 0;\">Waiting for the allocation slot — another account in this build is still allocating.</p>"
+        : (scan.status === "running_alloc"
+            ? "<p class=\"dim\" style=\"font-size:11px;margin:8px 0 0;\">Allocating — vetting contracts and sizing positions.</p>"
+            : ""));
   return (
     "<div class=\"panel\">" +
       "<div class=\"panel-title\">[ Progress ]</div>" +

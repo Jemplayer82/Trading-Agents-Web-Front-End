@@ -173,9 +173,12 @@ def _allocation_slot(scan_id: int) -> Iterator[None]:
             raise RuntimeError(
                 f"scan never acquired the allocation lock (queued behind another build); "
                 f"timed out after {waited:.0f}s waiting for the allocation slot")
-        # Heartbeat: reuses the existing running_wait_market label on
-        # purpose -- this IS a wait, no new status vocabulary needed.
-        db.update_spy_scan(scan_id, status="running_wait_market")
+        # Heartbeat: this waiter now uses its own running_wait_alloc status,
+        # distinct from _wait_for_market_open's running_wait_market, precisely so
+        # downstream consumers (the dashboard, /api/portfolio/status) can tell
+        # a pre-open parker apart from a build queued behind another account's
+        # allocation.
+        db.update_spy_scan(scan_id, status="running_wait_alloc")
         log.info("[options %s] waiting for the allocation slot (%.0fs)", scan_id, waited)
     try:
         # A cancel requested while queued must not still allocate.

@@ -96,7 +96,7 @@ def scan_status() -> dict[str, Any]:
         ).fetchall()
         waiting_rows = conn.execute(
             "SELECT 'spy' AS scan_type, id, trade_date, kind, created_at, status"
-            " FROM spy_scans WHERE status = 'running_wait_market' ORDER BY created_at"
+            " FROM spy_scans WHERE status IN ('running_wait_market', 'running_wait_alloc') ORDER BY created_at"
         ).fetchall()
     return {
         "running": dict(running_row) if running_row else None,
