@@ -291,7 +291,15 @@ def _build_quick_batch_prompt(rows: list[dict[str, Any]]) -> str:
 
 
 _BATCH_LINE_RE = re.compile(
-    r"^\s*(?:\d+[.)]\s*)?[*`]*\s*([A-Za-z0-9.\-^]{1,12})\s*\|\s*(BUY|HOLD|SELL)\s*\|\s*(10|[1-9])\s*(?:\|\s*(.*?))?\s*[*`]*\s*$",
+    r"^\s*(?:\d+[.)]\s*)?"
+    r"(?:[-|*`]+\s*)?"
+    r"([A-Za-z0-9.\-^]{1,12})"
+    r"(?:\s*\|\s*|\s+-\s+)"
+    r"(BUY|HOLD|SELL)"
+    r"(?:\s*\|\s*|\s+-\s+)"
+    r"(10|[1-9])"
+    r"(?:(?:\s*\|\s*|\s+-\s+)(.*?))?"
+    r"\s*[-|*`]*\s*$",
     re.IGNORECASE,
 )
 
