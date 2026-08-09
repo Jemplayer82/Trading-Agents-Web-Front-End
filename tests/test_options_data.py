@@ -288,9 +288,11 @@ class TestContractCache:
         assert c2["mid"] == pytest.approx(4.3)
         assert c2["spread"] == pytest.approx(0.2)
         assert c2["spread_pct"] == pytest.approx(round(0.2 / 4.3, 4))
-        # Non-price fields are carried over unchanged.
-        assert c2["open_interest"] == 500
-        assert c2["delta"] == pytest.approx(0.45)
+        # Fields not refreshed from the live quote are cleared so stale cached
+        # values are never silently vouched for as current market data.
+        assert c2["open_interest"] == 500  # still carried over unchanged
+        assert c2["delta"] is None
+        assert c2["underlying_price"] is None
         assert c2["source"] == "schwab"
         assert notes2 == []
 

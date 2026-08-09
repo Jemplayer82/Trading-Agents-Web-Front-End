@@ -414,17 +414,20 @@ def _revalidate_cached_contract(cached: dict[str, Any], spot_hint: float | None 
     refreshed["spread"] = round(float(ask) - float(bid), 4)
     refreshed["spread_pct"] = round(refreshed["spread"] / mid, 4) if mid else None
 
-    # Refresh greeks/spot from the quote payload when the quote actually
-    # carries usable values; otherwise preserve the cached values.
+    # Refresh greeks/spot from the live quote. If the live quote does not
+    # actually carry a usable value for a field, clear the stale cached value
+    # so downstream code cannot mistake it for current live market data.
     raw_delta = q.get("delta")
     if isinstance(raw_delta, (int, float)) and -1.0 <= raw_delta <= 1.0 and raw_delta != 0:
         refreshed["delta"] = float(raw_delta)
+    else:
+        refreshed["delta"] = None
 
-    quote_spot = None
     raw_underlying = q.get("underlyingPrice")
     if isinstance(raw_underlying, (int, float)) and raw_underlying > 0:
         refreshed["underlying_price"] = float(raw_underlying)
-        quote_spot = float(raw_underlying)
+    else:
+        refreshed["underlying_price"] = None
 
     # Moneyness/delta sanity recheck BEFORE the liquidity gates. Use the
     # freshest available spot signal and reject contracts that have drifted
@@ -435,12 +438,10 @@ def _revalidate_cached_contract(cached: dict[str, Any], spot_hint: float | None 
             return None, f"{occ}: cached contract delta drifted out of profile — refetching"
     else:
         current_spot = None
-        if isinstance(quote_spot, (int, float)) and quote_spot > 0:
-            current_spot = float(quote_spot)
+        if isinstance(refreshed.get("underlying_price"), (int, float)) and refreshed["underlying_price"] > 0:
+            current_spot = float(refreshed["underlying_price"])
         elif isinstance(spot_hint, (int, float)) and spot_hint > 0:
             current_spot = float(spot_hint)
-        elif isinstance(refreshed.get("underlying_price"), (int, float)) and refreshed["underlying_price"] > 0:
-            current_spot = float(refreshed["underlying_price"])
         if current_spot is not None:
             moneyness = abs(refreshed["strike"] / current_spot - 1)
             if moneyness > MONEYNESS_BAND:
