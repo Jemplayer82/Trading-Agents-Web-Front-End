@@ -4,7 +4,7 @@ Follows the patterns in test_memory_log.py: tmp_path-backed TradingMemoryLog,
 patched yfinance.Ticker returning DatetimeIndex DataFrames, MagicMock LLM.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta  # noqa: I001
 from unittest.mock import MagicMock, call, patch
 
 import pandas as pd
@@ -15,8 +15,8 @@ from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.agents.utils.scoring import HIT, MISS, UNINFORMATIVE, score_outcome
 from tradingagents.graph.outcome_resolution import (
     ABSOLUTE_BENCHMARK,
-    PriceHistoryCache,
     fetch_returns,
+    PriceHistoryCache,
     noise_band,
     resolve_all_pending,
     resolve_benchmark,
@@ -420,6 +420,236 @@ class TestSweep:
             summary = resolve_all_pending(log, reflector, {})
         assert summary["immature"] == 1
         assert len(log.get_pending_entries()) == 1
+
+
+# ---------------------------------------------------------------------------
+# resolve_all_pending fetch-budget assertions
+# ---------------------------------------------------------------------------
+
+class TestSweepFetchBudget:
+
+    def _wide_frame(self, start_price, end_price, periods=220):
+        """Business-day frame ending slightly in the future, rising in second half."""
+        idx = pd.bdate_range(end=datetime.now() + timedelta(days=10), periods=periods)
+        half = periods // 2
+        first = [start_price] * half
+        second = [
+            start_price + (end_price - start_price) * i / (periods - half - 1)
+            for i in range(periods - half)
+        ]
+        return pd.DataFrame({"Close": first + second}, index=idx)
+
+    def test_age_guard_skips_fetch_entirely(self, tmp_path):
+        """2 days old is too young for the default 5-day window."""
+        log = make_log(tmp_path)
+        log.store_decision("NVDA", _recent_date(2), DECISION_BUY)
+        reflector = MagicMock()
+        with patch(
+            "tradingagents.graph.outcome_resolution.fetch_returns", MagicMock(),
+        ) as mock:
+            summary = resolve_all_pending(log, reflector, {})
+        mock.assert_not_called()
+        assert summary["immature"] == 1
+        assert len(log.get_pending_entries()) == 1
+
+    def test_age_guard_lets_boundary_entry_through(self, tmp_path):
+        """Age == holding_days is not skipped by the calendar-day guard."""
+        log = make_log(tmp_path)
+        log.store_decision("NVDA", _recent_date(5), DECISION_BUY)
+        with patch(
+            "tradingagents.graph.outcome_resolution.fetch_returns",
+            return_value=(None, None, None, None),
+        ) as mock:
+            summary = resolve_all_pending(log, MagicMock(), {})
+        assert mock.call_count == 1
+        assert summary["immature"] == 1
+        assert len(log.get_pending_entries()) == 1
+
+    def test_age_guard_does_not_skip_censorable_entry(self, tmp_path):
+        """Censorable entries are fetched even when age < holding_days."""
+        log = make_log(tmp_path)
+        log.store_decision("GONE", _recent_date(10), DECISION_BUY)
+        with patch(
+            "tradingagents.graph.outcome_resolution.fetch_returns",
+            return_value=(-0.40, -0.42, 2, None),
+        ) as mock:
+            summary = resolve_all_pending(
+                log, MagicMock(), {"reflection_holding_days": 60, "sweep_censor_after_days": 3}
+            )
+        assert mock.call_count == 1
+        assert summary["censored"] == 1
+        assert len(log.get_pending_entries()) == 0
+        entry = log.load_entries()[0]
+        assert entry["reflection"].startswith("CLASS: CENSORED")
+
+    def test_one_download_per_ticker_and_one_per_benchmark(self, tmp_path):
+        """3 NVDA + 2 AAPL entries, all vs SPY, should hit 3 symbols total."""
+        log = make_log(tmp_path)
+        for d in [_recent_date(30), _recent_date(25), _recent_date(15)]:
+            log.store_decision("NVDA", d, DECISION_BUY)
+        for d in [_recent_date(20), _recent_date(18)]:
+            log.store_decision("AAPL", d, DECISION_SELL)
+
+        reflector = MagicMock()
+        reflector.reflect_on_final_decision.return_value = "CLASS: CONFIRMED-THESIS\nCALL: ok"
+
+        price_map = {
+            "NVDA": self._wide_frame(100, 115),
+            "AAPL": self._wide_frame(200, 230),
+            "SPY": self._wide_frame(400, 401),
+        }
+        created_symbols = []
+
+        def tracking_make(sym):
+            m = MagicMock()
+            m.history.return_value = price_map.get(sym, pd.DataFrame({"Close": []}))
+            created_symbols.append(sym)
+            return m
+
+        with patch("yfinance.Ticker") as cls:
+            cls.side_effect = tracking_make
+            with patch(
+                "tradingagents.graph.outcome_resolution._fetch_news_context",
+                return_value="",
+            ):
+                summary = resolve_all_pending(log, reflector, {})
+
+        assert set(created_symbols) == {"NVDA", "AAPL", "SPY"}
+        assert len(created_symbols) == 3
+        assert summary["resolved"] == 5
+        assert summary["immature"] == 0
+        assert summary["errors"] == 0
+        assert len(log.get_pending_entries()) == 0
+
+    def test_crypto_entries_need_no_benchmark_download(self, tmp_path):
+        """BTC-USD uses ABSOLUTE_BENCHMARK: only one symbol is ever downloaded."""
+        log = make_log(tmp_path)
+        for d in [_recent_date(20), _recent_date(18)]:
+            log.store_decision("BTC-USD", d, DECISION_BUY)
+
+        reflector = MagicMock()
+        reflector.reflect_on_final_decision.return_value = "CLASS: CONFIRMED-THESIS"
+
+        created_symbols = []
+
+        def tracking_make(sym):
+            m = MagicMock()
+            m.history.return_value = self._wide_frame(50000, 55000)
+            created_symbols.append(sym)
+            return m
+
+        with patch("yfinance.Ticker") as cls:
+            cls.side_effect = tracking_make
+            with patch(
+                "tradingagents.graph.outcome_resolution._fetch_news_context",
+                return_value="",
+            ):
+                summary = resolve_all_pending(log, reflector, {})
+
+        assert set(created_symbols) == {"BTC-USD"}
+        assert summary["resolved"] == 2
+        assert summary["immature"] == 0
+        assert summary["errors"] == 0
+        assert len(log.get_pending_entries()) == 0
+
+    def test_age_guarded_entries_trigger_no_download(self, tmp_path):
+        """A single 1-day-old entry should make zero yfinance calls."""
+        log = make_log(tmp_path)
+        log.store_decision("NVDA", _recent_date(1), DECISION_BUY)
+
+        created_symbols = []
+
+        def tracking_make(sym):
+            created_symbols.append(sym)
+            return MagicMock()
+
+        with patch("yfinance.Ticker") as cls:
+            cls.side_effect = tracking_make
+            summary = resolve_all_pending(log, MagicMock(), {})
+
+        assert created_symbols == []
+        assert summary["immature"] == 1
+        assert len(log.get_pending_entries()) == 1
+
+    def test_failed_prefetch_leaves_entries_pending(self, tmp_path):
+        """A network failure during download must not abort the sweep."""
+        log = make_log(tmp_path)
+        log.store_decision("NVDA", _recent_date(20), DECISION_BUY)
+
+        def broken_make(sym):
+            m = MagicMock()
+            m.history.side_effect = RuntimeError("network")
+            return m
+
+        with patch("yfinance.Ticker") as cls:
+            cls.side_effect = broken_make
+            summary = resolve_all_pending(log, MagicMock(), {})
+
+        assert summary["immature"] >= 1
+        assert len(log.get_pending_entries()) == 1
+
+    def test_results_identical_to_per_entry_fetch(self, tmp_path):
+        """Batching must not change any resolved value compared to fresh fetches."""
+        log = make_log(tmp_path)
+        d1, d2 = _recent_date(22), _recent_date(18)
+        log.store_decision("NVDA", d1, DECISION_BUY)
+        log.store_decision("NVDA", d2, DECISION_SELL)
+
+        reflector = MagicMock()
+        reflector.reflect_on_final_decision.return_value = "CLASS: CONFIRMED-THESIS"
+
+        price_map = {
+            "NVDA": self._wide_frame(100, 120),
+            "SPY": self._wide_frame(400, 401),
+        }
+
+        def mock_make(sym):
+            m = MagicMock()
+            m.history.return_value = price_map.get(sym, pd.DataFrame({"Close": []}))
+            return m
+
+        with patch("yfinance.Ticker") as cls:
+            cls.side_effect = mock_make
+            with patch(
+                "tradingagents.graph.outcome_resolution._fetch_news_context",
+                return_value="",
+            ):
+                summary = resolve_all_pending(
+                    log, reflector, {"noise_alpha_threshold": 0.001}
+                )
+
+        assert summary["resolved"] == 2
+
+        def _entry_value(entry, primary, secondary):
+            if primary in entry:
+                return entry[primary]
+            if secondary in entry:
+                return entry[secondary]
+            raise KeyError(f"entry missing {primary!r} and {secondary!r}")
+
+        def _as_float(val):
+            if isinstance(val, (int, float)):
+                return float(val)
+            s = str(val).replace("+", "").replace("%", "").strip()
+            v = float(s)
+            return v / 100 if "%" in str(val) else v
+
+        def _as_int(val):
+            if isinstance(val, int):
+                return val
+            return int(str(val).replace("d", "").strip())
+
+        by_date = {e["date"]: e for e in log.load_entries()}
+
+        for d in (d1, d2):
+            with patch("yfinance.Ticker") as cls2:
+                cls2.side_effect = mock_make
+                raw, alpha, days, _ = fetch_returns("NVDA", d, 5, "SPY")
+
+            e = by_date[d]
+            assert _as_float(_entry_value(e, "raw_return", "raw")) == pytest.approx(raw, abs=0.0005)
+            assert _as_float(_entry_value(e, "alpha_return", "alpha")) == pytest.approx(alpha, abs=0.0005)
+            assert _as_int(_entry_value(e, "holding_days", "holding")) == days
 
 
 # ---------------------------------------------------------------------------

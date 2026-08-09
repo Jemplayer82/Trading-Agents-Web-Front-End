@@ -322,14 +322,21 @@ def resolve_all_pending(
 ) -> dict:
     """Resolve matured pending memory-log entries, optionally for one ticker.
 
-    Groups pending entries by ticker (one benchmark resolution per ticker),
-    isolates failures per entry so one bad ticker never aborts the sweep, and
-    writes all updates in a single atomic batch. LLM reflections are capped by
-    ``max_reflections`` (canned NOISE/CENSORED reflections are free and never
-    capped); entries skipped for budget stay pending for the next run.
-    ``reflector=None`` is treated as a zero LLM budget — NOISE/CENSORED
-    entries still resolve, so a missing/misconfigured LLM key degrades the
-    sweep instead of killing it.
+    Groups pending entries by ticker, isolates failures per entry, and writes
+    all updates in a single atomic batch. Price histories are downloaded in
+    bulk: one download per distinct ticker and one per distinct benchmark per
+    sweep. ``PriceHistoryCache`` always slices the shared frame back to the
+    exact per-entry window requested by ``fetch_returns``, so batching changes
+    only the number of network calls, never a resolved outcome. Entries
+    younger than ``holding_days`` calendar days are counted as ``immature``
+    with no network call at all (unless they have already entered the censor
+    path, i.e. are older than ``sweep_censor_after_days``).
+
+    LLM reflections are capped by ``max_reflections`` (canned NOISE/CENSORED
+    reflections are free and never capped); entries skipped for budget stay
+    pending for the next run. ``reflector=None`` is treated as a zero LLM
+    budget — NOISE/CENSORED entries still resolve, so a missing/misconfigured
+    LLM key degrades the sweep instead of killing it.
 
     Returns summary counts for logging:
     ``{"resolved", "noise", "censored", "immature", "budget_deferred", "errors",
@@ -354,69 +361,110 @@ def resolve_all_pending(
 
     today = datetime.now()
     updates: list[dict] = []
+    survivors: list[tuple] = []
 
+    # -----------------------------------------------------------------------
+    # PHASE 1 -- AGE GUARD (before any I/O)
+    # -----------------------------------------------------------------------
     for tkr, entries in by_ticker.items():
         benchmark = resolve_benchmark(tkr, config)
-        benchmark_label = "none (absolute return)" if benchmark == ABSOLUTE_BENCHMARK else benchmark
         for entry in entries:
             try:
                 trade_date = entry["date"]
-                age_days = (today - datetime.strptime(trade_date, "%Y-%m-%d")).days
+                trade_dt = datetime.strptime(trade_date, "%Y-%m-%d")
+                age_days = (today - trade_dt).days
                 allow_partial = age_days > censor_after
-
-                raw, alpha, actual_days, sigma_5d = fetch_returns(
-                    tkr, trade_date, holding_days, benchmark, allow_partial=allow_partial,
-                )
-                if raw is None:
-                    # Immature window, benchmark lag, or (for old entries) a
-                    # series with <2 rows — nothing safe to write yet.
-                    summary["immature"] += 1
-                    continue
-
-                band = noise_band(sigma_5d, config)
-                censored = allow_partial and actual_days < holding_days
-
-                if censored:
-                    reflection = _censored_reflection(actual_days, holding_days, age_days)
-                    summary["censored"] += 1
-                elif abs(alpha) < band:
-                    reflection = _noise_reflection(alpha, band, actual_days)
-                    summary["noise"] += 1
-                else:
-                    if reflector is None or (
-                        max_reflections is not None
-                        and summary["llm_reflections"] >= max_reflections
-                    ):
-                        summary["budget_deferred"] += 1
-                        continue
-                    window_end = (
-                        datetime.strptime(trade_date, "%Y-%m-%d") + timedelta(days=holding_days + 7)
-                    ).strftime("%Y-%m-%d")
-                    news_context = _fetch_news_context(tkr, trade_date, window_end)
-                    reflection = reflector.reflect_on_final_decision(
-                        final_decision=entry.get("decision", ""),
-                        raw_return=raw,
-                        alpha_return=alpha,
-                        benchmark_name=benchmark_label,
-                        rating=entry.get("rating", "Unrated"),
-                        holding_days=actual_days,
-                        noise_pct=band,
-                        news_context=news_context,
-                    )
-                    summary["llm_reflections"] += 1
-
-                updates.append({
-                    "ticker": tkr,
-                    "trade_date": trade_date,
-                    "raw_return": raw,
-                    "alpha_return": alpha,
-                    "holding_days": actual_days,
-                    "reflection": reflection,
-                })
-                summary["resolved"] += 1
             except Exception:
                 summary["errors"] += 1
-                logger.exception("Sweep failed for %s on %s — continuing", tkr, entry.get("date"))
+                logger.exception("Sweep failed for %s on %s -- continuing", tkr, entry.get("date"))
+                continue
+
+            # Age guard: fetch_returns requires len(post) - 1 >= holding_days,
+            # i.e. at least holding_days + 1 distinct trading-day bars
+            # starting at the trade date. Bars fall on distinct calendar
+            # days, so the (holding_days+1)-th bar is never earlier than
+            # trade_date + holding_days CALENDAR days. Skipping here is
+            # therefore strictly conservative -- it can never skip an entry
+            # that would actually have resolved -- and it saves two network
+            # calls each. The censor path (allow_partial) resolves on a short
+            # series and is exempt.
+            if not allow_partial and age_days < holding_days:
+                summary["immature"] += 1
+                continue
+
+            survivors.append((tkr, entry, trade_date, trade_dt, age_days, allow_partial, benchmark))
+
+    # -----------------------------------------------------------------------
+    # PHASE 2 -- PLAN THE DOWNLOADS (still no I/O)
+    # -----------------------------------------------------------------------
+    history = PriceHistoryCache()
+    for tkr, _entry, trade_date, _trade_dt, _age_days, _allow_partial, benchmark in survivors:
+        history.plan(tkr, *_stock_window(trade_date, holding_days))
+        if benchmark != ABSOLUTE_BENCHMARK:
+            history.plan(benchmark, *_benchmark_window(trade_date, holding_days))
+
+    # -----------------------------------------------------------------------
+    # PHASE 3 -- RESOLVE
+    # -----------------------------------------------------------------------
+    for tkr, entry, trade_date, trade_dt, age_days, allow_partial, benchmark in survivors:
+        try:
+            raw, alpha, actual_days, sigma_5d = fetch_returns(
+                tkr, trade_date, holding_days, benchmark,
+                allow_partial=allow_partial, history=history,
+            )
+            if raw is None:
+                # Immature window, benchmark lag, or (for old entries) a
+                # series with <2 rows — nothing safe to write yet.
+                summary["immature"] += 1
+                continue
+
+            band = noise_band(sigma_5d, config)
+            censored = allow_partial and actual_days < holding_days
+            benchmark_label = "none (absolute return)" if benchmark == ABSOLUTE_BENCHMARK else benchmark
+
+            if censored:
+                reflection = _censored_reflection(actual_days, holding_days, age_days)
+                summary["censored"] += 1
+            elif abs(alpha) < band:
+                reflection = _noise_reflection(alpha, band, actual_days)
+                summary["noise"] += 1
+            else:
+                if reflector is None or (
+                    max_reflections is not None
+                    and summary["llm_reflections"] >= max_reflections
+                ):
+                    summary["budget_deferred"] += 1
+                    continue
+                window_end = (
+                    trade_dt + timedelta(days=holding_days + 7)
+                ).strftime("%Y-%m-%d")
+                news_context = _fetch_news_context(tkr, trade_date, window_end)
+                reflection = reflector.reflect_on_final_decision(
+                    final_decision=entry.get("decision", ""),
+                    raw_return=raw,
+                    alpha_return=alpha,
+                    benchmark_name=benchmark_label,
+                    rating=entry.get("rating", "Unrated"),
+                    holding_days=actual_days,
+                    noise_pct=band,
+                    news_context=news_context,
+                )
+                summary["llm_reflections"] += 1
+
+            updates.append({
+                "ticker": tkr,
+                "trade_date": trade_date,
+                "raw_return": raw,
+                "alpha_return": alpha,
+                "holding_days": actual_days,
+                "reflection": reflection,
+            })
+            summary["resolved"] += 1
+        except Exception:
+            summary["errors"] += 1
+            logger.exception("Sweep failed for %s on %s -- continuing", tkr, entry.get("date"))
+
+    logger.info("Sweep fetched %d symbol histories for %d entries", history.download_count, len(survivors))
 
     if updates:
         memory_log.batch_update_with_outcomes(updates)
