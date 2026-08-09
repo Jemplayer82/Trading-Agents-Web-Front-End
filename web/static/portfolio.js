@@ -11,6 +11,7 @@
 // web/nginx.conf's /api/portfolio and /api/accounts prefix locations (note
 // /api/portfolio-scan(s) is caught by the /api/portfolio string prefix):
 //   GET    /api/portfolio-scans          history list
+//   GET    /api/portfolio/status         single cheap row (queue + banner)
 //   GET    /api/portfolio-scans/{id}     scan detail (polled at 5s while running)
 //   DELETE /api/portfolio-scans/{id}     delete a scan
 //   DELETE /api/portfolio-scans          delete ALL scans (Clear history)
@@ -610,11 +611,13 @@ async function loadAnalyzeQueue() {
 
 // ===== Running-scan activity banner =====
 // Surfaces a live progress bar on the Run Analysis tab whenever a Portfolio or
-// S&P 500 scan is running in the portfolio container. The list endpoints live on
-// the portfolio app but nginx routes /api/portfolio* and /api/spy* there, so a
-// plain fetch from here reaches them. Polls every 5s while this tab is visible.
-// Moved from app.js for the same reason as applySchwabVisibility/loadAnalyzeQueue
-// above — both endpoints it polls are T2+.
+// S&P 500 scan is running in the portfolio container. Now polls a single cheap
+// GET /api/portfolio/status row — the same endpoint loadAnalyzeQueue already
+// hits on this same 5s tick. (The old implementation fetched
+// /api/portfolio-scans and /api/spy-scans and then array-tested the
+// {scans: [...]} envelope, so the banner never actually rendered.) Moved from
+// app.js for the same reason as applySchwabVisibility/loadAnalyzeQueue above
+// — this banner is T2+.
 
 function setupScanActivity() {
   const box = $("scan-activity");
@@ -641,15 +644,29 @@ async function pollScanActivity() {
   if (!box) return;
   const blocks = [];
   try {
-    const scans = await (await fetch("/api/portfolio-scans")).json();
-    const run = Array.isArray(scans) ? scans.find((s) => s.status === "running") : null;
-    if (run) blocks.push(scanActivityPortfolio(run));
+    const data = await apiFetch("/api/portfolio/status");
+    const run = (data && data.running) || null;
+    const waiting = (data && data.waiting) || [];
+    // `=== "running"` for portfolio: /api/portfolio/status counts `pending` as
+    // busy (a row with all-zero counters), while the old list-based branch
+    // required exactly "running". A pending row must render nothing.
+    if (run && run.scan_type === "portfolio" && run.status === "running") {
+      blocks.push(scanActivityPortfolio(run));
+    }
+    // `startsWith("running")` for spy: reproduces the old list predicate
+    // exactly, including the `running_wait_*` states. `kind !== "options"`
+    // because the old spy branch fetched GET /api/spy-scans with its default
+    // `kind="equity"`, so an options build was never surfaced in this banner.
+    // The `waiting` fallback is needed because `running_wait_market` is
+    // excluded from `_is_any_scan_running`'s busy set by default, so a parked
+    // spy scan lands in `waiting`, not `running`. Without this fallback the
+    // wait-state banner would silently disappear.
+    const spy =
+      (run && run.scan_type === "spy" && run.kind !== "options"
+        && String(run.status || "").startsWith("running")) ? run
+      : waiting.find((w) => w.scan_type === "spy" && String(w.status || "").startsWith("running"));
+    if (spy) blocks.push(scanActivitySpy(spy));
   } catch (e) { /* portfolio app unreachable / not authed — skip */ }
-  try {
-    const scans = await (await fetch("/api/spy-scans")).json();
-    const run = Array.isArray(scans) ? scans.find((s) => s.status && s.status.startsWith("running")) : null;
-    if (run) blocks.push(scanActivitySpy(run));
-  } catch (e) { /* skip */ }
 
   if (!blocks.length) { box.hidden = true; box.innerHTML = ""; return; }
   box.innerHTML = '<div class="panel-title">[ Scan in progress ]</div>' + blocks.join("");
