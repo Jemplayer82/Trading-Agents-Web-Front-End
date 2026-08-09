@@ -304,7 +304,7 @@ def test_limit_2_caps_concurrency_at_2(tmp_path, monkeypatch):
 
     state, _ = orch.run("AAPL", "2026-08-08")
 
-    assert peak[0] <= 2
+    assert peak[0] == 2
     for _, report_key in _ANALYST_FACTORY_MAP.values():
         assert state[report_key]
 
