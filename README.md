@@ -773,4 +773,27 @@ This project builds on the open-source [TradingAgents](https://github.com/Tauric
 
 Powered by FastAPI, LangChain, yfinance, stockstats, lightweight-charts, APScheduler, and many other open-source libraries.
 
+---
+
+#### `[ why v2.0 ]`
+
+This release jumps from 1.2.1 straight to 2.0 because it isn't another
+feature — it's a full efficiency and reliability pass across the whole deep-
+analysis and paper-trading pipeline, roughly 140 commits deep. The 2 equity
+scans and 3 options-account builds that overlap most trading days used to
+independently re-run the same expensive multi-agent pipeline for the same
+tickers; they now share and reuse same-day results. Debate and research
+prompts stopped re-embedding full reports on every round. The Research
+Manager and every allocator moved off a deep model that had a documented live
+failure mode onto the quick model the codebase already trusted more for
+guardrailed synthesis. Options accounts no longer sit blocked behind one
+account's market-open wait. The nightly outcome sweep, the quick scanner, and
+the Agent Bus itself all cut their round-trip counts by an order of magnitude
+or more. And the core orchestrator gained real parallel-analyst execution and
+per-call LLM gating, engineered carefully around this project's own
+documented host-memory limits. None of it changes what the dashboard does —
+only how much it costs in time, tokens, and reliability to do it. That's a
+big enough body of work under the hood to earn a major version number, even
+without a breaking API change to point to.
+
 <img src="assets/fathom-footer-banner.svg" alt="Fathom Works — sound the depths before you set a course" width="100%">

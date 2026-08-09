@@ -8,6 +8,15 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-08-09
+
+Major version: this release is a full efficiency and reliability overhaul of
+the deep-analysis and paper-trading pipeline — same-day dedup across
+overlapping scans, prompt/context diet, wall-clock/architecture fixes,
+reduced web/bus chatter, and parallel-analyst execution in the core
+orchestrator, spanning 140+ commits. See the note at the end of the README
+for the full rationale.
+
 ### Added
 
 - **Trailing stop — winners ride, gains lock.** "Let it ride" now means what
