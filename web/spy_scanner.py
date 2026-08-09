@@ -15,10 +15,12 @@ in db.count_active_single, so they can't permanently throttle the scanner.
 The same DynamicGate still sizes to `max(1, TOTAL - active_singles)` and
 therefore still caps LLM concurrency, but the permit is now taken per
 `llm.invoke()` inside `SwitchboardOrchestrator` rather than per whole dive.
-`run_deep_dives` widens its worker pool to `2 * OLLAMA_MAX_CONCURRENCY`
-(`budget`) so a dive blocked on a tool fetch doesn't idle gate capacity.
-`DEEP_DIVE_PER_CALL_GATING` controls both halves together — gating position
-and pool size — and must be flipped as a single switch.
+`run_deep_dives` sizes its worker pool to `OLLAMA_MAX_CONCURRENCY` (`budget`)
+by default even under per-call gating; a dive blocked on a tool fetch doesn't
+idle gate capacity because the permit is released around the fetch.
+`DEEP_DIVE_POOL_MULTIPLIER` is the separate, explicit opt-in knob for widening
+the pool beyond `budget`. `DEEP_DIVE_PER_CALL_GATING` controls only gating
+POSITION (per-dive vs per-call) for the deadlock-safety reason.
 
 Cancellation is cooperative: the cancel endpoint sets
 spy_scans.cancel_requested=1; workers check it between tickers and raise
@@ -292,35 +294,58 @@ def _quick_batch_size() -> int:
 
 
 def _per_call_gating_enabled() -> bool:
-    """Kill switch for per-LLM-call gate acquisition AND the widened deep-dive
-    pool (env DEEP_DIVE_PER_CALL_GATING, read at call time, default on).
+    """Kill switch for per-LLM-call gate acquisition (env
+    DEEP_DIVE_PER_CALL_GATING, read at call time, default on).
 
     ON: a dive holds a gate permit only for the duration of one llm.invoke
     (SwitchboardOrchestrator(gate=...)), so a dive parked on a slow news or
     price fetch stops squatting on capacity it isn't using. LLM concurrency is
-    then capped by the gate itself rather than the pool, so the pool admits ~2x
-    budget dives and lets their non-LLM phases overlap.
-    OFF: restores BOTH the old per-dive `with gate:` wrapper AND the old
-    max_workers=budget pool.
+    then capped by the gate itself rather than the pool.
+    OFF: restores the old per-dive `with gate:` wrapper; the orchestrator is
+    ungated and the pool remains budget-sized.
 
-    The two halves cannot be split, and not merely for tidiness as with
-    options_engine._slot_release_enabled — splitting them DEADLOCKS. If a dive
-    held a whole-dive permit while the orchestrator inside it also acquired one
-    per call, `budget` dives would pin `budget` units and every per-call
-    acquire would wait forever (DynamicGate.acquire only admits while
-    in_use == 0 or in_use + weight <= limit). run_deep_dives therefore resolves
-    this flag ONCE per scan and uses that single value for both decisions; it
-    must never be re-read mid-scan.
+    This flag controls only WHERE the gate permit is taken (per-dive vs
+    per-call). It must not be split from pool width merely for the deadlock
+    reason: if a dive held a whole-dive permit while the orchestrator inside it
+    also acquired one per call, `budget` dives would pin `budget` units and
+    every per-call acquire would wait forever (DynamicGate.acquire only admits
+    while in_use == 0 or in_use + weight <= limit). run_deep_dives therefore
+    resolves this flag ONCE per scan and uses that single value for the gating
+    position decision; it must never be re-read mid-scan. Pool WIDTH is
+    controlled separately by `_deep_dive_pool_multiplier()` /
+    `DEEP_DIVE_POOL_MULTIPLIER`, which defaults to no widening.
 
     Why a switch exists at all: this container runs under mem_limit 4g and two
     host-level OOMs from concurrent scan activity are on record (see the
-    _SCAN_LOCK comment in web/portfolio_routes.py::start_scan). More concurrent
-    dives means more in-flight pipeline state, so an operator needs a rollback
-    that doesn't require a code revert.
+    _SCAN_LOCK comment in web/portfolio_routes.py::start_scan). Per-call gating
+    alone is cheap in memory; widening the pool beyond the gate budget is an
+    explicit, separate opt-in.
     """
     return os.environ.get("DEEP_DIVE_PER_CALL_GATING", "1").strip().lower() not in {
         "0", "false", "no", "off"
     }
+
+
+def _deep_dive_pool_multiplier() -> int:
+    """Separate opt-in knob for the deep-dive worker-pool width.
+
+    Reads env var ``DEEP_DIVE_POOL_MULTIPLIER`` at call time. Defaults to 1
+    (no widening) when unset, empty, or invalid. Valid integers are floored at 1.
+
+    This is intentionally independent from ``DEEP_DIVE_PER_CALL_GATING``.
+    The deadlock argument in ``_per_call_gating_enabled`` only constrains
+    WHERE the gate permit is acquired (per-dive ``with gate:`` vs per-call
+    ``gate.acquire()`` inside the orchestrator), never how wide the worker
+    pool is allowed to be. Bundling pool width into that same flag meant
+    per-call gating (the default) silently doubled peak in-flight dives on a
+    ``mem_limit: 4g`` container with two prior host-OOM SIGKILLs on record.
+    Widening the pool beyond the gate budget is now an explicit, separate
+    opt-in for an operator who wants that extra throughput.
+    """
+    try:
+        return max(1, int(os.environ.get("DEEP_DIVE_POOL_MULTIPLIER", "1").strip()))
+    except (ValueError, TypeError):
+        return 1
 
 
 def _build_quick_batch_prompt(rows: list[dict[str, Any]]) -> str:
@@ -978,11 +1003,13 @@ def run_deep_dives(
     dive. That means a dive parked on a slow tool fetch (news, prices)
     does not squat on LLM capacity it isn't using. The gate itself — sized
     to OLLAMA_MAX_CONCURRENCY via _total_budget() — therefore caps real LLM
-    concurrency, so the worker pool is widened to 2*budget to let non-LLM
-    phases overlap. Set DEEP_DIVE_PER_CALL_GATING=0 to revert BOTH halves
-    together (per-dive gating + budget-sized pool); splitting them would
-    deadlock because a whole-dive permit plus an inner per-call permit would
-    pin the gate forever.
+    concurrency. The worker pool defaults to `budget` even under per-call
+    gating; set DEEP_DIVE_POOL_MULTIPLIER=N (default 1) to widen admission
+    to N*budget and let more non-LLM phases overlap. Set
+    DEEP_DIVE_PER_CALL_GATING=0 to revert to per-dive gating (the
+    orchestrator ungated, max_workers=budget); splitting per-dive-vs-per-call
+    GATING POSITION from that flag would deadlock because a whole-dive permit
+    plus an inner per-call permit would pin the gate forever.
     """
     log.info("[spy %s] deep dive on %d tickers", scan_id, len(candidates))
     db.update_spy_scan(scan_id, status="running_deep", deep_total=len(candidates))
@@ -1001,9 +1028,12 @@ def run_deep_dives(
     budget = _total_budget()
 
     per_call_gating = _per_call_gating_enabled()
+    pool_multiplier = _deep_dive_pool_multiplier()
     # Gate CAPACITY is unchanged either way (DynamicGate(budget) below); only
-    # the pool width and WHERE the permit is taken change.
-    pool_size = budget * 2 if per_call_gating else budget
+    # WHERE the permit is taken changes with per_call_gating. Pool width is
+    # the separate _deep_dive_pool_multiplier() / DEEP_DIVE_POOL_MULTIPLIER
+    # knob, which defaults to no widening.
+    pool_size = budget * pool_multiplier if per_call_gating else budget
     log.info(
         "[spy %s] deep dive: per-call gating %s, pool=%d, gate budget=%d",
         scan_id, "on" if per_call_gating else "off", pool_size, budget,

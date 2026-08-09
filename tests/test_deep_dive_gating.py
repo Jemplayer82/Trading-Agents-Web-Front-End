@@ -2,10 +2,12 @@
 
 run_deep_dives now passes the DynamicGate into SwitchboardOrchestrator so a
 dive holds a permit only for each llm.invoke, not for its entire multi-agent
-run. The worker pool is widened to 2*budget because the gate itself caps real
-LLM concurrency. The DEEP_DIVE_PER_CALL_GATING env var defaults ON and rolls
-both halves (per-call gating + widened pool) back together; splitting them
-would deadlock.
+run. The worker pool defaults to `budget` (i.e. `OLLAMA_MAX_CONCURRENCY`)
+even under per-call gating; `DEEP_DIVE_POOL_MULTIPLIER` is the separate,
+explicit opt-in knob for widening it. The DEEP_DIVE_PER_CALL_GATING env var
+defaults ON and still rolls the gating position (per-dive vs per-call) back
+together with the legacy kill switch; splitting that gating position from the
+flag would deadlock.
 """
 
 import threading
@@ -198,11 +200,25 @@ def test_reuse_path_also_receives_the_gate(
     assert all(o.gate is not None for o in _RECORDED_ORCHESTRATORS)
 
 
-def test_pool_width_doubles_by_default(
+def test_pool_width_matches_budget_by_default(
+    tmp_db, monkeypatch, tmp_path, recording_orch, recording_pool,
+):
+    monkeypatch.delenv("DEEP_DIVE_PER_CALL_GATING", raising=False)
+    monkeypatch.delenv("DEEP_DIVE_POOL_MULTIPLIER", raising=False)
+    monkeypatch.setenv("OLLAMA_MAX_CONCURRENCY", "3")
+    recording_orch()
+
+    _run(monkeypatch, tickers=("AAPL",))
+
+    assert _CAPTURED_POOL_SIZES == [3]
+
+
+def test_pool_width_widens_with_explicit_multiplier(
     tmp_db, monkeypatch, tmp_path, recording_orch, recording_pool,
 ):
     monkeypatch.delenv("DEEP_DIVE_PER_CALL_GATING", raising=False)
     monkeypatch.setenv("OLLAMA_MAX_CONCURRENCY", "3")
+    monkeypatch.setenv("DEEP_DIVE_POOL_MULTIPLIER", "2")
     recording_orch()
 
     _run(monkeypatch, tickers=("AAPL",))
@@ -297,6 +313,19 @@ def test_failed_dive_still_releases_the_legacy_per_dive_permit(
     assert gate.acquires == gate.releases
 
 
+def test_pool_multiplier_ignored_when_gating_off(
+    tmp_db, monkeypatch, tmp_path, recording_orch, recording_pool,
+):
+    monkeypatch.setenv("DEEP_DIVE_PER_CALL_GATING", "0")
+    monkeypatch.setenv("OLLAMA_MAX_CONCURRENCY", "3")
+    monkeypatch.setenv("DEEP_DIVE_POOL_MULTIPLIER", "5")
+    recording_orch()
+
+    _run(monkeypatch, tickers=("AAPL",))
+
+    assert _CAPTURED_POOL_SIZES == [3]
+
+
 # ---------- kill switch parsing ----------
 
 @pytest.mark.parametrize("value,expected", [
@@ -319,6 +348,24 @@ def test_kill_switch_parsing(value, expected, monkeypatch):
     else:
         monkeypatch.setenv("DEEP_DIVE_PER_CALL_GATING", value)
     assert spy_scanner._per_call_gating_enabled() == expected
+
+
+@pytest.mark.parametrize("value,expected", [
+    (None, 1),
+    ("", 1),
+    ("1", 1),
+    ("2", 2),
+    ("0", 1),
+    ("-5", 1),
+    ("not-a-number", 1),
+    (" 3 ", 3),
+])
+def test_pool_multiplier_parsing(value, expected, monkeypatch):
+    if value is None:
+        monkeypatch.delenv("DEEP_DIVE_POOL_MULTIPLIER", raising=False)
+    else:
+        monkeypatch.setenv("DEEP_DIVE_POOL_MULTIPLIER", value)
+    assert spy_scanner._deep_dive_pool_multiplier() == expected
 
 
 # ---------- behavioural equivalence ----------
