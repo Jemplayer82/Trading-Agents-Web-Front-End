@@ -62,6 +62,7 @@ def test_gate_limits_concurrency():
 
     assert not errors
     assert max_seen <= 2
+    assert max_seen == 2
     assert not any(t.is_alive() for t in threads)
 
 
