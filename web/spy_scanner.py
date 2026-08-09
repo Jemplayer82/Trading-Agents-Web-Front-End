@@ -365,6 +365,81 @@ def _quick_scan_one(
                 "reasoning": f"scan error: {exc}", "entry_price": 0.0, "error": str(exc)}
 
 
+def _quick_scan_batch(rows: list[dict[str, Any]], llm, gate=None) -> list[dict[str, Any]]:
+    """Score multiple tickers in one LLM round-trip.
+
+    Never raises — any terminal failure comes back as a HOLD/conviction-1
+    row with an "error" key for every ticker in the batch, so one failed call
+    does not cascade into per-ticker retries.
+    """
+    tickers = [r["ticker"] for r in rows]
+    try:
+        raw = _invoke_with_retry(
+            llm,
+            [
+                {"role": "system", "content": QUICK_SCAN_BATCH_SYSTEM},
+                {"role": "user", "content": _build_quick_batch_prompt(rows)},
+            ],
+            label=f"batch of {len(rows)}",
+            gate=gate,
+        )
+    except Exception as exc:
+        log.warning("Quick scan batch failed (%d tickers): %s", len(rows), exc)
+        return [
+            {
+                "ticker": t,
+                "signal": "HOLD",
+                "conviction": 1,
+                "reasoning": f"scan error: {exc}",
+                "entry_price": 0.0,
+                "error": str(exc),
+            }
+            for t in tickers
+        ]
+
+    parsed = _parse_quick_batch_response(raw, tickers)
+    out: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for r in rows:
+        t = r["ticker"]
+        if t in parsed:
+            signal, conviction, reasoning = parsed[t]
+            out.append({
+                "ticker": t,
+                "signal": signal,
+                "conviction": conviction,
+                "reasoning": reasoning,
+                "entry_price": r["price"],
+            })
+        else:
+            # Deliberately mark an unparseable/missing line with an error key:
+            # (a) assert_quick_scan_healthy keys off `error` to catch wholesale
+            # LLM/infra breakage — the exact failure it was built for (150/150
+            # tickers 404'd on a retired model name and the scan reported GREEN
+            # with an empty portfolio). Batching means one round-trip covers ~20
+            # tickers, so a systemically broken output format would otherwise
+            # leave that guard completely blind, while one flaky row per batch
+            # stays far under the 50% threshold.
+            # (b) db.find_reusable_quick_results (web/db.py:1243) excludes
+            # rows with a non-null error, so a garbage row can never be donated
+            # to another same-day scan.
+            missing.append(t)
+            out.append({
+                "ticker": t,
+                "signal": "HOLD",
+                "conviction": 5,
+                "reasoning": "batch response line missing or unparsable",
+                "entry_price": r["price"],
+                "error": "batch line unparsed",
+            })
+    if missing:
+        log.warning(
+            "[quick] batch: %d/%d tickers had no parsable line: %s",
+            len(missing), len(rows), ", ".join(missing),
+        )
+    return out
+
+
 def _quick_scan_fingerprint(config: dict[str, Any]) -> str:
     """Stable fingerprint of the quick-scan LLM config, for same-day reuse of
     quick-scan signal/conviction across scans (see run_quick_scan and
@@ -465,12 +540,24 @@ def run_quick_scan(
     trade_date: str,
     config: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Fetch bulk price data then score each ticker with a lightweight LLM call.
+    """Fetch bulk price data then score tickers in batched LLM round-trips.
 
     One yf.download covers all ~500 tickers (per-ticker downloads get rate
     limited); tickers missing from the result are scored on empty data and
-    come back HOLD/1. quick_count is flushed to the DB every 50 completions,
-    and the cancel flag is checked per completed future.
+    come back HOLD/1. Tickers with enough data are grouped into batches of
+    `_quick_batch_size()` (default 20) and submitted to a ThreadPoolExecutor
+    whose size is capped by the concurrency budget. Each batch goes through the
+    DynamicGate as a single LLM call, so 429 backoff happens at the batch level,
+    progress is flushed to the DB once per completed batch, and the cancel flag
+    is checked once per completed batch. This cuts ~500 bus round-trips down
+    to ~25 for a full S&P universe; set QUICK_SCAN_BATCH_SIZE=1 to restore
+    the old one-call-per-ticker behaviour.
+
+    A ticker whose response line cannot be parsed degrades to HOLD/conviction-5
+    with an `error` key, while the rest of its batch is unaffected. A batch
+    containing exactly one ticker falls back to `_quick_scan_one` so the
+    single-ticker path stays exercised. Same-day reuse hits and tickers with
+    insufficient price data are resolved in a pre-pass and never enter a batch.
 
     Same-day reuse (config["quick_scan_reuse"], default on): before scoring,
     fetch signal/conviction/reasoning for any ticker already scored today by
@@ -529,65 +616,118 @@ def run_quick_scan(
                 scan_id, len(reuse_map), len(tickers),
             )
 
+    if db.is_spy_scan_cancelled(scan_id):
+        raise ScanCancelled()
+
+    pre_rows: list[dict[str, Any]] = []
+    feature_rows: list[dict[str, Any]] = []
+
+    def _record(row: dict[str, Any]) -> None:
+        nonlocal completed, quick_reused
+        results.append(row)
+        if row.get("reused_quick"):
+            quick_reused += 1
+        db.upsert_spy_quick_result(
+            scan_id=scan_id,
+            ticker=row["ticker"],
+            signal=row.get("signal"),
+            conviction=row.get("conviction"),
+            reasoning=row.get("reasoning"),
+            error=row.get("error"),
+        )
+        completed += 1
+
+    for t in tickers:
+        price_data = price_data_map.get(t, {"close": [], "volume": []})
+        closes = price_data.get("close", [])
+        cached = reuse_map.get(t)
+        if cached is not None and len(closes) >= 5:
+            # entry_price is taken from the cached same-day bulk price
+            # bars. The cache TTL is short (~15 min), so this stays
+            # within an execution-tolerable window; a ticker missing
+            # from the cached bars cannot be reused at all and falls
+            # through to the normal LLM path.
+            pre_rows.append({
+                "ticker": t,
+                "signal": cached["signal"],
+                "conviction": cached["conviction"],
+                "reasoning": cached["reasoning"],
+                "entry_price": float(closes[-1]),
+                "reused_quick": True,
+            })
+            continue
+        feats = _quick_features(t, price_data, "Unknown")
+        if feats is None:
+            pre_rows.append({
+                "ticker": t,
+                "signal": "HOLD",
+                "conviction": 1,
+                "reasoning": "Insufficient price data.",
+                "entry_price": 0.0,
+            })
+            continue
+        feature_rows.append(feats)
+
+    for row in pre_rows:
+        _record(row)
+    db.update_spy_scan(scan_id, quick_count=completed)
+
+    size = _quick_batch_size()
+    batches = [feature_rows[i:i + size] for i in range(0, len(feature_rows), size)]
+    log.info(
+        "[spy %s] quick scan: %d tickers -> %d LLM batches (size %d), %d reused, %d without price data",
+        scan_id,
+        len(tickers),
+        len(batches),
+        size,
+        quick_reused,
+        len(pre_rows) - quick_reused,
+    )
+
     with _GateMonitor(DynamicGate(budget)) as gate:
-        def _scan_one(t: str) -> dict[str, Any]:
+        def _scan_batch(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if db.is_spy_scan_cancelled(scan_id):
-                return {"ticker": t, "signal": "HOLD", "conviction": 0,
-                        "reasoning": "cancelled", "entry_price": 0.0, "skipped": True}
-            price_data = price_data_map.get(t, {"close": [], "volume": []})
-            cached = reuse_map.get(t)
-            if cached is not None:
-                closes = price_data.get("close", [])
-                # entry_price is taken from the cached same-day bulk price
-                # bars. The cache TTL is short (~15 min), so this stays
-                # within an execution-tolerable window; a ticker missing
-                # from the cached bars cannot be reused at all and falls
-                # through to the normal LLM path.
-                if len(closes) >= 5:
-                    return {
-                        "ticker": t,
-                        "signal": cached["signal"],
-                        "conviction": cached["conviction"],
-                        "reasoning": cached["reasoning"],
-                        "entry_price": float(closes[-1]),
-                        "reused_quick": True,
+                return [
+                    {
+                        "ticker": r["ticker"],
+                        "signal": "HOLD",
+                        "conviction": 0,
+                        "reasoning": "cancelled",
+                        "entry_price": 0.0,
+                        "skipped": True,
                     }
-            return _quick_scan_one(t, price_data, "Unknown", llm, gate)
+                    for r in rows
+                ]
+            if len(rows) == 1:
+                r = rows[0]
+                return [_quick_scan_one(r["ticker"], r["price_data"], r["sector"], llm, gate)]
+            return _quick_scan_batch(rows, llm, gate)
 
         with ThreadPoolExecutor(max_workers=budget) as pool:
-            futures = {pool.submit(_scan_one, t): t for t in tickers}
+            futures = {pool.submit(_scan_batch, batch): batch for batch in batches}
             for fut in as_completed(futures):
                 # Drop the entry as soon as this result is consumed. Left in
-                # place, every completed Future (holding its full result dict —
+                # place, every completed Future (holding its full result list —
                 # reasoning/error text included) stays referenced for the rest
                 # of the scan even after nothing needs it, pinning up to 500
                 # results in memory that GC can't reclaim. Same shape as the
                 # cleo fix in scripts/cleo_llm_handler.py (commit 15f3a2a):
                 # never hold more than necessary once it's been consumed.
                 del futures[fut]
-                result = fut.result()
-                if result.get("skipped"):
-                    continue
-                results.append(result)
-                if result.get("reused_quick"):
-                    quick_reused += 1
-                db.upsert_spy_quick_result(
-                    scan_id=scan_id,
-                    ticker=result["ticker"],
-                    signal=result.get("signal"),
-                    conviction=result.get("conviction"),
-                    reasoning=result.get("reasoning"),
-                    error=result.get("error"),
-                )
-                completed += 1
-                if completed % 50 == 0 or completed == len(tickers):
-                    db.update_spy_scan(scan_id, quick_count=completed)
-                    log.info("[spy %s] quick scan %d/%d done", scan_id, completed, len(tickers))
+                batch_rows = fut.result()
+                for row in batch_rows:
+                    if row.get("skipped"):
+                        continue
+                    _record(row)
+                db.update_spy_scan(scan_id, quick_count=completed)
+                log.info("[spy %s] quick scan %d/%d done", scan_id, completed, len(tickers))
 
                 if db.is_spy_scan_cancelled(scan_id):
                     log.info("[spy %s] cancellation requested — stopping quick scan", scan_id)
                     pool.shutdown(wait=False, cancel_futures=True)
                     raise ScanCancelled()
+
+    db.update_spy_scan(scan_id, quick_count=completed)
 
     if quick_reused:
         log.info("[spy %s] quick scan: reused %d/%d LLM calls", scan_id, quick_reused, len(results))
