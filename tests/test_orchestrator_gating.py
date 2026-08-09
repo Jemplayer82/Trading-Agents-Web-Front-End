@@ -5,6 +5,8 @@ is supplied, and the default (gate=None) must preserve the pre-existing
 object graph byte-for-byte.
 """
 
+from unittest.mock import MagicMock
+
 import pytest
 from langchain_core.messages import AIMessage
 
@@ -38,8 +40,9 @@ def _config(tmp_path, extra_config=None):
 def offline_orchestrator_factory(tmp_path, monkeypatch):
     """Build an orchestrator against offline stub LLM clients.
 
-    Returns a callable ``factory(gate=None, selected_analysts=None,
-    extra_config=None) -> (orchestrator, fake_deep_llm, fake_quick_llm)``.
+    Returns a callable ``factory(gate=None, tool_gate=None,
+    selected_analysts=None, extra_config=None) -> (orchestrator, fake_deep_llm,
+    fake_quick_llm)``.
     """
 
     class StubClient:
@@ -49,7 +52,7 @@ def offline_orchestrator_factory(tmp_path, monkeypatch):
         def get_llm(self):
             return self._llm
 
-    def factory(gate=None, selected_analysts=None, extra_config=None):
+    def factory(gate=None, tool_gate=None, selected_analysts=None, extra_config=None):
         fakes = {}
 
         def fake_create_llm_client(
@@ -67,6 +70,7 @@ def offline_orchestrator_factory(tmp_path, monkeypatch):
             config=_config(tmp_path, extra_config),
             selected_analysts=selected_analysts,
             gate=gate,
+            tool_gate=tool_gate,
         )
         orchestrator.signal_processor.process_signal = lambda decision: "Buy"
         return orchestrator, fakes.get("deep"), fakes.get("quick")
@@ -124,7 +128,49 @@ def _news_factory(report_key):
     return factory
 
 
-def _patch_all_factories(monkeypatch, market_factory=None, portfolio_manager_factory=None):
+def _tool_looping_analyst_factory(report_key, tool_name):
+    """Return a factory that, when called with an LLM, returns an analyst node
+    that calls a fake tool on its first invocation and returns a final report
+    on its second."""
+    def factory(llm):
+        calls = 0
+
+        def node(state):
+            nonlocal calls
+            llm.invoke("prompt")
+            calls += 1
+            if calls == 1:
+                return {
+                    "messages": [AIMessage(
+                        content="",
+                        tool_calls=[{"name": tool_name, "args": {}, "id": f"tc_{report_key}"}],
+                    )],
+                    report_key: "",
+                }
+            return {
+                "messages": [AIMessage(content="report", tool_calls=[])],
+                report_key: "report",
+            }
+
+        return node
+
+    return factory
+
+
+def _tool_looping_news_factory(tool_name):
+    def factory(llm, macro_brief=None):
+        return _tool_looping_analyst_factory("news_report", tool_name)(llm)
+    return factory
+
+
+def _patch_all_factories(
+    monkeypatch,
+    market_factory=None,
+    sentiment_factory=None,
+    news_factory=None,
+    fundamentals_factory=None,
+    portfolio_manager_factory=None,
+):
     """Replace every create_* factory run() and rerun_decision() use.
 
     Each returned node calls its received LLM exactly once and returns the
@@ -134,13 +180,17 @@ def _patch_all_factories(monkeypatch, market_factory=None, portfolio_manager_fac
         market_factory = _make_invoking_node(_analyst_update("market_report"))
     monkeypatch.setattr(sbo_module, "create_market_analyst", market_factory)
 
-    monkeypatch.setattr(
-        sbo_module, "create_sentiment_analyst", _make_invoking_node(_analyst_update("sentiment_report"))
-    )
-    monkeypatch.setattr(sbo_module, "create_news_analyst", _news_factory("news_report"))
-    monkeypatch.setattr(
-        sbo_module, "create_fundamentals_analyst", _make_invoking_node(_analyst_update("fundamentals_report"))
-    )
+    if sentiment_factory is None:
+        sentiment_factory = _make_invoking_node(_analyst_update("sentiment_report"))
+    monkeypatch.setattr(sbo_module, "create_sentiment_analyst", sentiment_factory)
+
+    if news_factory is None:
+        news_factory = _news_factory("news_report")
+    monkeypatch.setattr(sbo_module, "create_news_analyst", news_factory)
+
+    if fundamentals_factory is None:
+        fundamentals_factory = _make_invoking_node(_analyst_update("fundamentals_report"))
+    monkeypatch.setattr(sbo_module, "create_fundamentals_analyst", fundamentals_factory)
 
     monkeypatch.setattr(
         sbo_module, "create_bull_researcher", _make_invoking_node({"investment_debate_state": _investment_debate_state()})
@@ -426,3 +476,87 @@ def test_factories_still_receive_the_orchestrators_own_llm_object(offline_orches
     assert captured["market_llm"] is orch._quick_llm
     assert captured["pm_llm"] is orch._deep_llm
 
+
+def test_tool_gate_counts_real_tool_calls_and_llm_gate_unaffected(offline_orchestrator_factory, monkeypatch):
+    llm_gate = CountingGate()
+    tool_gate = CountingGate()
+    orch, *_ = offline_orchestrator_factory(
+        gate=llm_gate,
+        tool_gate=tool_gate,
+        selected_analysts=["market"],
+        extra_config={"analyst_concurrency_limit": 1},
+    )
+
+    fake_tool = MagicMock()
+    fake_tool.invoke.return_value = "ok"
+    monkeypatch.setitem(sbo_module._TOOL_MAP, "fake_tool_for_test_real", fake_tool)
+
+    _patch_all_factories(
+        monkeypatch,
+        market_factory=_tool_looping_analyst_factory("market_report", "fake_tool_for_test_real"),
+    )
+
+    state, signal = orch.run("AAPL", "2026-08-08")
+
+    assert signal == "Buy"
+    assert fake_tool.invoke.call_count == 1
+    assert tool_gate.acquires == 1
+    assert tool_gate.releases == 1
+    assert tool_gate.held == 0
+    # 2 market-analyst LLM turns + 8 downstream nodes; the tool gate must not
+    # inflate or deflate the LLM gate count.
+    assert llm_gate.acquires == 10
+    assert llm_gate.releases == 10
+
+
+def test_shared_tool_gate_bounds_concurrent_tool_dispatches(offline_orchestrator_factory, monkeypatch):
+    llm_gate = CountingGate()
+    tool_gate = CountingGate()
+    orch, *_ = offline_orchestrator_factory(
+        gate=llm_gate,
+        tool_gate=tool_gate,
+        selected_analysts=["market", "social", "news", "fundamentals"],
+        extra_config={"analyst_concurrency_limit": 4},
+    )
+
+    fake_tool = MagicMock()
+    fake_tool.invoke.return_value = "ok"
+    monkeypatch.setitem(sbo_module._TOOL_MAP, "fake_tool_for_test_real", fake_tool)
+
+    _patch_all_factories(
+        monkeypatch,
+        market_factory=_tool_looping_analyst_factory("market_report", "fake_tool_for_test_real"),
+        sentiment_factory=_tool_looping_analyst_factory("sentiment_report", "fake_tool_for_test_real"),
+        news_factory=_tool_looping_news_factory("fake_tool_for_test_real"),
+        fundamentals_factory=_tool_looping_analyst_factory("fundamentals_report", "fake_tool_for_test_real"),
+    )
+
+    state, signal = orch.run("AAPL", "2026-08-08")
+
+    assert signal == "Buy"
+    assert fake_tool.invoke.call_count == 4
+    assert tool_gate.acquires == 4
+    assert tool_gate.releases == 4
+    assert tool_gate.max_held <= 4
+
+
+def test_tool_gate_none_leaves_tool_calls_ungated(offline_orchestrator_factory, monkeypatch):
+    orch, *_ = offline_orchestrator_factory(
+        tool_gate=None,
+        selected_analysts=["market"],
+        extra_config={"analyst_concurrency_limit": 1},
+    )
+
+    fake_tool = MagicMock()
+    fake_tool.invoke.return_value = "ok"
+    monkeypatch.setitem(sbo_module._TOOL_MAP, "fake_tool_for_test_real", fake_tool)
+
+    _patch_all_factories(
+        monkeypatch,
+        market_factory=_tool_looping_analyst_factory("market_report", "fake_tool_for_test_real"),
+    )
+
+    state, signal = orch.run("AAPL", "2026-08-08")
+
+    assert signal == "Buy"
+    assert fake_tool.invoke.call_count == 1

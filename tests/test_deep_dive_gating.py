@@ -68,8 +68,9 @@ class CountingGate(spy_scanner.DynamicGate):
 
 def _recording_orchestrator_cls(tmp_path, *, forbid_run=False, run_raises=None, rerun_raises=None):
     class RecordingOrchestrator:
-        def __init__(self, config=None, selected_analysts=None, gate=None, **kw):
+        def __init__(self, config=None, selected_analysts=None, gate=None, tool_gate=None, **kw):
             self.gate = gate
+            self.tool_gate = tool_gate
             self.memory_log = TradingMemoryLog({"memory_log_path": str(tmp_path / "mem.md")})
             _RECORDED_ORCHESTRATORS.append(self)
 
@@ -181,6 +182,22 @@ def test_default_passes_the_gate_to_the_orchestrator_and_takes_no_per_dive_permi
     assert _CONSTRUCTED_GATES[0].releases == 0
 
 
+def test_default_passes_the_tool_gate_to_the_orchestrator(
+    tmp_db, monkeypatch, tmp_path, counting_gate, recording_orch, recording_pool,
+):
+    monkeypatch.delenv("DEEP_DIVE_PER_CALL_GATING", raising=False)
+    monkeypatch.delenv("DEEP_DIVE_TOOL_CONCURRENCY", raising=False)
+    monkeypatch.setenv("OLLAMA_MAX_CONCURRENCY", "3")
+    recording_orch()
+
+    scan_id, enriched = _run(monkeypatch, tickers=("AAPL", "MSFT", "TSLA"))
+
+    assert len(enriched) == 3
+    tool_gates = [o.tool_gate for o in _RECORDED_ORCHESTRATORS]
+    assert all(g is not None for g in tool_gates), tool_gates
+    assert len({id(g) for g in tool_gates}) == 1, "every orchestrator must receive the same tool_gate instance"
+
+
 def test_reuse_path_also_receives_the_gate(
     tmp_db, monkeypatch, tmp_path, counting_gate, recording_orch, recording_pool,
 ):
@@ -238,6 +255,30 @@ def test_gate_capacity_is_unchanged_by_the_switch(
     assert _CONSTRUCTED_GATES[0].limit == 3
 
 
+def test_tool_gate_default_limit_equals_budget(
+    tmp_db, monkeypatch, tmp_path, counting_gate, recording_orch, recording_pool,
+):
+    monkeypatch.delenv("DEEP_DIVE_TOOL_CONCURRENCY", raising=False)
+    monkeypatch.setenv("OLLAMA_MAX_CONCURRENCY", "3")
+    recording_orch()
+
+    _run(monkeypatch, tickers=("AAPL",))
+
+    assert _CONSTRUCTED_GATES[1].limit == 3
+
+
+def test_tool_gate_limit_overridden_by_env(
+    tmp_db, monkeypatch, tmp_path, counting_gate, recording_orch, recording_pool,
+):
+    monkeypatch.setenv("DEEP_DIVE_TOOL_CONCURRENCY", "2")
+    monkeypatch.setenv("OLLAMA_MAX_CONCURRENCY", "3")
+    recording_orch()
+
+    _run(monkeypatch, tickers=("AAPL",))
+
+    assert _CONSTRUCTED_GATES[1].limit == 2
+
+
 def test_flag_is_resolved_exactly_once_per_scan(
     tmp_db, monkeypatch, tmp_path, recording_orch, recording_pool,
 ):
@@ -257,6 +298,23 @@ def test_flag_is_resolved_exactly_once_per_scan(
     _run(monkeypatch, tickers=("AAPL", "MSFT", "TSLA", "NVDA"))
 
     assert len(calls) == 1, "flag must be resolved exactly once per scan (deadlock guard)"
+
+
+@pytest.mark.parametrize("value,budget,expected", [
+    (None, 5, 5),
+    ("", 5, 5),
+    ("not-a-number", 5, 5),
+    ("3", 5, 3),
+    ("0", 5, 1),
+    ("-2", 5, 1),
+    (" 4 ", 5, 4),
+])
+def test_tool_concurrency_parsing(value, budget, expected, monkeypatch):
+    if value is None:
+        monkeypatch.delenv("DEEP_DIVE_TOOL_CONCURRENCY", raising=False)
+    else:
+        monkeypatch.setenv("DEEP_DIVE_TOOL_CONCURRENCY", value)
+    assert spy_scanner._deep_dive_tool_concurrency(budget) == expected
 
 
 # ---------- kill switch OFF: both halves revert together ----------

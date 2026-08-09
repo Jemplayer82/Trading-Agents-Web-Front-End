@@ -11,11 +11,13 @@ doesn't recover — so this failure mode is never invisible again.
 """
 
 import logging
+import threading
 from unittest.mock import MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
+from tests.test_gated_llm import CountingGate
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.orchestrator import switchboard_orchestrator as sbo_module
 from tradingagents.orchestrator.switchboard_orchestrator import SwitchboardOrchestrator
@@ -30,6 +32,9 @@ def _make_orch_stub():
     stub.on_progress = None
     stub._emit = SwitchboardOrchestrator._emit.__get__(stub)
     stub._merge = SwitchboardOrchestrator._merge.__get__(stub)
+    stub._tool_gate = None
+    stub._tool_error_lock = threading.Lock()
+    stub.tool_error_count = 0
     return stub
 
 
@@ -98,6 +103,84 @@ class TestRunAnalystLoopTermination:
         # Still no crash, and the last message is the tool-calling one — the
         # orchestrator's existing "if report:" guard correctly skips emitting.
         assert node.call_count == 20
+
+
+class TestRunAnalystToolGating:
+    """Tool-call dispatch in _run_analyst is gated by self._tool_gate and
+    failures are counted and logged at ERROR.
+    """
+
+    def test_real_tool_call_acquires_and_releases_tool_gate(self, monkeypatch):
+        stub = _make_orch_stub()
+        gate = CountingGate()
+        stub._tool_gate = gate
+
+        fake_tool = MagicMock()
+        fake_tool.invoke.return_value = "tool result"
+        monkeypatch.setitem(sbo_module._TOOL_MAP, "fake_real_tool", fake_tool)
+
+        calls = [
+            {"messages": [AIMessage(content="", tool_calls=[{"name": "fake_real_tool", "args": {"x": 1}, "id": "call_1"}])]},
+            {"messages": [_ai_final("report after tool")]},
+        ]
+        node = MagicMock(side_effect=lambda state: calls.pop(0))
+        state = {"messages": [HumanMessage(content="AAPL")]}
+
+        SwitchboardOrchestrator._run_analyst(stub, node, state)
+
+        assert fake_tool.invoke.call_count == 1
+        assert gate.acquires == 1
+        assert gate.releases == 1
+        assert gate.held == 0
+        assert state["messages"][-1].content == "report after tool"
+
+    def test_failed_real_tool_call_counts_errors_and_releases_gate(self, monkeypatch, caplog):
+        stub = _make_orch_stub()
+        gate = CountingGate()
+        stub._tool_gate = gate
+
+        fake_tool = MagicMock()
+        fake_tool.invoke.side_effect = RuntimeError("fetch failed")
+        monkeypatch.setitem(sbo_module._TOOL_MAP, "fake_real_tool", fake_tool)
+
+        calls = [
+            {"messages": [AIMessage(content="", tool_calls=[{"name": "fake_real_tool", "args": {"x": 1}, "id": "call_1"}])]},
+            {"messages": [_ai_final("report despite error")]},
+        ]
+        node = MagicMock(side_effect=lambda state: calls.pop(0))
+        state = {"messages": [HumanMessage(content="AAPL")]}
+
+        with caplog.at_level(logging.ERROR):
+            SwitchboardOrchestrator._run_analyst(stub, node, state)
+
+        assert stub.tool_error_count == 1
+        assert gate.acquires == 1
+        assert gate.releases == 1
+        assert gate.held == 0
+        assert any(
+            "Tool call failed" in r.message and r.levelno == logging.ERROR
+            for r in caplog.records
+        )
+        assert state["messages"][-1].content == "report despite error"
+
+    def test_unknown_tool_branch_never_touches_gate_or_counter(self, monkeypatch, caplog):
+        stub = _make_orch_stub()
+        gate = CountingGate()
+        stub._tool_gate = gate
+
+        calls = [
+            {"messages": [AIMessage(content="", tool_calls=[{"name": "fake_tool_for_test", "args": {}, "id": "call_1"}])]},
+            {"messages": [_ai_final("report")]},
+        ]
+        node = MagicMock(side_effect=lambda state: calls.pop(0))
+        state = {"messages": [HumanMessage(content="AAPL")]}
+
+        SwitchboardOrchestrator._run_analyst(stub, node, state)
+
+        assert gate.acquires == 0
+        assert gate.releases == 0
+        assert gate.held == 0
+        assert stub.tool_error_count == 0
 
 
 class TestResearchManagerLlmSelection:

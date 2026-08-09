@@ -32,6 +32,17 @@ another acquire; callers must not also hold a whole-run permit on the same
 gate, because that would deadlock the nested acquire. See
 `web/spy_scanner.py`'s `DEEP_DIVE_PER_CALL_GATING`.
 
+Tool-fetch gating: the optional `tool_gate` constructor argument is
+duck-typed the same way as `gate`. When supplied, every real `_TOOL_MAP`
+dispatch (i.e. every `tool_fn.invoke()` call, not the "Unknown tool"
+short-circuit) takes and releases exactly one permit around that single
+outbound call. `tool_gate=None` (the default) leaves tool calls ungated,
+preserving today's behaviour byte-for-byte. This is a SEPARATE gate and
+concern from `gate` (the LLM-call gate) — the two must never be conflated
+or share one instance, because LLM calls and tool calls have different
+concurrency budgets and a shared instance would make the two axes interfere
+with each other for no reason.
+
 Known constraint (pre-existing, not introduced here):
 `tradingagents/dataflows/config.py`'s `set_config` / `get_config` pair is a
 bare module-level global that `__init__` writes and is NOT thread-local. This
@@ -164,6 +175,7 @@ class SwitchboardOrchestrator:
         selected_analysts: list[str] | None = None,
         on_progress=None,
         gate: Any = None,
+        tool_gate: Any = None,
     ) -> None:
         """Constructor.
 
@@ -186,11 +198,27 @@ class SwitchboardOrchestrator:
         hold a whole-run permit on the same gate — N outer permits plus N
         inner permits would deadlock. See `web/spy_scanner.py`'s
         `DEEP_DIVE_PER_CALL_GATING`.
+
+        `tool_gate` is an optional, separate concurrency gate for outbound
+        third-party tool fetches. It is duck-typed exactly like `gate` -- any
+        object exposing `acquire(weight=1)` / `release(weight=1)` works.
+        `tool_gate=None` (the default) leaves tool calls ungated, preserving
+        today's behaviour byte-for-byte. When supplied, every real
+        `_TOOL_MAP` dispatch (i.e. every `tool_fn.invoke()` call, NOT the
+        "Unknown tool" branch, which never actually calls out) takes and
+        releases exactly one permit around that single call. This is a
+        SEPARATE gate/concern from `gate` (the LLM-call gate) -- the two must
+        never be conflated or share one instance, since LLM calls and tool
+        calls have different concurrency budgets and a shared instance would
+        make the two axes interfere with each other for no reason.
         """
         self.config = config or dict(DEFAULT_CONFIG)
         self.selected_analysts = selected_analysts or ["market", "social", "news", "fundamentals"]
         self.on_progress = on_progress  # callable(frame: dict) | None
         self._gate = gate
+        self._tool_gate = tool_gate
+        self._tool_error_lock = threading.Lock()
+        self.tool_error_count = 0
 
         set_config(self.config)
         os.makedirs(self.config["data_cache_dir"], exist_ok=True)
@@ -506,14 +534,23 @@ class SwitchboardOrchestrator:
                 if tool_fn is None:
                     result = f"Unknown tool: {tc_name}"
                 else:
+                    if self._tool_gate is not None:
+                        self._tool_gate.acquire()
                     try:
                         result = tool_fn.invoke(tc_args)
                     except Exception as exc:
-                        logger.warning(
-                            "Tool call failed for node=%s tool=%s: %s",
-                            self._current_node, tc_name, exc,
+                        with self._tool_error_lock:
+                            self.tool_error_count += 1
+                            failure_count = self.tool_error_count
+                        logger.error(
+                            "Tool call failed for node=%s tool=%s (%d tool "
+                            "failure(s) so far this run): %s",
+                            self._current_node, tc_name, failure_count, exc,
                         )
                         result = f"Tool error: {exc}"
+                    finally:
+                        if self._tool_gate is not None:
+                            self._tool_gate.release()
 
                 state["messages"].append(ToolMessage(content=str(result), tool_call_id=tc_id))
 

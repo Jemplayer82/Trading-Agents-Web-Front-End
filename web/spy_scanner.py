@@ -22,6 +22,15 @@ idle gate capacity because the permit is released around the fetch.
 the pool beyond `budget`. `DEEP_DIVE_PER_CALL_GATING` controls only gating
 POSITION (per-dive vs per-call) for the deadlock-safety reason.
 
+A second, independent `DynamicGate` now bounds concurrent outbound third-party
+tool-fetch calls (yfinance, Alpha Vantage, Reddit, Stocktwits, Schwab MCP)
+across the whole scan, separately from LLM concurrency. It defaults to the
+same `budget` value used for LLM gating, restoring the order-of-magnitude
+bound the legacy whole-dive permit used to provide, and
+`DEEP_DIVE_TOOL_CONCURRENCY` overrides it. This gate applies to every dive
+regardless of `DEEP_DIVE_PER_CALL_GATING`; in the legacy per-dive mode it is
+simply never the binding constraint.
+
 Cancellation is cooperative: the cancel endpoint sets
 spy_scans.cancel_requested=1; workers check it between tickers and raise
 ScanCancelled, which the caller records as status 'cancelled' (not 'failed').
@@ -346,6 +355,44 @@ def _deep_dive_pool_multiplier() -> int:
         return max(1, int(os.environ.get("DEEP_DIVE_POOL_MULTIPLIER", "1").strip()))
     except (ValueError, TypeError):
         return 1
+
+
+def _deep_dive_tool_concurrency(budget: int) -> int:
+    """Separate bound for concurrent outbound third-party tool-fetch calls.
+
+    Reads env var ``DEEP_DIVE_TOOL_CONCURRENCY`` at call time. If unset or
+    empty, returns ``max(1, budget)`` so the default tracks the LLM gate's
+    capacity. If set to a valid integer, returns ``max(1, int(value))`` (zero
+    and negative values floor to 1). If set to something non-numeric, falls
+    back to ``max(1, budget)``.
+
+    This is a SEPARATE, independent concurrency bound from the LLM-call
+    ``DynamicGate`` (sized via ``_total_budget()``) and from the worker-pool
+    width (``_deep_dive_pool_multiplier()``). It governs how many ``_TOOL_MAP``
+    dispatch calls (yfinance, Alpha Vantage, Reddit, Stocktwits, Schwab MCP
+    fetches, made from inside ``SwitchboardOrchestrator._run_analyst``) may be
+    in flight at once across the WHOLE scan -- including across dives AND
+    across analysts running concurrently within one dive when
+    ``analyst_concurrency_limit > 1``.
+
+    Before per-call LLM gating existed, this concurrency was an incidental side
+    effect of the whole-dive ``with gate:`` permit (which also blocked the
+    tool-fetch phase, so at most ``gate.limit`` dives could be fetching tools
+    at once). That incidental bound disappeared when the permit narrowed to
+    wrap only ``llm.invoke()``. Defaulting to ``budget`` restores the same
+    order-of-magnitude bound the whole-dive permit used to provide, without
+    reintroducing the LLM-capacity-idling problem the per-call-gating change
+    was for. ``DEEP_DIVE_TOOL_CONCURRENCY`` is the explicit, separate opt-in
+    for an operator who wants a different number (e.g. to stay well under a
+    specific vendor's rate limit regardless of ``OLLAMA_MAX_CONCURRENCY``).
+    """
+    raw = os.environ.get("DEEP_DIVE_TOOL_CONCURRENCY", None)
+    if raw is None or raw.strip() == "":
+        return max(1, budget)
+    try:
+        return max(1, int(raw.strip()))
+    except (ValueError, TypeError):
+        return max(1, budget)
 
 
 def _build_quick_batch_prompt(rows: list[dict[str, Any]]) -> str:
@@ -1010,6 +1057,15 @@ def run_deep_dives(
     orchestrator ungated, max_workers=budget); splitting per-dive-vs-per-call
     GATING POSITION from that flag would deadlock because a whole-dive permit
     plus an inner per-call permit would pin the gate forever.
+
+    A separate `tool_gate` bounds concurrent outbound tool-fetch calls
+    (`_TOOL_MAP` dispatches: yfinance, Alpha Vantage, Reddit, Stocktwits,
+    Schwab MCP) across the whole scan, including across parallel analysts
+    when `analyst_concurrency_limit > 1`. It defaults to `budget` and is
+    overridden by `DEEP_DIVE_TOOL_CONCURRENCY`. A dive whose tool calls fail
+    past this bound still completes (it is never failed) but the failure
+    count is logged at ERROR and returned as `tool_errors` on the result
+    dict, rather than being buried as a WARNING-level log line.
     """
     log.info("[spy %s] deep dive on %d tickers", scan_id, len(candidates))
     db.update_spy_scan(scan_id, status="running_deep", deep_total=len(candidates))
@@ -1061,6 +1117,7 @@ def run_deep_dives(
             # Portfolio Manager LLM call via rerun_decision().
             return SwitchboardOrchestrator(
                 config=config, selected_analysts=selected_analysts, gate=orch_gate,
+                tool_gate=tool_gate,
             )
 
         def _analysis_params() -> dict[str, Any]:
@@ -1086,6 +1143,13 @@ def run_deep_dives(
                 conviction=c.get("conviction"), reasoning=c.get("reasoning"),
                 analysis_id=analysis_id,
             )
+            tool_errors = getattr(orch, "tool_error_count", 0)
+            if tool_errors:
+                log.error(
+                    "[spy %s] %s: completed with %d tool-call failure(s) -- "
+                    "report may be based on incomplete data",
+                    scan_id, ticker, tool_errors,
+                )
             # Best-effort System C contribution (mirrors web/portfolio_main.py's
             # position-scan store — never block or fail the dive on it). Without
             # this, the highest-volume decision path contributed NOTHING to the
@@ -1099,7 +1163,7 @@ def run_deep_dives(
                     )
                 except Exception:
                     log.exception("[spy %s] memory-log store failed for %s", scan_id, ticker)
-            out = {**c, "signal": signal, "analysis_id": analysis_id, "final_decision": fd}
+            out = {**c, "signal": signal, "analysis_id": analysis_id, "final_decision": fd, "tool_errors": tool_errors}
             if reused_from is not None:
                 out["reused_from"] = reused_from
             return out
@@ -1153,6 +1217,15 @@ def run_deep_dives(
 
     # DynamicGate(budget) is deliberate: the gate caps LLM concurrency; the pool is only admission width.
     with _GateMonitor(DynamicGate(budget)) as gate:
+        # Plain fixed-limit gate for the duration of this scan. Cross-
+        # container coordination of tool-fetch traffic is out of scope for
+        # this fix; a single scan-scoped gate is sufficient to restore the
+        # order-of-magnitude bound the legacy whole-dive permit provided.
+        tool_gate = DynamicGate(_deep_dive_tool_concurrency(budget))
+        log.info(
+            "[spy %s] deep dive: tool-fetch concurrency=%d",
+            scan_id, tool_gate.limit,
+        )
         with ThreadPoolExecutor(max_workers=pool_size) as pool:
             futures = {pool.submit(_dive, c, gate): c["ticker"] for c in candidates}
             for fut in as_completed(futures):
