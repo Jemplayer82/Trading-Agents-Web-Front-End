@@ -57,6 +57,10 @@ class GatedLLM(Runnable):
     analyst factories compose chains with `prompt | llm.bind_tools(tools)`,
     and LCEL's `|` only composes `Runnable`s. Verified against
     langchain-core 1.4.4.
+
+    Only the synchronous `.invoke()` path is gated; `.stream()`,
+    `.astream()`, `.batch()`, `.abatch()`, and `.ainvoke()` intentionally
+    raise `NotImplementedError`.
     """
 
     def __init__(self, inner: Any, gate: GateLike) -> None:
@@ -73,6 +77,50 @@ class GatedLLM(Runnable):
             return self._inner.invoke(input, config, **kwargs)
         finally:
             self._gate.release(1)
+
+    def stream(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        raise NotImplementedError(
+            "GatedLLM only gates the synchronous invoke() path; "
+            "stream() is not supported."
+        )
+
+    def astream(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        raise NotImplementedError(
+            "GatedLLM only gates the synchronous invoke() path; "
+            "astream() is not supported."
+        )
+
+    def batch(
+        self,
+        inputs: Any,
+        config: Any = None,
+        *,
+        return_exceptions: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        raise NotImplementedError(
+            "GatedLLM only gates the synchronous invoke() path; "
+            "batch() is not supported."
+        )
+
+    def abatch(
+        self,
+        inputs: Any,
+        config: Any = None,
+        *,
+        return_exceptions: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        raise NotImplementedError(
+            "GatedLLM only gates the synchronous invoke() path; "
+            "abatch() is not supported."
+        )
+
+    async def ainvoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        raise NotImplementedError(
+            "GatedLLM only gates the synchronous invoke() path; "
+            "ainvoke() is not supported."
+        )
 
     def bind_tools(self, tools: Any, **kwargs: Any) -> GatedLLM:
         # Forward to the raw inner model and re-wrap so the chain still
