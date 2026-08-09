@@ -75,10 +75,6 @@ class TestAllocationSlot:
     """_allocation_slot serializes the post-wait phase and remains safe when
     cancelled or timed out while waiting for the global lock."""
 
-    def _release_lock(self):
-        if options_engine._ALLOC_LOCK.locked():
-            options_engine._ALLOC_LOCK.release()
-
     def test_mutual_exclusion(self, monkeypatch, tmp_path):
         monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
         db.init_db()
@@ -100,13 +96,10 @@ class TestAllocationSlot:
         t2 = threading.Thread(target=worker, args=(2,))
         t1.start()
         t2.start()
-        try:
-            t1.join(timeout=5)
-            t2.join(timeout=5)
-            assert not t1.is_alive()
-            assert not t2.is_alive()
-        finally:
-            self._release_lock()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+        assert not t1.is_alive()
+        assert not t2.is_alive()
 
         assert len(seq) == 4
         for i in range(0, len(seq), 2):
@@ -126,10 +119,14 @@ class TestAllocationSlot:
 
         acquired = options_engine._ALLOC_LOCK.acquire(timeout=0.1)
         assert acquired
+        lock_held = True
         try:
             options_engine._ALLOC_LOCK.release()
+            lock_held = False
         finally:
-            self._release_lock()
+            if lock_held:
+                options_engine._ALLOC_LOCK.release()
+                lock_held = False
 
     def test_heartbeats_while_blocked(self, monkeypatch, tmp_path):
         monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
@@ -137,8 +134,8 @@ class TestAllocationSlot:
         scan_id = db.create_spy_scan("2026-06-01", kind="options")
         monkeypatch.setattr(options_engine, "_ALLOC_POLL_SECONDS", 0.05)
 
-        held = options_engine._ALLOC_LOCK.acquire()
-        assert held
+        lock_held = options_engine._ALLOC_LOCK.acquire()
+        assert lock_held
         caught: dict[str, Any] = {}
 
         def worker():
@@ -154,13 +151,16 @@ class TestAllocationSlot:
             time_mod.sleep(0.3)
             status = db.get_spy_scan_status(scan_id)["status"]
             assert status == "running_wait_market"
-            self._release_lock()
+            options_engine._ALLOC_LOCK.release()
+            lock_held = False
             t.join(timeout=5)
             assert not t.is_alive()
             assert "entered" in caught
             assert "exc" not in caught
         finally:
-            self._release_lock()
+            if lock_held:
+                options_engine._ALLOC_LOCK.release()
+                lock_held = False
             t.join(timeout=5)
 
     def test_cancel_while_blocked_raises_scan_cancelled(self, monkeypatch, tmp_path):
@@ -169,8 +169,8 @@ class TestAllocationSlot:
         scan_id = db.create_spy_scan("2026-06-01", kind="options")
         monkeypatch.setattr(options_engine, "_ALLOC_POLL_SECONDS", 0.05)
 
-        held = options_engine._ALLOC_LOCK.acquire()
-        assert held
+        lock_held = options_engine._ALLOC_LOCK.acquire()
+        assert lock_held
         db.request_spy_scan_cancel(scan_id)
         caught: dict[str, Any] = {}
 
@@ -189,7 +189,9 @@ class TestAllocationSlot:
             assert isinstance(caught.get("exc"), spy_scanner.ScanCancelled)
             assert "entered" not in caught
         finally:
-            self._release_lock()
+            if lock_held:
+                options_engine._ALLOC_LOCK.release()
+                lock_held = False
 
     def test_cancel_requested_before_entry_does_not_yield(self, monkeypatch, tmp_path):
         monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
@@ -212,8 +214,8 @@ class TestAllocationSlot:
         monkeypatch.setattr(options_engine, "_ALLOC_POLL_SECONDS", 0.05)
         monkeypatch.setattr(options_engine, "_ALLOC_TIMEOUT_SECONDS", 0.1)
 
-        held = options_engine._ALLOC_LOCK.acquire()
-        assert held
+        lock_held = options_engine._ALLOC_LOCK.acquire()
+        assert lock_held
         caught: dict[str, Any] = {}
 
         def worker():
@@ -235,7 +237,9 @@ class TestAllocationSlot:
             assert "allocation slot" in str(exc)
             assert elapsed < 2
         finally:
-            self._release_lock()
+            if lock_held:
+                options_engine._ALLOC_LOCK.release()
+                lock_held = False
 
 
 class TestWaitReleasesTheQueueSlot:
@@ -395,10 +399,6 @@ class TestRunOptionsBuildHoldsAllocationLock:
     the post-wait phase and released afterward. Also guards that prescreen
     is invoked with the keyword-only trade_date argument."""
 
-    def _release_lock(self):
-        if options_engine._ALLOC_LOCK.locked():
-            options_engine._ALLOC_LOCK.release()
-
     def test_run_options_build_holds_allocation_lock_during_refresh_positions(
         self, monkeypatch, tmp_path
     ):
@@ -460,10 +460,7 @@ class TestRunOptionsBuildHoldsAllocationLock:
 
         monkeypatch.setattr(options_engine.options_allocator, "run", fake_allocator_run)
 
-        try:
-            options_engine.run_options_build(scan_id, trade_date)
-        finally:
-            self._release_lock()
+        options_engine.run_options_build(scan_id, trade_date)
 
         assert captured["prescreen_trade_date"] == trade_date
         assert captured["lock_during_refresh"] is True
