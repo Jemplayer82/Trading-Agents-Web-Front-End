@@ -315,6 +315,70 @@ class TestRunScanParallelism:
         assert len(per_ticker) == 3
         assert all(e["signal"] == "HOLD" for e in per_ticker)
 
+    def test_scan_concurrency_shrinks_when_single_ticker_priority_claims_budget(
+        self, monkeypatch, tmp_path
+    ):
+        """When single-ticker analyses consume all but one slot, _run_scan floors at 1 worker.
+
+        This exercises the real `_run_one` gate wrapper in web/portfolio_routes.py.
+        If the wrapper were removed (e.g. `assert gate is not None`), the pool
+        would run at `max_workers=budget` and `max_in_flight` would exceed 1.
+        """
+        monkeypatch.setenv("OLLAMA_MAX_CONCURRENCY", "3")
+        monkeypatch.setattr("web.db.count_active_single", lambda: 2)
+        monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
+        db.init_db()
+
+        lock = threading.Lock()
+        in_flight = 0
+        max_in_flight = 0
+
+        class FakeOrchestrator:
+            def __init__(self, config=None, selected_analysts=None):
+                self.memory_log = MagicMock()
+
+            def run(self, ticker, trade_date):
+                nonlocal in_flight, max_in_flight
+                with lock:
+                    in_flight += 1
+                    max_in_flight = max(max_in_flight, in_flight)
+                time.sleep(0.05)
+                with lock:
+                    in_flight -= 1
+                return ({"trader_investment_plan": "", "final_trade_decision": ""}, "HOLD")
+
+        monkeypatch.setattr(
+            "tradingagents.orchestrator.SwitchboardOrchestrator", FakeOrchestrator
+        )
+
+        from web import portfolio_routes
+
+        monkeypatch.setattr(
+            portfolio_routes,
+            "_mcp_positions",
+            lambda: [
+                _make_fake_position("AAPL"),
+                _make_fake_position("MSFT"),
+                _make_fake_position("GOOGL"),
+                _make_fake_position("AMZN"),
+                _make_fake_position("META"),
+            ],
+        )
+        monkeypatch.setattr(
+            portfolio_routes.aggregator,
+            "run",
+            lambda payload, trade_date, config: "stub",
+        )
+
+        scan_id = db.create_portfolio_scan("2026-01-01")
+        portfolio_routes._run_scan(scan_id, "2026-01-01")
+
+        per_ticker = db.get_portfolio_scan(scan_id)["full_payload"]["per_ticker"]
+        assert len(per_ticker) == 5
+        assert max_in_flight == 1, (
+            f"scan should have shrunk to 1 concurrent worker, saw {max_in_flight}"
+        )
+
     def test_payload_preserves_input_order(self, monkeypatch, tmp_path):
         """Completion order is reversed by sleep, but stored payload stays in holdings order."""
         monkeypatch.setenv("OLLAMA_MAX_CONCURRENCY", "3")
