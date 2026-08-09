@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.messages import HumanMessage, ToolMessage
@@ -71,6 +72,31 @@ _BIAS_CONTEXT: dict[str, str] = {
     "bullish": "Context: bullish market stance — in borderline Hold/Buy cases, lean Buy.",
     "bearish": "Context: bearish market stance — in borderline Hold/Sell cases, lean Sell.",
     "neutral": "",
+}
+
+@dataclass(frozen=True)
+class _AnalystSpec:
+    """Static per-analyst metadata shared by both analyst execution paths.
+
+    ``node_name`` is the label the frontend progress grid keys on. It is NOT
+    the same string as tradingagents/graph/analyst_execution.py's
+    ``AnalystNodeSpec.agent_node`` (a human-readable LangGraph display name,
+    e.g. "Market Analyst") — only ``report_key`` is shared vocabulary
+    between the two modules.
+    """
+
+    key: str
+    node_name: str
+    report_key: str
+
+
+_ANALYST_SPECS: dict[str, _AnalystSpec] = {
+    "market": _AnalystSpec("market", "market_analyst", "market_report"),
+    # Wire key stays "social" for saved-config back-compat; the agent itself
+    # is the sentiment analyst.
+    "social": _AnalystSpec("social", "sentiment_analyst", "sentiment_report"),
+    "news": _AnalystSpec("news", "news_analyst", "news_report"),
+    "fundamentals": _AnalystSpec("fundamentals", "fundamentals_analyst", "fundamentals_report"),
 }
 
 # Keys tradingagents/agents/managers/portfolio_manager.py reads off
@@ -207,6 +233,49 @@ class SwitchboardOrchestrator:
         """Reset the messages list between analyst phases (Anthropic needs a placeholder)."""
         state["messages"] = [HumanMessage(content="Continue")]
 
+    def _build_analyst_node(self, analyst_key: str):
+        """Construct the node callable for one analyst key.
+
+        Deliberately an if-chain calling the module-global factory names at
+        CALL time rather than a table of pre-bound callables: several tests
+        monkeypatch e.g. sbo_module.create_market_analyst and depend on that
+        late lookup (tests/test_news_analyst_wiring.py,
+        tests/test_switchboard_orchestrator.py). The news analyst also needs
+        the live self.config['macro_brief'] read at build time.
+        """
+        if analyst_key == "market":
+            return create_market_analyst(self._quick_llm)
+        if analyst_key == "social":
+            return create_sentiment_analyst(self._quick_llm)
+        if analyst_key == "news":
+            return create_news_analyst(self._quick_llm, macro_brief=self.config.get("macro_brief"))
+        if analyst_key == "fundamentals":
+            return create_fundamentals_analyst(self._quick_llm)
+        raise KeyError(analyst_key)
+
+    def _run_analysts_sequential(self, state: dict, analyst_keys: list[str]) -> None:
+        """Strict-sequential analyst phase — the historical behaviour.
+
+        One shared ``state['messages']`` list carried across analysts, reset
+        via ``_clear_messages`` after each one. Note the resulting
+        first-vs-rest asymmetry: the first analyst sees run()'s
+        ``[("human", ticker)]`` seed, every later one sees ``_clear_messages``'s
+        ``[HumanMessage("Continue")]`` placeholder. That asymmetry is preserved
+        exactly, which is why this path is kept as its own method rather than
+        emulated by the parallel path with a pool of one.
+        """
+        for analyst_key in analyst_keys:
+            spec = _ANALYST_SPECS[analyst_key]
+            self._emit({"type": "status", "message": f"Running {analyst_key} analyst…"})
+            self._current_node = spec.node_name
+            node = self._build_analyst_node(analyst_key)
+            self._run_analyst(node, state)
+            self._current_node = None
+            report = state.get(spec.report_key, "")
+            if report:
+                self._emit({"type": "report_update", "reports": {spec.report_key: report}})
+            self._clear_messages(state)
+
     def _run_analyst(self, analyst_node, state: dict) -> None:
         """Run an analyst through its tool-calling loop until no tool_calls remain.
 
@@ -314,37 +383,8 @@ class SwitchboardOrchestrator:
         }
 
         # ── Phase 1: Analysts ────────────────────────────────────────────────────
-        analyst_factories = {
-            "market": lambda: create_market_analyst(self._quick_llm),
-            "social": lambda: create_sentiment_analyst(self._quick_llm),
-            "news": lambda: create_news_analyst(self._quick_llm, macro_brief=self.config.get("macro_brief")),
-            "fundamentals": lambda: create_fundamentals_analyst(self._quick_llm),
-        }
-        report_key_map = {
-            "market": "market_report",
-            "social": "sentiment_report",
-            "news": "news_report",
-            "fundamentals": "fundamentals_report",
-        }
-
-        _analyst_node_names = {
-            "market": "market_analyst",
-            "social": "sentiment_analyst",
-            "news": "news_analyst",
-            "fundamentals": "fundamentals_analyst",
-        }
-        for analyst_key in self.selected_analysts:
-            if analyst_key not in analyst_factories:
-                continue
-            self._emit({"type": "status", "message": f"Running {analyst_key} analyst…"})
-            self._current_node = _analyst_node_names.get(analyst_key, analyst_key)
-            node = analyst_factories[analyst_key]()
-            self._run_analyst(node, state)
-            self._current_node = None
-            report = state.get(report_key_map.get(analyst_key, ""), "")
-            if report:
-                self._emit({"type": "report_update", "reports": {report_key_map[analyst_key]: report}})
-            self._clear_messages(state)
+        analyst_keys = [k for k in self.selected_analysts if k in _ANALYST_SPECS]
+        self._run_analysts_sequential(state, analyst_keys)
 
         # ── Phase 2: Investment debate ───────────────────────────────────────────
         self._emit({"type": "status", "message": f"Starting investment debate ({max_debate} round(s))…"})
