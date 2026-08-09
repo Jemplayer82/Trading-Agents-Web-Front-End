@@ -70,10 +70,15 @@ services:
       TIER: ${TIER:-4}
       LLM_PROVIDER: ollama
       TRADINGAGENTS_LLM_PROVIDER: ollama
-      # Caps concurrent deep-dive worker threads (web/spy_scanner.py
-      # _total_budget) regardless of LLM backend. Dropped to 3 during the
-      # host OOM crisis (WebServer had ~424MB free); raised back to 8 once
-      # the host recovered (~14GB free) -- 8 also matches Cleo's own
+      # Deep-dive LLM-call concurrency budget (web/spy_scanner.py _total_budget()).
+      # It sets the DynamicGate capacity that caps concurrent LLM invokes during a
+      # scan, not the ThreadPoolExecutor max_workers directly. Under the default
+      # DEEP_DIVE_PER_CALL_GATING=1 the dive pool width is budget * 2, so at 8 the
+      # gate allows 8 concurrent LLM calls while the pool admits 16 worker threads
+      # (the adjacent comment controls that toggle). Dropped to 3 during the host
+      # OOM crisis (WebServer had ~424MB free); that clamped the gate to 3 and the
+      # default pool to 6, reducing concurrent memory pressure. Raised back to 8
+      # once the host recovered (~14GB free); 8 also matches Cleo's own
       # ThreadPoolExecutor(max_workers=8) ceiling (scripts/cleo_llm_handler.py),
       # so the scan-side gate no longer throttles below what Cleo can serve.
       OLLAMA_MAX_CONCURRENCY: "8"
