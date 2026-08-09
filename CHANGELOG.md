@@ -116,6 +116,91 @@ Breaking changes within the 0.x line are called out explicitly.
     dispatches `kind='options'` rows to the options build (not the equity
     pipeline).
 
+- **Same-day deep-dive and quick-scan reuse.** The 2 equity S&P scans + 3
+  options-account builds that run most trading days independently re-ran the
+  full multi-agent pipeline for the same ticker on the same day. A
+  `config_fingerprint` (hash of every shared-stage LLM config field) now lets
+  `web/spy_scanner.py` find an existing same-day analysis for a ticker with an
+  identical fingerprint and re-run only the account-specific Portfolio
+  Manager step (`SwitchboardOrchestrator.rerun_decision`) against it instead
+  of the whole pipeline — this account's own `bias_context`/`past_context`
+  always win, never a blind copy of the donor's decision. Quick-scan results
+  (signal/conviction/reasoning) are reused the same way. Knobs:
+  `deep_dive_reuse` / `quick_scan_reuse` (default on),
+  `deep_dive_reuse_max_age_hours` (default 6). A reuse attempt that fails for
+  any reason (corrupt donor state, empty rerun output, provider error) falls
+  back to a full pipeline run rather than failing the dive; the `analyses` row
+  is only created after a reuse rerun actually succeeds, so a failed attempt
+  never leaves an orphaned "running" row for the stuck-run reaper to clean up.
+
+- **Shared macro news brief for options deep dives.** Every options build's
+  deep-dive phase used to have each ticker's own News Analyst independently
+  fetch and summarize the same day's global news. `web/spy_scanner.py` now
+  fetches `get_global_news` and summarizes it once per scan
+  (`_compute_macro_brief`), and the News Analyst is handed the pre-fetched
+  brief instead of calling `get_global_news` itself when one is available —
+  wrapped in explicit `<start_of_global_news>`/`<end_of_global_news>`
+  delimiters plus anti-injection instruction text, since the brief is
+  untrusted third-party content flowing into an agent prompt. A vendor
+  error/no-news string is never treated as a usable brief. Kill switch:
+  `macro_brief_enabled` (default on).
+
+- **Same-day market-data caches.** A shared `SameDayCache` primitive
+  (`web/market_cache.py` — trade-date-scoped, TTL, lock-guarded, never caches
+  an empty or badly-degraded result) now backs three separate caches so the
+  day's 2 equity + 3 options builds stop re-fetching identical data: the
+  S&P 500 movers pre-screen (`options-prescreen`, 4h TTL, requires ≥80%
+  download completeness), the quick-scan bulk price-data download (15 min
+  TTL, same 80%-completeness gate, counted by usable closes per ticker so a
+  partial yfinance failure can't poison the cache), and the selected
+  option-contract cache (2h TTL) — a same-day cache hit on the contract cache
+  is never served blind: bid/ask are refreshed via one live quote and
+  re-validated against the liquidity gates *and* a moneyness/delta drift
+  check before being served, falling back to a full re-fetch if either check
+  fails, so a contract that has drifted since it was first selected is never
+  silently reused.
+
+- **Same-day outcome-resolution price-history cache.** The nightly outcome
+  sweep (`tradingagents/graph/outcome_resolution.py`) used to call
+  `yf.Ticker(...).history()` once per pending memory-log entry — a ticker
+  with 3 pending entries triggered 3 separate stock downloads and 3 separate
+  benchmark downloads, with every ticker's SPY benchmark re-downloaded
+  redundantly across the whole sweep. A lazy per-sweep `PriceHistoryCache`
+  now fetches each distinct ticker/benchmark's price history at most once per
+  sweep run and slices per-entry sub-windows out of it, plus an age-guard
+  that skips a fetch entirely for entries that are guaranteed-immature by
+  their trade date alone. `fetch_returns`'s public, fetch-it-yourself
+  signature (used directly by `tradingagents/graph/trading_graph.py`) is
+  unchanged. Cuts a full nightly sweep from ~400 yfinance calls toward
+  ~60–100.
+
+- **Nightly reflections gated by ticker relevance.** LLM reflections in the
+  outcome sweep used to run for every matured, non-noise, non-censored
+  pending entry regardless of whether anyone would ever read the lesson.
+  `resolve_all_pending` now accepts an optional `relevant_tickers` set (the
+  current paper-account holdings, `ALWAYS_DEEP` tickers, and anything
+  recently deep-dived); a ticker outside that set gets a free canned
+  `NOT-RELEVANT` reflection instead of an LLM call, the same free-path
+  mechanism NOISE/CENSORED already use. Callers that don't pass the
+  parameter (e.g. direct `trading_graph.py` callers) see no behavior change.
+  The relevance computation (`web/scheduler.py::_sweep_relevant_tickers`)
+  fails open to `None` (ungated) the moment *any* of its DB-backed sources
+  errors, not just if all of them do — a partial DB outage must never
+  silently and irreversibly canned-resolve real pending decisions.
+
+- **Batched quick-scan LLM calls.** `run_quick_scan` used to make one LLM
+  round-trip per ticker across up to ~500 tickers. On the deployed
+  Switchboard/Cleo bus route each call is a full external process
+  round-trip, so call count — not token volume — was the bottleneck. Tickers
+  are now grouped into batches of ~20–25 and scored with one LLM call per
+  batch (`TICKER|SIGNAL|CONVICTION|reason` lines in, parsed leniently
+  per-line — a malformed or missing line degrades just that ticker to
+  HOLD/conviction-5, distinct from the existing insufficient-data HOLD/1,
+  and is never silently donated to another same-day scan via the reuse
+  cache); a single leftover ticker still goes through the original
+  `_quick_scan_one` per-ticker path. Cuts a full ~500-ticker scan from
+  ~500 round-trips toward ~20–25.
+
 - **Parallel analyst execution.** `SwitchboardOrchestrator` now honors the
   pre-existing `analyst_concurrency_limit` config knob, which was plumbed but
   previously read by nothing. When set above 1, selected analysts run on
@@ -129,17 +214,95 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Changed
 
+- **Research Manager and allocators moved off the deep model by default.**
+  The Research Manager now runs on the quick model by default
+  (`research_manager_role` = `"quick"`|`"deep"`, env
+  `TRADINGAGENTS_RESEARCH_MANAGER_ROLE`) — instant rollback via the knob if
+  synthesis quality regresses. The options/S&P/portfolio allocators
+  (`web/options_allocator.py`, `web/spy_allocator.py`,
+  `web/portfolio/aggregator.py`) were switched from the deep model to the
+  quick model outright: this repo's own history has a documented live
+  failure where the deep allocator blew Cleo's 150s call budget and silently
+  fell back to an equal-weight allocation, and the deep model brought no
+  benefit to a guardrailed, deterministic-fallback JSON-synthesis task the
+  repo already documents the quick model as more reliable for.
+
+- **Debate/research prompts stop re-embedding full analyst reports every
+  round.** The bull/bear researchers and all three risk debators embedded
+  the 4 full analyst reports (or all 4 risk-team raw reports) in their
+  prompt on every round of debate, not just the first — the growing debate
+  history already carries the same information, speaker-labelled. Reports
+  now embed only on each side's first call
+  (`investment_debate_state`/`risk_debate_state` `count == 0`); later
+  rounds get history plus the synthesized `investment_plan`. Duplicate
+  "last argument" prompt lines (redundant with what the embedded history
+  already ends with) were also dropped. Memory-log DECISION context embedded
+  in agent prompts is now truncated to `memory_context_decision_max_chars`
+  (default 400 chars; REFLECTION text is untouched) — cuts ~2K tokens per
+  Portfolio Manager call on recurring tickers. `get_YFin_data_online`
+  downsamples returned price history (daily rows for the most recent ~60
+  sessions, weekly beyond) instead of always returning full daily
+  resolution.
+
+- **Options scan queue no longer blocks other accounts during the
+  market-open wait.** A build parked in the 07:30–09:35 ET market-open wait
+  used to hold the scan-queue slot for the whole ~2h window, so accounts 2
+  and 3 couldn't even start computing until account 1's full run (including
+  its wait) finished. The wait status no longer counts as "busy"
+  (`scan_queue._is_any_scan_running`), and a build proactively hands off the
+  queue slot the instant it enters the wait, so queued accounts start
+  computing pre-market instead of ~25–45 minutes late. The POST-wait
+  allocation/order-placement phase is now serialized behind a module-level
+  `_ALLOC_LOCK` (accounts still allocate one at a time, in the order they
+  finish waiting) with a configurable hard timeout
+  (`OPTIONS_ALLOC_TIMEOUT_SECONDS`, default 3600s) so one stalled allocator
+  can't wedge the others forever. Kill switch:
+  `OPTIONS_RELEASE_SLOT_DURING_WAIT` (default on) reverts both the busy-check
+  change and the proactive hand-off together — the redeploy pre-flight guard
+  (`scripts/redeploy.py`) and the frontend queue banner were both updated to
+  treat a market-open-waiting scan as "still alive, don't deploy over it."
+
+- **Nightly portfolio holdings scan and option-chain contract fetches
+  parallelized.** The nightly per-holding scan (`web/portfolio_routes.py`)
+  ran every holding's full `SwitchboardOrchestrator.run()` strictly
+  sequentially; it now runs through the same `ThreadPoolExecutor` +
+  `DynamicGate` concurrency pattern already used for options deep dives,
+  cutting a 1.5–3h run toward ~20–40 minutes. `fetch_candidates`
+  (`web/options_data.py`) now fetches each candidate's option chain
+  concurrently (up to 6 workers) instead of one at a time, while preserving
+  deterministic input-order results.
+
+- **Bus poll cadence and browser chatter reduced.** The Agent Bus bridge's
+  default server-side poll interval rose from 1.0s to 5.0s
+  (`BUS_POLL_INTERVAL` env override still works) — cuts upstream polling
+  from ~86,400 to ~17,000 iterations/day per open tab. `bus.js` now drops
+  its WebSocket entirely while a tab is hidden/backgrounded (including a tab
+  that loads already-hidden, e.g. session restore) and reopens it on
+  return, so a background-restored tab costs the server nothing. The
+  scan-activity banner (`pollScanActivity` in `web/static/portfolio.js`)
+  switched from polling two full 50-row scan-history lists every 5s to the
+  cheap `/api/portfolio/status` endpoint already used elsewhere on the page,
+  and a market-open-waiting options build now renders correctly instead of
+  being mislabeled as an S&P scan.
+
 - **Deep-dive gate permits move from whole-dive to per-LLM-call.** Inside
   `SwitchboardOrchestrator(gate=...)`, every `llm.invoke()` now acquires
   exactly one `DynamicGate` permit for its own duration, so a dive waiting on
   a news or price fetch no longer squats on LLM capacity. The gate capacity
-  itself (`max(1, TOTAL - active_singles)`) is unchanged, but
-  `run_deep_dives` widens its worker pool to
-  `2 * OLLAMA_MAX_CONCURRENCY` (`budget`) so non-LLM phases can overlap.
-  **`DEEP_DIVE_PER_CALL_GATING=0`** is the single rollback switch: it reverts
-  both the gating position and the pool size together, because a whole-dive
-  permit plus an inner per-call permit would deadlock (and the portfolio
-  container has prior host-level OOM history under its 4g limit).
+  itself (`max(1, TOTAL - active_singles)`) is unchanged, and `run_deep_dives`'
+  worker pool width tracks it 1:1 by default — widening the pool beyond that
+  is a **separate, explicit opt-in** (`DEEP_DIVE_POOL_MULTIPLIER`, default 1 =
+  no widening), deliberately decoupled from the gating-position switch: the
+  portfolio container has prior host-level OOM history under its 4g limit, so
+  per-call gating (cheap) and pool widening (a real memory cost) don't move
+  together just because one enables the other. A second `DynamicGate`
+  (`DEEP_DIVE_TOOL_CONCURRENCY`, defaults to `budget`) separately bounds
+  concurrent outbound tool-fetch calls (yfinance/Alpha Vantage/Reddit/
+  Stocktwits/Schwab MCP), restoring the order-of-magnitude bound the old
+  whole-dive permit used to provide there too.
+  **`DEEP_DIVE_PER_CALL_GATING=0`** is the rollback switch for the gating
+  position itself: it reverts to one gate permit per whole dive, because a
+  whole-dive permit plus an inner per-call permit would deadlock.
   `SwitchboardOrchestrator(gate=...)` remains optional and defaults to
   `None`, so the CLI and single-ticker web runs are ungated and unchanged.
 
@@ -173,6 +336,20 @@ Breaking changes within the 0.x line are called out explicitly.
   fail (the stricter bar reflects that partial deep-dive failure is normal),
   and the alert quotes the underlying error. Missing price data carries no
   `error` key, so it never counts toward the rate.
+- **`get_global_news` raised on `None` arguments instead of using config
+  defaults.** Every other vendor path in `tradingagents/dataflows/` already
+  substituted `DEFAULT_CONFIG` values when `look_back_days`/`limit` came in
+  as `None`; the Alpha Vantage path was the one exception and raised
+  `TypeError` instead, surfaced while building the shared macro news brief
+  (above) since that path calls it directly rather than through an agent
+  tool wrapper that always supplies explicit values.
+- **The scan-activity banner never displayed.** `pollScanActivity`
+  (`web/static/portfolio.js`) checked `Array.isArray(scans)` against the
+  response of `/api/portfolio-scans` and `/api/spy-scans`, but both endpoints
+  return a `{"scans": [...]}` envelope, not a bare array — so the check was
+  always false and the "[ Scan in progress ]" banner never rendered,
+  regardless of whether a scan was actually running. Fixed as part of the
+  banner's move to the cheaper status endpoint, above.
 - **Failed analyses could be traded on.** A crashed deep dive keeps the
   quick-scan `signal`/`conviction` in its result row, and neither the options
   contract vetter nor the equity allocator inspected `error` — so a partial

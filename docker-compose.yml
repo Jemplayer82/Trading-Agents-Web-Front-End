@@ -72,21 +72,24 @@ services:
       TRADINGAGENTS_LLM_PROVIDER: ollama
       # Deep-dive LLM-call concurrency budget (web/spy_scanner.py _total_budget()).
       # It sets the DynamicGate capacity that caps concurrent LLM invokes during a
-      # scan, not the ThreadPoolExecutor max_workers directly. Under the default
-      # DEEP_DIVE_PER_CALL_GATING=1 the dive pool width is budget * 2, so at 8 the
-      # gate allows 8 concurrent LLM calls while the pool admits 16 worker threads
-      # (the adjacent comment controls that toggle). Dropped to 3 during the host
-      # OOM crisis (WebServer had ~424MB free); that clamped the gate to 3 and the
-      # default pool to 6, reducing concurrent memory pressure. Raised back to 8
-      # once the host recovered (~14GB free); 8 also matches Cleo's own
+      # scan; the ThreadPoolExecutor pool width tracks this same value 1:1 unless
+      # DEEP_DIVE_POOL_MULTIPLIER is explicitly raised (see below — off by
+      # default, so this value alone still bounds both). Dropped to 3 during the
+      # host OOM crisis (WebServer had ~424MB free); raised back to 8 once the
+      # host recovered (~14GB free); 8 also matches Cleo's own
       # ThreadPoolExecutor(max_workers=8) ceiling (scripts/cleo_llm_handler.py),
       # so the scan-side gate no longer throttles below what Cleo can serve.
       OLLAMA_MAX_CONCURRENCY: "8"
-      # Kill switch for per-LLM-call deep-dive gating + the 2x dive pool
-      # (web/spy_scanner.py::_per_call_gating_enabled). Set to "0" to restore
-      # one gate permit per whole dive and max_workers=budget — the rollback
-      # if concurrent dives start pressuring this container's 4g mem_limit.
-      # At OLLAMA_MAX_CONCURRENCY=8 the deep-dive pool admits 16 dives.
+      # Kill switch for per-LLM-call deep-dive gating (web/spy_scanner.py::
+      # _per_call_gating_enabled). Set to "0" to restore one gate permit per
+      # whole dive instead of one per individual LLM call. This does NOT widen
+      # the worker pool by itself — pool width is controlled independently by
+      # DEEP_DIVE_POOL_MULTIPLIER (unset here, defaults to 1 = no widening,
+      # i.e. pool width == OLLAMA_MAX_CONCURRENCY). The two were deliberately
+      # decoupled: per-call gating alone is memory-cheap, but widening the pool
+      # multiplies peak concurrent dives and this container has prior
+      # host-level OOM history under its 4g mem_limit, so that throughput bet
+      # is a separate, explicit opt-in an operator can raise if they want it.
       DEEP_DIVE_PER_CALL_GATING: "1"
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY}
