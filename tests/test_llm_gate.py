@@ -10,6 +10,7 @@ import time
 
 import pytest
 
+import web.db as db
 from web.llm_helpers import DynamicGate, _GateMonitor, _total_budget
 
 pytestmark = pytest.mark.unit
@@ -74,23 +75,39 @@ def test_gate_resize_down_floors_at_one():
     assert gate.limit == 4
 
 
-def test_gate_monitor_applies_initial_limit_synchronously(monkeypatch):
-    monkeypatch.setattr("web.db.count_active_single", lambda: 3)
+def test_gate_monitor_applies_initial_limit_synchronously(monkeypatch, tmp_path):
+    monkeypatch.setattr(db, "count_active_single", lambda: 3)
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
     monkeypatch.setenv("OLLAMA_MAX_CONCURRENCY", "5")
 
-    with _GateMonitor(DynamicGate(5)) as gate:
+    monitor = _GateMonitor(DynamicGate(5))
+    with monitor as gate:
         assert gate.limit == 2
 
+    deadline = time.time() + 2
+    while time.time() < deadline and monitor._thread.is_alive():
+        time.sleep(0.05)
 
-def test_gate_monitor_survives_a_db_error(monkeypatch):
+    assert not monitor._thread.is_alive()
+
+
+def test_gate_monitor_survives_a_db_error(monkeypatch, tmp_path):
     def boom():
         raise RuntimeError("db down")
 
-    monkeypatch.setattr("web.db.count_active_single", boom)
+    monkeypatch.setattr(db, "count_active_single", boom)
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
     monkeypatch.setenv("OLLAMA_MAX_CONCURRENCY", "5")
 
-    with _GateMonitor(DynamicGate(5)) as gate:
+    monitor = _GateMonitor(DynamicGate(5))
+    with monitor as gate:
         assert gate.limit == 5
+
+    deadline = time.time() + 2
+    while time.time() < deadline and monitor._thread.is_alive():
+        time.sleep(0.05)
+
+    assert not monitor._thread.is_alive()
 
 
 def test_gate_monitor_stops_its_thread_on_exit(monkeypatch):
