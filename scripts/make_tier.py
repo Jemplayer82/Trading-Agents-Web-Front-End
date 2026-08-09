@@ -101,6 +101,7 @@ TIER_ONLY_FILES: dict[int, list[str]] = {
         "web/static/schwab-alert.js",
         "tests/test_brokerages.py",
         "tests/test_portfolio_progress.py",
+        "tests/test_portfolio_aggregator.py",
         "tests/test_scan_activity_js.py",
         "tests/test_clear_history_portfolio.py",
         "tests/test_scan_queue.py",
