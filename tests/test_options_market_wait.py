@@ -139,18 +139,29 @@ class TestAllocationSlot:
 
         held = options_engine._ALLOC_LOCK.acquire()
         assert held
-        t = threading.Thread(
-            target=lambda: options_engine._allocation_slot(scan_id).__enter__().__exit__(None, None, None)
-        )
+        caught: dict[str, Any] = {}
+
+        def worker():
+            try:
+                with options_engine._allocation_slot(scan_id):
+                    caught["entered"] = True
+            except Exception as exc:
+                caught["exc"] = exc
+
+        t = threading.Thread(target=worker)
         t.start()
         try:
             time_mod.sleep(0.3)
             status = db.get_spy_scan_status(scan_id)["status"]
             assert status == "running_wait_market"
-        finally:
             self._release_lock()
             t.join(timeout=5)
             assert not t.is_alive()
+            assert "entered" in caught
+            assert "exc" not in caught
+        finally:
+            self._release_lock()
+            t.join(timeout=5)
 
     def test_cancel_while_blocked_raises_scan_cancelled(self, monkeypatch, tmp_path):
         monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
