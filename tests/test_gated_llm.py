@@ -238,12 +238,13 @@ def test_against_the_real_dynamic_gate_limits_concurrency() -> None:
     peak_lock = threading.Lock()
     peak = 0
     in_flight = 0
+    completed = 0
 
     class SlowFake:
         model_name = "slow"
 
         def invoke(self, value: Any, config: Any = None, **kwargs: Any) -> AIMessage:
-            nonlocal peak, in_flight
+            nonlocal peak, in_flight, completed
             with peak_lock:
                 in_flight += 1
                 if in_flight > peak:
@@ -251,6 +252,7 @@ def test_against_the_real_dynamic_gate_limits_concurrency() -> None:
             time.sleep(0.05)
             with peak_lock:
                 in_flight -= 1
+                completed += 1
             return AIMessage(content="ok")
 
     wrapper = GatedLLM(SlowFake(), DynamicGate(1))
@@ -270,6 +272,8 @@ def test_against_the_real_dynamic_gate_limits_concurrency() -> None:
 
     assert not errors
     assert peak == 1
+    assert completed == 4
+    assert not any(t.is_alive() for t in threads)
 
 
 def test_orchestrator_package_does_not_import_web() -> None:
