@@ -144,6 +144,20 @@ class _FakeBatchLLM:
         return MagicMock(content="\n".join(lines))
 
 
+class _CancellingBatchLLM(_FakeBatchLLM):
+    """Fake LLM that requests cancellation of the parent scan after its first batch call."""
+
+    def __init__(self, scan_id, **kwargs):
+        super().__init__(**kwargs)
+        self.scan_id = scan_id
+
+    def invoke(self, messages):
+        result = super().invoke(messages)
+        if len(self.calls) == 1:
+            db.request_spy_scan_cancel(self.scan_id)
+        return result
+
+
 class TestQuickFeatures:
     def test_none_when_fewer_than_five_closes(self):
         price_data = {"close": [1.0, 2.0, 3.0, 4.0]}
@@ -553,3 +567,17 @@ class TestRunQuickScanBatching:
 
         assert tmp_db.get_spy_scan(scan_id)["quick_count"] == 40
         assert len(results) == 40
+
+    def test_mid_scan_cancellation_stops_after_first_batch(self, tmp_db, monkeypatch, base_config):
+        tickers = [f"T{i:02d}" for i in range(40)]
+        scan_id = tmp_db.create_spy_scan("2026-08-03")
+        fake = _CancellingBatchLLM(scan_id=scan_id)
+        price_map = _make_price_map(tickers)
+        monkeypatch.setattr(spy_scanner, "_fetch_price_data_map", lambda sid, ts, td: price_map)
+        monkeypatch.setattr(spy_scanner, "_llm_quick", lambda cfg: fake)
+        monkeypatch.setattr(spy_scanner, "_total_budget", lambda: 1)
+        monkeypatch.setattr(spy_scanner.time, "sleep", lambda s: None)
+        with pytest.raises(spy_scanner.ScanCancelled):
+            spy_scanner.run_quick_scan(scan_id, tickers, "2026-08-03", base_config)
+        assert len(fake.calls) == 1
+        assert tmp_db.get_spy_scan(scan_id)["quick_count"] == 20
