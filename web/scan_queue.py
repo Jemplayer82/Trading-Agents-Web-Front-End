@@ -93,15 +93,24 @@ def _is_any_scan_running(conn) -> dict | None:  # type: ignore[type-arg]
     (web/db.py:1149) keys off ``status NOT IN ('completed','cancelled','failed','queued')``
     plus a heartbeat-staleness cutoff, entirely independent of this list, so a
     genuinely dead waiter is still reaped.
+
+    The returned dict now also carries the running row's ``status`` and its
+    live progress counters so ``/api/portfolio/status`` is a complete single-row
+    poll target for the Run Analysis progress banner, replacing two ~50-row
+    history-list fetches every 5s.
     """
     busy_statuses = ["pending", "running_quick", "running_deep", "running_alloc"]
     if not _wait_market_release_enabled():
         busy_statuses.append("running_wait_market")
     placeholders = ",".join("?" for _ in busy_statuses)
     row = conn.execute(
-        "SELECT 'portfolio' AS scan_type, id, trade_date, 'equity' AS kind, created_at"
+        "SELECT 'portfolio' AS scan_type, id, trade_date, 'equity' AS kind, created_at, status,"
+        " scanned_count, scan_total, current_ticker,"
+        " NULL AS quick_count, NULL AS quick_total, NULL AS deep_count, NULL AS deep_total"
         " FROM portfolio_scans WHERE status = 'running'"
-        " UNION SELECT 'spy', id, trade_date, kind, created_at FROM spy_scans"
+        " UNION SELECT 'spy', id, trade_date, kind, created_at, status,"
+        " NULL, NULL, NULL, quick_count, quick_total, deep_count, deep_total"
+        " FROM spy_scans"
         f" WHERE status IN ({placeholders})"
         " LIMIT 1",
         busy_statuses,

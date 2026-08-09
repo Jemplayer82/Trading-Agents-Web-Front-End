@@ -301,3 +301,67 @@ class TestWaitMarketKillSwitchRestoresBusy:
                 busy = scan_queue._is_any_scan_running(conn)
             assert busy is None, f"value={value!r} must NOT count the waiter as busy"
             db.update_spy_scan(scan_id, status="completed")
+
+
+class TestStatusRunningProgressFields:
+    """``/api/portfolio/status`` single-row polls carry live progress counters."""
+
+    def test_running_portfolio_row_carries_progress(self, tmp_db):
+        sid = db.create_portfolio_scan("2026-08-03", status="running")
+        db.update_portfolio_scan(sid, scanned_count=7, scan_total=42, current_ticker="AAPL")
+
+        running = portfolio_main.scan_status()["running"]
+
+        assert running["scan_type"] == "portfolio"
+        assert running["status"] == "running"
+        assert running["scanned_count"] == 7
+        assert running["scan_total"] == 42
+        assert running["current_ticker"] == "AAPL"
+        assert running["quick_count"] is None
+        assert running["quick_total"] is None
+        assert running["deep_count"] is None
+        assert running["deep_total"] is None
+
+    def test_running_spy_row_carries_progress(self, tmp_db):
+        sid = db.create_spy_scan("2026-08-03", status="running_quick")
+        db.update_spy_scan(sid, quick_count=120, quick_total=500, deep_count=3, deep_total=50)
+
+        running = portfolio_main.scan_status()["running"]
+
+        assert running["scan_type"] == "spy"
+        assert running["status"] == "running_quick"
+        assert running["quick_count"] == 120
+        assert running["quick_total"] == 500
+        assert running["deep_count"] == 3
+        assert running["deep_total"] == 50
+        assert running["scanned_count"] is None
+        assert running["scan_total"] is None
+        assert running["current_ticker"] is None
+
+    def test_waiting_spy_row_carries_progress(self, tmp_db):
+        sid = db.create_spy_scan("2026-08-03", status="running_wait_market")
+        db.update_spy_scan(sid, quick_count=500, quick_total=500, deep_count=50, deep_total=50)
+
+        waiting = portfolio_main.scan_status()["waiting"][0]
+
+        assert waiting["status"] == "running_wait_market"
+        assert waiting["quick_count"] == 500
+        assert waiting["quick_total"] == 500
+        assert waiting["deep_count"] == 50
+        assert waiting["deep_total"] == 50
+
+    def test_original_running_keys_unchanged(self, tmp_db):
+        sid = db.create_portfolio_scan("2026-08-03", status="running")
+        db.update_portfolio_scan(sid, scanned_count=7, scan_total=42, current_ticker="AAPL")
+
+        running = portfolio_main.scan_status()["running"]
+
+        assert running["scan_type"] == "portfolio"
+        assert running["id"] == sid
+        assert running["trade_date"] == "2026-08-03"
+        assert running["kind"] == "equity"
+        assert running["created_at"] is not None
+
+    def test_no_running_scan_still_none(self, tmp_db):
+        db.create_portfolio_scan("2026-08-03", status="queued")
+        assert portfolio_main.scan_status()["running"] is None

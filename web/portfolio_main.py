@@ -83,7 +83,14 @@ def scan_status() -> dict[str, Any]:
     Returns the actively running scan (if any), the ordered queue of waiting scans,
     and a ``waiting`` list of scans parked in the market-open (or allocation-slot)
     wait — alive and heartbeating, but not holding the compute slot.
-    The nginx /api/portfolio prefix block routes this to the portfolio app.
+
+    The ``running`` object carries ``scan_type``, ``id``, ``trade_date``, ``kind``,
+    ``created_at``, ``status``, and progress fields: for a portfolio row,
+    ``scanned_count`` / ``scan_total`` / ``current_ticker`` with the spy counters
+    NULL; for a spy row, ``quick_count`` / ``quick_total`` / ``deep_count`` /
+    ``deep_total`` with the portfolio counters NULL. ``waiting`` rows carry the
+    same base keys plus the spy progress counters too. The nginx /api/portfolio
+    prefix block routes this to the portfolio app.
     """
     with db.connect() as conn:
         running_row = scan_queue._is_any_scan_running(conn)
@@ -95,7 +102,8 @@ def scan_status() -> dict[str, Any]:
             " ORDER BY created_at"
         ).fetchall()
         waiting_rows = conn.execute(
-            "SELECT 'spy' AS scan_type, id, trade_date, kind, created_at, status"
+            "SELECT 'spy' AS scan_type, id, trade_date, kind, created_at, status,"
+            " quick_count, quick_total, deep_count, deep_total"
             " FROM spy_scans WHERE status IN ('running_wait_market', 'running_wait_alloc') ORDER BY created_at"
         ).fetchall()
     return {
