@@ -791,6 +791,26 @@ def list_analyses(limit: int = 50) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def recent_analysis_tickers(created_after_iso: str) -> list[str]:
+    """Distinct, uppercased tickers with any analysis row created at/after the cutoff.
+
+    Cheap relevance probe for the nightly outcome sweep: the analyses table
+    is written both by ad-hoc single-ticker runs and by the S&P/options
+    scanner's deep dives (web/spy_scanner.py's db.create_analysis calls), so
+    "appears here recently" is "was deep-dived recently" in practice.
+    Deliberately unfiltered by status — a failed or in-flight run still means
+    somebody cared about the name. ``created_after_iso`` uses the same UTC
+    ``isoformat(timespec="seconds") + "Z"`` format rows are stored in (see
+    create_analysis, line 688); idx_analyses_created_at (line 127) covers the scan.
+    """
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT ticker FROM analyses WHERE created_at >= ? ORDER BY ticker",
+            (created_after_iso,),
+        ).fetchall()
+    return [str(r["ticker"]).upper() for r in rows if r["ticker"]]
+
+
 def get_analysis(analysis_id: int) -> dict[str, Any] | None:
     with connect() as conn:
         row = conn.execute("SELECT * FROM analyses WHERE id = ?", (analysis_id,)).fetchone()

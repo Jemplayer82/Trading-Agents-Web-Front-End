@@ -25,6 +25,7 @@ testing inside the container without waiting for cron).
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -360,8 +361,94 @@ def job_options_grade() -> None:
         log.exception("[options_grade] crashed")
 
 
+# Tickers that are always worth an LLM reflection regardless of holdings.
+# Mirrors the ALWAYS_DEEP tuple in the tier-4 options engine
+# byte-for-byte rather than importing it: that file is tier-4-only, this
+# scheduler ships at every tier, and the leak canary is a plain text grep
+# over module names — even a function-local import would trip it. Keep in sync.
+_ALWAYS_RELEVANT = ("SPY",)
+
+# How far back an analysis counts as "someone is watching this ticker".
+# MUST comfortably exceed reflection_holding_days (5): an entry is analyzed
+# ON its trade date and only matures ~a week later, so a shorter window
+# would gate out the very entries that analysis created.
+SWEEP_RELEVANCE_DAYS = 14
+
+
+def _sweep_relevant_tickers() -> set[str] | None:
+    """Uppercased tickers whose resolved outcomes anyone will actually read."""
+    try:
+        out: set[str] = set()
+
+        # 1. Equity paper holdings.
+        if features.enabled("sp500") or features.enabled("options"):
+            try:
+                for acct in db.list_paper_accounts(kind="equity"):
+                    latest = db.get_latest_completed_spy_scan(
+                        paper_account_id=acct["id"],
+                        kind="equity",
+                    )
+                    if not latest:
+                        continue
+                    portfolio = latest.get("portfolio_json")
+                    if isinstance(portfolio, str):
+                        try:
+                            portfolio = json.loads(portfolio)
+                        except (TypeError, ValueError):
+                            portfolio = None
+                    if not isinstance(portfolio, list):
+                        continue
+                    for pos in portfolio:
+                        if not isinstance(pos, dict):
+                            continue
+                        if pos.get("action") != "EXITED":
+                            ticker = pos.get("ticker")
+                            if ticker:
+                                out.add(str(ticker).upper())
+            except Exception:
+                log.warning(
+                    "[outcome_sweep] equity holdings relevance source failed",
+                    exc_info=True,
+                )
+
+        # 2. Open options underlyings.
+        if features.enabled("options"):
+            try:
+                for pos in db.list_options_positions(status="open"):
+                    underlying = pos.get("underlying")
+                    if underlying:
+                        out.add(str(underlying).upper())
+            except Exception:
+                log.warning(
+                    "[outcome_sweep] options underlyings relevance source failed",
+                    exc_info=True,
+                )
+
+        # 3. Always relevant.
+        out.update(_ALWAYS_RELEVANT)
+
+        # 4. Recently analyzed tickers.
+        try:
+            out.update(db.recent_analysis_tickers(_cutoff_iso(SWEEP_RELEVANCE_DAYS * 24 * 60)))
+        except Exception:
+            log.warning(
+                "[outcome_sweep] recent analysis relevance source failed",
+                exc_info=True,
+            )
+
+        # Empty set ⇒ fail-open to ungated behavior so a DB hiccup can't
+        # silently stop the agents from learning.
+        if not out:
+            log.warning("[outcome_sweep] relevance set assembled empty — disabling gate")
+            return None
+        return out
+    except Exception:
+        log.exception("[outcome_sweep] relevance computation crashed")
+        return None
+
+
 def job_outcome_sweep() -> None:
-    """Resolve ALL matured pending memory-log decisions (every ticker).
+    """Resolve matured pending memory-log decisions.
 
     In-process like the newsletter: this container mounts the same
     ``tradingagents_data`` volume that holds the memory log, so no HTTP hop is
@@ -370,10 +457,18 @@ def job_outcome_sweep() -> None:
     happens, so decisions sit pending forever and the agents learn from a
     sparse, survivor-biased subset of their own track record.
 
+    LLM cost is now bounded by BOTH ``sweep_max_reflections_per_run`` AND a
+    relevance gate computed here in the scheduler (only this container has DB
+    access; outcome_resolution.py is tier-agnostic). Tickers not held in any
+    paper account, not in the always-relevant set, and not analyzed within
+    ``SWEEP_RELEVANCE_DAYS`` days receive a free canned NOT-RELEVANT reflection
+    instead of consuming budget. The gate disables itself (falls back to
+    ungated behavior) on any error or an empty result, so a DB hiccup cannot
+    silently stop the agents from learning.
+
     Runs after US close so day-0 bars are final; the maturity guard inside
     ``resolve_all_pending`` ensures each entry waits for its full holding
-    window. LLM cost is bounded by ``sweep_max_reflections_per_run``; canned
-    NOISE/CENSORED reflections are free.
+    window. Canned NOISE/CENSORED reflections remain free.
     """
     log.info("[outcome_sweep] starting")
     _apply_db_config()  # LLM provider keys may live in the shared DB
@@ -421,11 +516,14 @@ def job_outcome_sweep() -> None:
             reflector = Reflector(llm)
         except Exception:
             log.exception("[outcome_sweep] LLM client unavailable — resolving canned entries only")
+        relevant = _sweep_relevant_tickers()
+        log.info("[outcome_sweep] relevance gate: %s", "off" if relevant is None else f"{len(relevant)} tickers")
         summary = resolve_all_pending(
             memory_log,
             reflector,
             config,
             max_reflections=config.get("sweep_max_reflections_per_run", 50),
+            relevant_tickers=relevant,
         )
         log.info("[outcome_sweep] done: %s", summary)
         try:
