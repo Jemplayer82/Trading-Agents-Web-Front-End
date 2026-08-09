@@ -355,6 +355,7 @@ def test_analyst_tool_loop_gates_each_turn(offline_orchestrator_factory, monkeyp
     assert gate.acquires == 2
     assert gate.releases == 2
     assert gate.max_held == 1
+    assert gate.log == [("acquire", 1), ("release", 1), ("acquire", 1), ("release", 1)]
 
 
 def test_parallel_analysts_are_each_gated(offline_orchestrator_factory, monkeypatch):
