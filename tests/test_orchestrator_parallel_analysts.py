@@ -500,6 +500,22 @@ def test_analyst_exception_propagates_out_of_run(tmp_path, monkeypatch):
 def test_unknown_analyst_keys_are_skipped_at_both_limits(tmp_path, monkeypatch, limit):
     _patch_downstream_factories(monkeypatch)
     _patch_default_analyst_factories(monkeypatch)
+
+    calls = {"sequential": False, "parallel": False}
+    orig_seq = SwitchboardOrchestrator._run_analysts_sequential
+    orig_par = SwitchboardOrchestrator._run_analysts_parallel
+
+    def spy_seq(self, state, analyst_keys):
+        calls["sequential"] = True
+        return orig_seq(self, state, analyst_keys)
+
+    def spy_par(self, state, analyst_keys, limit_):
+        calls["parallel"] = True
+        return orig_par(self, state, analyst_keys, limit_)
+
+    monkeypatch.setattr(SwitchboardOrchestrator, "_run_analysts_sequential", spy_seq)
+    monkeypatch.setattr(SwitchboardOrchestrator, "_run_analysts_parallel", spy_par)
+
     orch = _make_orchestrator(
         tmp_path,
         selected_analysts=["market", "bogus"],
@@ -515,10 +531,33 @@ def test_unknown_analyst_keys_are_skipped_at_both_limits(tmp_path, monkeypatch, 
     assert state["news_report"] == ""
     assert state["fundamentals_report"] == ""
 
+    if limit == 1:
+        assert calls["sequential"]
+        assert not calls["parallel"]
+    else:
+        assert not calls["sequential"]
+        assert calls["parallel"]
+
 
 def test_empty_analyst_selection_completes_at_limit_4(tmp_path, monkeypatch):
     _patch_downstream_factories(monkeypatch)
     _patch_default_analyst_factories(monkeypatch)
+
+    calls = {"sequential": False, "parallel": False}
+    orig_seq = SwitchboardOrchestrator._run_analysts_sequential
+    orig_par = SwitchboardOrchestrator._run_analysts_parallel
+
+    def spy_seq(self, state, analyst_keys):
+        calls["sequential"] = True
+        return orig_seq(self, state, analyst_keys)
+
+    def spy_par(self, state, analyst_keys, limit_):
+        calls["parallel"] = True
+        return orig_par(self, state, analyst_keys, limit_)
+
+    monkeypatch.setattr(SwitchboardOrchestrator, "_run_analysts_sequential", spy_seq)
+    monkeypatch.setattr(SwitchboardOrchestrator, "_run_analysts_parallel", spy_par)
+
     orch = _make_orchestrator(
         tmp_path,
         selected_analysts=["nonexistent"],
@@ -533,4 +572,5 @@ def test_empty_analyst_selection_completes_at_limit_4(tmp_path, monkeypatch):
     assert state["sentiment_report"] == ""
     assert state["news_report"] == ""
     assert state["fundamentals_report"] == ""
-
+    assert calls["sequential"]
+    assert not calls["parallel"]

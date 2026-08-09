@@ -12,15 +12,20 @@ Pipeline order:
     → risk debate: aggressive/conservative/neutral (max_risk_discuss_rounds full rounds)
     → portfolio manager → final_trade_decision
 
-Analyst concurrency: the analyst phase is sequential by default. Setting
-`config['analyst_concurrency_limit']` to a value greater than 1 runs up to
-that many analysts concurrently on worker threads; each worker sees its own
-shallow copy of the pipeline state with a private `messages` list. Only the
-main thread writes back to the shared state, merging each analyst's report
-key as its future resolves. `self._current_node` is backed by
-`threading.local()` so streaming token frames are always attributed to the
-analyst that produced them. `tradingagents/default_config.py` keeps the
-default at 1, so parallel execution is inert unless a deployment opts in.
+Analyst concurrency: the analyst phase is sequential by default. A
+configurable concurrency limit (`config['analyst_concurrency_limit']`)
+selects the execution mode: any value greater than 1 with at least one
+valid selected analyst runs those analysts concurrently on worker threads;
+otherwise the sequential path is used. The worker pool is sized by
+clamping the configured limit to the actual number of analysts being run,
+so `ThreadPoolExecutor(max_workers=...)` is never larger than the work
+list. Each worker sees its own shallow copy of the pipeline state with a
+private `messages` list. Only the main thread writes back to the shared
+state, merging each analyst's report key as its future resolves.
+`self._current_node` is backed by `threading.local()` so streaming token
+frames are always attributed to the analyst that produced them.
+`tradingagents/default_config.py` keeps the default at 1, so parallel
+execution is inert unless a deployment opts in.
 
 LLM gating: the optional `gate` constructor argument is duck-typed — any
 object exposing `acquire(weight=1)` / `release(weight=1)` works (for example,
@@ -359,19 +364,38 @@ class SwitchboardOrchestrator:
             self._clear_messages(state)
 
     def _analyst_concurrency_limit(self, n_analysts: int) -> int:
-        """How many analysts may run at once.
+        """Worker-pool size passed to `_run_analysts_parallel`.
 
         Config knob `analyst_concurrency_limit` (tradingagents/default_config.py,
         default 1 = today's strictly sequential loop). Floors at 1 and caps at
         the number of selected analysts. Anything unparsable falls back to 1 --
         a bad config value must never turn the analyst phase into an unbounded
         fan-out at a live trading desk.
+
+        This is the *max_workers* value for the parallel path; the routing
+        decision between sequential and parallel is made by `run()` based on
+        the configured concurrency limit and whether any analysts were actually
+        selected.
         """
         try:
             limit = int(self.config.get("analyst_concurrency_limit", 1))
         except (TypeError, ValueError):
             limit = 1
         return max(1, min(limit, max(1, n_analysts)))
+
+    def _parsed_analyst_concurrency_limit(self) -> int:
+        """Raw configured concurrency limit, floored at 1.
+
+        This is the *routing* value used by `run()` to choose between the
+        sequential and parallel analyst paths. It is NOT capped at the
+        number of analysts, so a config value > 1 still drives the parallel
+        path even when the filtered analyst list is short.
+        """
+        try:
+            limit = int(self.config.get("analyst_concurrency_limit", 1))
+        except (TypeError, ValueError):
+            limit = 1
+        return max(1, limit)
 
     def _analyst_local_state(self, state: dict, ticker: str) -> dict:
         """A private, per-analyst copy of the shared pipeline state.
@@ -593,10 +617,11 @@ class SwitchboardOrchestrator:
 
         # ── Phase 1: Analysts ────────────────────────────────────────────────────
         analyst_keys = [k for k in self.selected_analysts if k in _ANALYST_SPECS]
-        analyst_limit = self._analyst_concurrency_limit(len(analyst_keys))
-        if analyst_limit <= 1:
+        parsed_limit = self._parsed_analyst_concurrency_limit()
+        if parsed_limit <= 1 or not analyst_keys:
             self._run_analysts_sequential(state, analyst_keys)
-        elif analyst_keys:
+        else:
+            analyst_limit = self._analyst_concurrency_limit(len(analyst_keys))
             self._run_analysts_parallel(state, analyst_keys, analyst_limit)
 
         # ── Phase 2: Investment debate ───────────────────────────────────────────
