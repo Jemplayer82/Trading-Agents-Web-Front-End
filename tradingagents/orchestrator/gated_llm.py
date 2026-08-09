@@ -74,6 +74,11 @@ class GatedLLM(Runnable):
         # own attributes so a partially-initialised instance can't recurse.
         if name in {"_inner", "_gate"}:
             raise AttributeError(name)
+        # Refuse to proxy raw BaseChatModel entry points that bypass the gate.
+        # These are not on Runnable, so without this block they would silently
+        # perform an ungated network round-trip.
+        if name in {"generate", "agenerate", "predict", "predict_messages", "get_num_tokens"}:
+            raise AttributeError(name)
         return getattr(object.__getattribute__(self, "_inner"), name)
 
     def __repr__(self) -> str:
