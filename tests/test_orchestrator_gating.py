@@ -8,11 +8,11 @@ object graph byte-for-byte.
 import pytest
 from langchain_core.messages import AIMessage
 
+from tests.test_gated_llm import CountingGate, FakeChatModel
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.orchestrator import switchboard_orchestrator as sbo_module
 from tradingagents.orchestrator.gated_llm import GatedLLM
 from tradingagents.orchestrator.switchboard_orchestrator import SwitchboardOrchestrator
-from tests.test_gated_llm import CountingGate, FakeChatModel
 
 pytestmark = pytest.mark.unit
 
@@ -425,3 +425,4 @@ def test_factories_still_receive_the_orchestrators_own_llm_object(offline_orches
 
     assert captured["market_llm"] is orch._quick_llm
     assert captured["pm_llm"] is orch._deep_llm
+

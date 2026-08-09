@@ -11,6 +11,34 @@ Pipeline order:
     → trader
     → risk debate: aggressive/conservative/neutral (max_risk_discuss_rounds full rounds)
     → portfolio manager → final_trade_decision
+
+Analyst concurrency: the analyst phase is sequential by default. Setting
+`config['analyst_concurrency_limit']` to a value greater than 1 runs up to
+that many analysts concurrently on worker threads; each worker sees its own
+shallow copy of the pipeline state with a private `messages` list. Only the
+main thread writes back to the shared state, merging each analyst's report
+key as its future resolves. `self._current_node` is backed by
+`threading.local()` so streaming token frames are always attributed to the
+analyst that produced them. `tradingagents/default_config.py` keeps the
+default at 1, so parallel execution is inert unless a deployment opts in.
+
+LLM gating: the optional `gate` constructor argument is duck-typed — any
+object exposing `acquire(weight=1)` / `release(weight=1)` works (for example,
+`web.llm_helpers.DynamicGate`). When supplied, `wrap_llm` in
+`tradingagents/orchestrator/gated_llm.py` makes every `llm.invoke()` take
+exactly one permit. The default `gate=None` leaves the LLM objects untouched
+and ungated. A permit wraps a single `llm.invoke()` and is never held across
+another acquire; callers must not also hold a whole-run permit on the same
+gate, because that would deadlock the nested acquire. See
+`web/spy_scanner.py`'s `DEEP_DIVE_PER_CALL_GATING`.
+
+Known constraint (pre-existing, not introduced here):
+`tradingagents/dataflows/config.py`'s `set_config` / `get_config` pair is a
+bare module-level global that `__init__` writes and is NOT thread-local. This
+is benign today because `web/spy_scanner.py::run_deep_dives` hands every
+concurrent orchestrator the same `config` dict object, so all writers store
+identical values. It is, however, a real constraint on ever running
+orchestrators with DIFFERENT configs in the same process.
 """
 
 from __future__ import annotations

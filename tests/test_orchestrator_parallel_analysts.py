@@ -1,7 +1,7 @@
-import pytest
 import threading
 import time
 
+import pytest
 from langchain_core.messages import AIMessage
 
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -307,7 +307,7 @@ def test_each_parallel_analyst_gets_its_own_messages_list(tmp_path, monkeypatch)
     ids = {obs[0] for obs in observations.values()}
     assert len(ids) == 4
 
-    for key, (_, report_key) in _ANALYST_FACTORY_MAP.items():
+    for key, (_, _report_key) in _ANALYST_FACTORY_MAP.items():
         msg_id, seed = observations[key]
         assert seed == [("human", "AAPL")]
         # No other analyst ever saw this analyst's sentinel.
@@ -533,3 +533,4 @@ def test_empty_analyst_selection_completes_at_limit_4(tmp_path, monkeypatch):
     assert state["sentiment_report"] == ""
     assert state["news_report"] == ""
     assert state["fundamentals_report"] == ""
+

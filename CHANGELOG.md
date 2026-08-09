@@ -116,7 +116,32 @@ Breaking changes within the 0.x line are called out explicitly.
     dispatches `kind='options'` rows to the options build (not the equity
     pipeline).
 
+- **Parallel analyst execution.** `SwitchboardOrchestrator` now honors the
+  pre-existing `analyst_concurrency_limit` config knob, which was plumbed but
+  previously read by nothing. When set above 1, selected analysts run on
+  worker threads, each with its own isolated `messages` list; report merging
+  happens only on the main thread as each future resolves. Node labeling is
+  thread-local (`self._current_node` backed by `threading.local()`), so
+  streaming token frames are always attributed to the analyst that produced
+  them. The knob remains **default 1** in
+  `tradingagents/default_config.py`; raising it in a deployed scan config is
+  a separate operational decision.
+
 ### Changed
+
+- **Deep-dive gate permits move from whole-dive to per-LLM-call.** Inside
+  `SwitchboardOrchestrator(gate=...)`, every `llm.invoke()` now acquires
+  exactly one `DynamicGate` permit for its own duration, so a dive waiting on
+  a news or price fetch no longer squats on LLM capacity. The gate capacity
+  itself (`max(1, TOTAL - active_singles)`) is unchanged, but
+  `run_deep_dives` widens its worker pool to
+  `2 * OLLAMA_MAX_CONCURRENCY` (`budget`) so non-LLM phases can overlap.
+  **`DEEP_DIVE_PER_CALL_GATING=0`** is the single rollback switch: it reverts
+  both the gating position and the pool size together, because a whole-dive
+  permit plus an inner per-call permit would deadlock (and the portfolio
+  container has prior host-level OOM history under its 4g limit).
+  `SwitchboardOrchestrator(gate=...)` remains optional and defaults to
+  `None`, so the CLI and single-ticker web runs are ungated and unchanged.
 
 - ⚠️ `memory_log_max_entries` default raised 300 → 1000: deep-dive volume
   (~50 entries/weekday) churned the 300-entry rotation window in under 6

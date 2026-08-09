@@ -12,6 +12,14 @@ re-read per scan so a value saved in dashboard Settings applies without a
 redeploy. Stale activity rows (crashed api runs) age out via the heartbeat TTL
 in db.count_active_single, so they can't permanently throttle the scanner.
 
+The same DynamicGate still sizes to `max(1, TOTAL - active_singles)` and
+therefore still caps LLM concurrency, but the permit is now taken per
+`llm.invoke()` inside `SwitchboardOrchestrator` rather than per whole dive.
+`run_deep_dives` widens its worker pool to `2 * OLLAMA_MAX_CONCURRENCY`
+(`budget`) so a dive blocked on a tool fetch doesn't idle gate capacity.
+`DEEP_DIVE_PER_CALL_GATING` controls both halves together — gating position
+and pool size — and must be flipped as a single switch.
+
 Cancellation is cooperative: the cancel endpoint sets
 spy_scans.cancel_requested=1; workers check it between tickers and raise
 ScanCancelled, which the caller records as status 'cancelled' (not 'failed').

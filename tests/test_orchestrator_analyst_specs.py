@@ -6,8 +6,8 @@ from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.analyst_execution import ANALYST_NODE_SPECS
 from tradingagents.orchestrator import switchboard_orchestrator as sbo_module
 from tradingagents.orchestrator.switchboard_orchestrator import (
-    SwitchboardOrchestrator,
     _ANALYST_SPECS,
+    SwitchboardOrchestrator,
 )
 
 pytestmark = pytest.mark.unit
@@ -113,3 +113,4 @@ def test_unknown_analyst_key_raises_keyerror(tmp_path):
     orch = _orch(tmp_path)
     with pytest.raises(KeyError):
         orch._build_analyst_node("bogus")
+

@@ -77,6 +77,12 @@ services:
       # ThreadPoolExecutor(max_workers=8) ceiling (scripts/cleo_llm_handler.py),
       # so the scan-side gate no longer throttles below what Cleo can serve.
       OLLAMA_MAX_CONCURRENCY: "8"
+      # Kill switch for per-LLM-call deep-dive gating + the 2x dive pool
+      # (web/spy_scanner.py::_per_call_gating_enabled). Set to "0" to restore
+      # one gate permit per whole dive and max_workers=budget — the rollback
+      # if concurrent dives start pressuring this container's 4g mem_limit.
+      # At OLLAMA_MAX_CONCURRENCY=8 the deep-dive pool admits 16 dives.
+      DEEP_DIVE_PER_CALL_GATING: "1"
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-https://ollama.com/v1}
       OLLAMA_API_KEY: ${OLLAMA_API_KEY}
       SCHWAB_APP_KEY: ${SCHWAB_APP_KEY}
