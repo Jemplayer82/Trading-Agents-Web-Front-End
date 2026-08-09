@@ -124,6 +124,19 @@ class TestSweepRelevantTickers:
         result = scheduler._sweep_relevant_tickers()
         assert result is None
 
+    def test_whole_body_failure_fails_open_to_none(self, tmp_db, monkeypatch):
+        """An exception outside the per-source try/except blocks must hit the outer catch.
+
+        Patching _ALWAYS_RELEVANT to a non-iterable makes ``out.update(_ALWAYS_RELEVANT)``
+        raise after all inner sources have succeeded, so the only handler that can catch it
+        is the function-level ``except Exception`` that returns ``None``.
+        """
+        monkeypatch.setenv("FEATURES", "")
+        monkeypatch.setattr(db, "recent_analysis_tickers", lambda cutoff: [])
+        monkeypatch.setattr(scheduler, "_ALWAYS_RELEVANT", 1)
+        result = scheduler._sweep_relevant_tickers()
+        assert result is None
+
 
 class TestSweepWiring:
     def test_sweep_receives_relevant_tickers(self, tmp_db, monkeypatch):
