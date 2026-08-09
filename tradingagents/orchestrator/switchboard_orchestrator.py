@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
@@ -276,6 +277,103 @@ class SwitchboardOrchestrator:
                 self._emit({"type": "report_update", "reports": {spec.report_key: report}})
             self._clear_messages(state)
 
+    def _analyst_concurrency_limit(self, n_analysts: int) -> int:
+        """How many analysts may run at once.
+
+        Config knob `analyst_concurrency_limit` (tradingagents/default_config.py,
+        default 1 = today's strictly sequential loop). Floors at 1 and caps at
+        the number of selected analysts. Anything unparsable falls back to 1 --
+        a bad config value must never turn the analyst phase into an unbounded
+        fan-out at a live trading desk.
+        """
+        try:
+            limit = int(self.config.get("analyst_concurrency_limit", 1))
+        except (TypeError, ValueError):
+            limit = 1
+        return max(1, min(limit, max(1, n_analysts)))
+
+    def _analyst_local_state(self, state: dict, ticker: str) -> dict:
+        """A private, per-analyst copy of the shared pipeline state.
+
+        A SHALLOW copy is correct and deliberate: analysts read only scalars
+        off state and write only top-level `messages` plus their own report
+        key, never a nested container. The messages list is a brand-new object
+        seeded exactly like run()'s pre-analyst-phase state, so concurrent
+        tool-calling loops can never interleave ToolMessages into each other's
+        conversation, and it is non-empty with a leading human turn -- the same
+        guarantee _clear_messages's placeholder exists to give Anthropic.
+
+        Built on the MAIN thread before submit, so no worker ever reads the
+        shared state dict while the main thread is merging into it.
+        """
+        local = dict(state)
+        local["messages"] = [("human", ticker)]
+        return local
+
+    def _run_analyst_isolated(self, node, node_name: str, report_key: str, local_state: dict) -> str:
+        """Worker-thread body: run ONE analyst against its OWN state copy.
+
+        Returns only that analyst's report text; the caller merges it into the
+        shared state ON THE MAIN THREAD. `local_state` must already be private
+        to this call -- nothing in here may touch the shared state dict.
+        """
+        self._current_node = node_name
+        try:
+            self._run_analyst(node, local_state)
+            return local_state.get(report_key, "") or ""
+        finally:
+            # Pool threads are reused -- never leak the label to the next task.
+            self._current_node = None
+
+    def _run_analysts_parallel(self, state: dict, analyst_keys: list[str], limit: int) -> None:
+        """Run analysts concurrently, at most `limit` in flight.
+
+        Thread-safety contract:
+          * Nodes and per-analyst state copies are built on the MAIN thread at
+            submit time, keeping factory-call order deterministic (several
+            tests monkeypatch the factories and assert on what they received).
+          * NOTHING writes the shared `state` dict from a worker; the main
+            thread merges each analyst's own report key as its future resolves.
+          * `self._current_node` is thread-local, so each worker labels its own
+            streaming token frames.
+          * `self.on_progress` may therefore be invoked concurrently from
+            worker threads (via _run_analyst's tool-call summary frames and
+            _emit_token). The only in-tree consumer with a non-None callback is
+            web/runner.py, which pushes to a thread-safe queue.Queue;
+            web/spy_scanner.py passes on_progress=None. `_emit` already
+            swallows callback exceptions.
+
+        Post-condition matches _run_analysts_sequential exactly: the shared
+        state ends with _clear_messages applied, so every downstream phase sees
+        identical input on both paths.
+        """
+        ticker = state["company_of_interest"]
+        with ThreadPoolExecutor(max_workers=limit, thread_name_prefix="analyst") as pool:
+            futures = {}
+            for analyst_key in analyst_keys:
+                spec = _ANALYST_SPECS[analyst_key]
+                # Status frames are emitted on the main thread at submit time,
+                # in selected_analysts order, so the frame text is identical to
+                # the sequential path. With limit < len(analyst_keys) a frame
+                # can precede the analyst actually starting; accepted, rather
+                # than emitting from workers.
+                self._emit({"type": "status", "message": f"Running {analyst_key} analyst…"})
+                node = self._build_analyst_node(analyst_key)
+                local_state = self._analyst_local_state(state, ticker)
+                futures[pool.submit(
+                    self._run_analyst_isolated, node, spec.node_name, spec.report_key, local_state,
+                )] = analyst_key
+            for fut in as_completed(futures):
+                spec = _ANALYST_SPECS[futures[fut]]
+                # Re-raises a worker exception on the main thread, matching the
+                # sequential path's fail-the-run behaviour. The enclosing `with`
+                # still shuts the pool down with wait=True first.
+                report = fut.result()
+                state[spec.report_key] = report
+                if report:
+                    self._emit({"type": "report_update", "reports": {spec.report_key: report}})
+        self._clear_messages(state)
+
     def _run_analyst(self, analyst_node, state: dict) -> None:
         """Run an analyst through its tool-calling loop until no tool_calls remain.
 
@@ -384,7 +482,11 @@ class SwitchboardOrchestrator:
 
         # ── Phase 1: Analysts ────────────────────────────────────────────────────
         analyst_keys = [k for k in self.selected_analysts if k in _ANALYST_SPECS]
-        self._run_analysts_sequential(state, analyst_keys)
+        analyst_limit = self._analyst_concurrency_limit(len(analyst_keys))
+        if analyst_limit <= 1:
+            self._run_analysts_sequential(state, analyst_keys)
+        elif analyst_keys:
+            self._run_analysts_parallel(state, analyst_keys, analyst_limit)
 
         # ── Phase 2: Investment debate ───────────────────────────────────────────
         self._emit({"type": "status", "message": f"Starting investment debate ({max_debate} round(s))…"})
@@ -464,8 +566,8 @@ class SwitchboardOrchestrator:
         loaded memory context.
 
         Everything upstream of the Portfolio Manager — analysts, the
-        investment debate, the research manager, the trader, the risk debate
-        — is a pure function of (ticker, trade_date, shared-stage config): no
+        investment debate, the research manager, the trader, the risk debate —
+        is a pure function of (ticker, trade_date, shared-stage config): no
         agent up to and including the risk debate reads ``bias``/
         ``bias_context`` or the memory log's ``past_context`` (see
         tradingagents/agents/utils/memory.py's injection-point invariant).
