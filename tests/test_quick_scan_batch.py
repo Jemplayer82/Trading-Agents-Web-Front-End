@@ -544,6 +544,12 @@ class TestRunQuickScanBatching:
 
         results = spy_scanner.run_quick_scan(scan_id, tickers, "2026-08-03", base_config)
         quick_count_calls = [c for c in update_calls if "quick_count" in c]
-        assert len(quick_count_calls) >= 2
+
+        batch_size = spy_scanner._quick_batch_size()
+        number_of_batches = (len(tickers) + batch_size - 1) // batch_size
+        # One flush before batching, one flush per completed batch, and a final
+        # flush after the ThreadPoolExecutor loop.
+        assert len(quick_count_calls) >= number_of_batches + 2
+
         assert tmp_db.get_spy_scan(scan_id)["quick_count"] == 40
         assert len(results) == 40
