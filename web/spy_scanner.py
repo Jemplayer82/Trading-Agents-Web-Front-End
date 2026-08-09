@@ -616,7 +616,8 @@ def _fetch_price_data_map(
     _quick_scan_one), so we deliberately do not copy it.
 
     A fetch covering fewer than 80% of the requested tickers with usable
-    data (>=5 non-NaN closes per ticker) is never cached; the partial map is
+    data (>=5 non-NaN closes per ticker, the same bar _quick_scan_one
+    applies) is never cached; the partial map is
     still returned so the current scan degrades gracefully on whatever data
     it got.
     """
