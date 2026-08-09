@@ -80,6 +80,7 @@ TIER_ONLY_FILES: dict[int, list[str]] = {
         "web/static/spy.js",
         "tests/test_spy_scanner_store.py",
         "tests/test_spy_scan_status_endpoint.py",
+        "tests/test_quick_scan_batch.py",
         "tests/test_scan_health_guard.py",
         "tests/test_deep_dive_reuse.py",
     ],

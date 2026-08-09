@@ -19,6 +19,13 @@ ScanCancelled, which the caller records as status 'cancelled' (not 'failed').
 Progress: run_quick_scan writes quick_count/quick_total and run_deep_dives
 writes deep_count/deep_total on the spy_scans row; the frontend polls those
 every 5s for its progress bar.
+
+Batching: the quick scan can also process several tickers per LLM
+round-trip; each response line is parsed by ticker symbol (not by position)
+so a dropped, duplicated, or reordered line never shifts one company's
+signal onto another. The maximum number of tickers per batch is controlled
+by the QUICK_SCAN_BATCH_SIZE environment variable (default 20, minimum 1,
+invalid values fall back to 20).
 """
 from __future__ import annotations
 
@@ -165,10 +172,6 @@ _CONV_RE = re.compile(r"CONVICTION\s*:\s*([1-9]|10)", re.IGNORECASE)
 _REASON_RE = re.compile(r"REASONING\s*:\s*(.+)", re.IGNORECASE)
 
 
-def _llm_quick(config: dict[str, Any]):
-    return llm_for(config, deep=False, temperature=0.0)
-
-
 def _parse_quick_response(text: str) -> tuple[str, int, str]:
     """Pull SIGNAL / CONVICTION / REASONING out of the LLM reply.
 
@@ -190,6 +193,142 @@ def _parse_quick_response(text: str) -> tuple[str, int, str]:
     return signal, conviction, reasoning
 
 
+def _quick_features(ticker: str, price_data: dict[str, Any], sector: str) -> dict[str, Any] | None:
+    """Extract momentum features used by both the single-ticker and batch paths.
+
+    Returns ``None`` when there are fewer than 5 closes; callers must fall back
+    to the no-data HOLD/1 row.
+    """
+    closes = price_data.get("close", [])
+    if len(closes) < 5:
+        return None
+    price = float(closes[-1])
+    ret5 = ((closes[-1] / closes[-5]) - 1) * 100 if len(closes) >= 5 else 0
+    ret20 = ((closes[-1] / closes[0]) - 1) * 100 if len(closes) >= 20 else 0
+    volumes = price_data.get("volume", [])
+    vol_ratio = 1.0
+    if len(volumes) >= 20 and volumes[-1] and sum(volumes[-20:]) > 0:
+        avg_vol = sum(volumes[-20:-1]) / 19
+        vol_ratio = float(volumes[-1]) / avg_vol if avg_vol else 1.0
+
+    return {
+        "ticker": ticker,
+        "price": price,
+        "ret5": ret5,
+        "ret20": ret20,
+        "vol_ratio": vol_ratio,
+        "sector": sector,
+        "price_data": price_data,
+    }
+
+
+def _invoke_with_retry(llm: ChatOpenAI, messages: list[dict], label: str, gate: DynamicGate | None = None) -> str:
+    """Invoke the LLM, retrying up to 3 times on 429/rate-limit errors."""
+    for attempt in range(4):
+        try:
+            if gate is not None:
+                with gate:
+                    resp = llm.invoke(messages)
+            else:
+                resp = llm.invoke(messages)
+            break
+        except Exception as e:
+            msg = str(e).lower()
+            if "429" in msg or "too many" in msg or "rate" in msg:
+                if attempt < 3:
+                    wait = 5 * (attempt + 1)
+                    log.warning("Quick scan 429 for %s, retrying in %ss", label, wait)
+                    time.sleep(wait)
+                    continue
+            raise
+    return resp.content if hasattr(resp, "content") else str(resp)
+
+
+QUICK_SCAN_BATCH_SYSTEM = (
+    "You are a momentum-based equity screener. You will be given recent price "
+    "data for SEVERAL tickers, one per numbered line. Score EVERY ticker.\n"
+    "Output EXACTLY one line per input ticker, in the same order, and nothing "
+    "else — no preamble, no commentary, no blank lines, no markdown:\n"
+    "TICKER|SIGNAL|CONVICTION|one short reason\n"
+    "SIGNAL is BUY, HOLD or SELL. CONVICTION is an integer 1-10. "
+    "The reason must not contain the | character. Be brief and decisive."
+)
+
+QUICK_SCAN_BATCH_LINE = (
+    "{n}. {ticker} | price {price:.2f} | 5d {ret5:+.1f}% | 20d {ret20:+.1f}% "
+    "| vol {vol_ratio:.1f}x avg | sector {sector}"
+)
+
+
+def _quick_batch_size() -> int:
+    """Tickers per LLM round-trip (default 20; QUICK_SCAN_BATCH_SIZE overrides).
+
+    On the deployed Switchboard/Cleo bus route each llm.invoke is a full
+    external PROCESS round-trip, so call COUNT dominates token volume.
+    Set QUICK_SCAN_BATCH_SIZE=1 to fall all the way back to today's
+    one-call-per-ticker behaviour.
+    """
+    try:
+        return max(1, int(os.environ.get("QUICK_SCAN_BATCH_SIZE", "20")))
+    except (ValueError, TypeError):
+        return 20
+
+
+def _build_quick_batch_prompt(rows: list[dict[str, Any]]) -> str:
+    """Build a numbered batch prompt from `_quick_features`-shaped rows."""
+    lines = []
+    for i, row in enumerate(rows, start=1):
+        lines.append(QUICK_SCAN_BATCH_LINE.format(
+            n=i,
+            ticker=row["ticker"],
+            price=row["price"],
+            ret5=row["ret5"],
+            ret20=row["ret20"],
+            vol_ratio=row["vol_ratio"],
+            sector=row["sector"],
+        ))
+    return "\n".join(lines)
+
+
+_BATCH_LINE_RE = re.compile(
+    r"^\s*(?:\d+[.)]\s*)?[*`]*\s*([A-Za-z0-9.\-^]{1,12})\s*\|\s*(BUY|HOLD|SELL)\s*\|\s*(10|[1-9])\s*(?:\|\s*(.*?))?\s*[*`]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def _parse_quick_batch_response(text: str, tickers: list[str]) -> dict[str, tuple[str, int, str]]:
+    """Parse a batched response, matching lines by ticker symbol.
+
+    Matching is by ticker SYMBOL, not by line position — a model that drops,
+    duplicates, or reorders a line must never shift one company's signal onto
+    another.
+    """
+    wanted = {t.upper(): t for t in tickers}
+    parsed: dict[str, tuple[str, int, str]] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = _BATCH_LINE_RE.match(line)
+        if not m:
+            continue
+        sym = m.group(1).upper()
+        if sym not in wanted:
+            continue
+        original = wanted[sym]
+        if original in parsed:
+            continue
+        signal = m.group(2).upper()
+        conviction = int(m.group(3))
+        reason = (m.group(4) or "").strip()[:500]
+        parsed[original] = (signal, conviction, reason)
+    return parsed
+
+
+def _llm_quick(config: dict[str, Any]):
+    return llm_for(config, deep=False, temperature=0.0)
+
+
 def _quick_scan_one(
     ticker: str,
     price_data: dict[str, Any],
@@ -203,53 +342,23 @@ def _quick_scan_one(
     "error" key, so one bad ticker can't sink the scan.
     """
     try:
-        closes = price_data.get("close", [])
-        if len(closes) < 5:
+        feats = _quick_features(ticker, price_data, sector)
+        if feats is None:
             return {"ticker": ticker, "signal": "HOLD", "conviction": 1,
                     "reasoning": "Insufficient price data.", "entry_price": 0.0}
-        price = float(closes[-1])
-        ret5 = ((closes[-1] / closes[-5]) - 1) * 100 if len(closes) >= 5 else 0
-        ret20 = ((closes[-1] / closes[0]) - 1) * 100 if len(closes) >= 20 else 0
-        volumes = price_data.get("volume", [])
-        vol_ratio = 1.0
-        if len(volumes) >= 20 and volumes[-1] and sum(volumes[-20:]) > 0:
-            avg_vol = sum(volumes[-20:-1]) / 19
-            vol_ratio = float(volumes[-1]) / avg_vol if avg_vol else 1.0
 
         prompt = QUICK_SCAN_USER.format(
-            ticker=ticker, price=price, ret5=ret5, ret20=ret20,
-            vol_ratio=vol_ratio, sector=sector,
+            ticker=ticker, price=feats["price"], ret5=feats["ret5"],
+            ret20=feats["ret20"], vol_ratio=feats["vol_ratio"], sector=sector,
         )
-        # Retry up to 3 times on 429 rate-limit responses. The dynamic gate
-        # caps how many of these LLM calls run at once (shared budget with
-        # single-ticker analyses).
-        for attempt in range(4):
-            try:
-                if gate is not None:
-                    with gate:
-                        resp = llm.invoke([
-                            {"role": "system", "content": QUICK_SCAN_SYSTEM},
-                            {"role": "user", "content": prompt},
-                        ])
-                else:
-                    resp = llm.invoke([
-                        {"role": "system", "content": QUICK_SCAN_SYSTEM},
-                        {"role": "user", "content": prompt},
-                        ])
-                break
-            except Exception as e:
-                msg = str(e).lower()
-                if "429" in msg or "too many" in msg or "rate" in msg:
-                    if attempt < 3:
-                        wait = 5 * (attempt + 1)
-                        log.warning("Quick scan 429 for %s, retrying in %ss", ticker, wait)
-                        time.sleep(wait)
-                        continue
-                raise
-        raw = resp.content if hasattr(resp, "content") else str(resp)
+        messages = [
+            {"role": "system", "content": QUICK_SCAN_SYSTEM},
+            {"role": "user", "content": prompt},
+        ]
+        raw = _invoke_with_retry(llm, messages, ticker, gate=gate)
         signal, conviction, reasoning = _parse_quick_response(raw)
         return {"ticker": ticker, "signal": signal, "conviction": conviction,
-                "reasoning": reasoning, "entry_price": price}
+                "reasoning": reasoning, "entry_price": feats["price"]}
     except Exception as exc:
         log.warning("Quick scan failed for %s: %s", ticker, exc)
         return {"ticker": ticker, "signal": "HOLD", "conviction": 1,
