@@ -66,6 +66,23 @@ _PRESCREEN_MIN_COMPLETENESS = 0.8
 _PRESCREEN_CACHE = market_cache.SameDayCache("options-prescreen",
                                              ttl_seconds=_PRESCREEN_TTL_SECONDS)
 
+def _parse_alloc_timeout_seconds() -> float:
+    """Allocation-slot timeout from the environment, read once at import time.
+
+    Env var ``OPTIONS_ALLOC_TIMEOUT_SECONDS`` overrides the default of 3600
+    seconds. Unparsable, empty, zero, or negative values fall back to the
+    default so the slot can never silently wait forever.
+    """
+    raw = os.environ.get("OPTIONS_ALLOC_TIMEOUT_SECONDS", "3600").strip()
+    try:
+        val = float(raw)
+    except ValueError:
+        return 3600.0
+    if val <= 0:
+        return 3600.0
+    return val
+
+
 # Serializes the POST-WAIT phase (mark-to-market -> chain fetch ->
 # allocator -> open/close -> complete_spy_scan) across concurrent
 # options builds. A build parked in _wait_for_market_open no longer
@@ -81,7 +98,11 @@ _PRESCREEN_CACHE = market_cache.SameDayCache("options-prescreen",
 # holding _ALLOC_LOCK can never block on _SCAN_LOCK, even when _SCAN_LOCK is held across the worker start.
 _ALLOC_LOCK = threading.Lock()
 _ALLOC_POLL_SECONDS = 30.0
-_ALLOC_TIMEOUT_SECONDS = 3600.0
+# Global allocation-slot hard timeout. Overridable at module load via the
+# OPTIONS_ALLOC_TIMEOUT_SECONDS environment variable; unparsable, zero, or
+# negative values fall back to 3600 seconds. Tests may monkeypatch this
+# module-level attribute directly.
+_ALLOC_TIMEOUT_SECONDS = _parse_alloc_timeout_seconds()
 
 
 def _slot_release_enabled() -> bool:
@@ -133,6 +154,15 @@ def _allocation_slot(scan_id: int) -> Iterator[None]:
     (web/scheduler.py STUCK_SCAN_STALL_MIN, default 60 min) and (b)
     still honours a cancel request while blocked. Fails loudly past
     _ALLOC_TIMEOUT_SECONDS instead of hanging a thread forever.
+
+    The timeout value defaults to 3600 seconds and may be overridden at
+    module load by the ``OPTIONS_ALLOC_TIMEOUT_SECONDS`` environment
+    variable. Unparsable, empty, zero, or negative values fall back to
+    the default so the slot can never silently wait forever.
+
+    If the timeout fires before this waiter ever acquires the lock, the
+    raised RuntimeError makes clear the scan never entered the allocation
+    phase (it remained queued behind another build).
     """
     waited = 0.0
     while not _ALLOC_LOCK.acquire(timeout=_ALLOC_POLL_SECONDS):
@@ -141,6 +171,7 @@ def _allocation_slot(scan_id: int) -> Iterator[None]:
             raise spy_scanner.ScanCancelled()
         if waited >= _ALLOC_TIMEOUT_SECONDS:
             raise RuntimeError(
+                f"scan never acquired the allocation lock (queued behind another build); "
                 f"timed out after {waited:.0f}s waiting for the allocation slot")
         # Heartbeat: reuses the existing running_wait_market label on
         # purpose -- this IS a wait, no new status vocabulary needed.
