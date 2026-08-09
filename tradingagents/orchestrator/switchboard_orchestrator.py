@@ -390,11 +390,22 @@ class SwitchboardOrchestrator:
           * `self._current_node` is thread-local, so each worker labels its own
             streaming token frames.
           * `self.on_progress` may therefore be invoked concurrently from
-            worker threads (via _run_analyst's tool-call summary frames and
-            _emit_token). The only in-tree consumer with a non-None callback is
-            web/runner.py, which pushes to a thread-safe queue.Queue;
-            web/spy_scanner.py passes on_progress=None. `_emit` already
-            swallows callback exceptions.
+            worker threads (via _run_analyst's tool-call summary frames with
+            `{"type": "messages"}` and `_emit_token`'s frames with
+            `{"type": "token"}`). web/runner.py's callback (`emit`) does more
+            than enqueue the frame: when a `RunMirror` is attached it also
+            calls `RunMirror` methods (web/bus_mirror.py), which carry mutable
+            per-run state and have no locking of their own. That is NOT safe to
+            call concurrently. Today it happens to be safe only because
+            `report_update` and `debate` frames — the ones `RunMirror` acts on —
+            are emitted only on the MAIN thread (the `as_completed` loop below
+            in this same method), never from a worker. Workers emit only
+            `messages` and `token` frames, which fall through `emit`'s
+            `RunMirror` branches untouched. web/spy_scanner.py passes
+            on_progress=None, so this concern is moot on that path. `_emit`
+            already swallows callback exceptions. DO NOT emit
+            `report_update`/`debate` frames from a worker unless `RunMirror` is
+            made thread-safe or the invariant is re-established some other way.
 
         Post-condition matches _run_analysts_sequential exactly: the shared
         state ends with _clear_messages applied, so every downstream phase sees
