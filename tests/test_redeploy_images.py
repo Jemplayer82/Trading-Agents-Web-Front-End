@@ -54,6 +54,19 @@ def _load_recreate_helpers():
     )
 
 
+def _load_blocking_scan():
+    source = _SCRIPT.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(_SCRIPT))
+    func_node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_blocking_scan"
+    )
+    func_src = ast.get_source_segment(source, func_node)
+    namespace = {}
+    exec(compile(func_src, str(_SCRIPT), "exec"), namespace)
+    return namespace["_blocking_scan"]
+
+
 def _payload(compose_yaml: str) -> dict:
     return {"StackFileContent": compose_yaml, "Env": [], "Prune": False, "PullImage": True}
 
@@ -153,3 +166,50 @@ def test_same_repo_two_tags_do_not_collide_in_latest_ids():
         "ImageID": "sha256:experimental",
     }
     assert container_wants_image_id(unknown_container, latest_ids) is None
+
+
+def test_blocking_scan_prefers_running_over_waiting():
+    blocking_scan = _load_blocking_scan()
+    running = {
+        "scan_type": "spy",
+        "id": 1,
+        "kind": "options",
+        "trade_date": "2025-08-01",
+        "created_at": "2025-08-01T07:00:00",
+    }
+    waiting = [{
+        "scan_type": "spy",
+        "id": 2,
+        "kind": "options",
+        "trade_date": "2025-08-01",
+        "created_at": "2025-08-01T07:30:00",
+        "status": "running_wait_market",
+    }]
+    result = blocking_scan({"running": running, "waiting": waiting})
+    assert result is running
+
+
+def test_blocking_scan_returns_first_waiting_when_running_none():
+    blocking_scan = _load_blocking_scan()
+    waiting = [{
+        "scan_type": "spy",
+        "id": 3,
+        "kind": "options",
+        "trade_date": "2025-08-01",
+        "created_at": "2025-08-01T07:30:00",
+        "status": "running_wait_market",
+    }]
+    result = blocking_scan({"running": None, "waiting": waiting})
+    assert result == waiting[0]
+
+
+def test_blocking_scan_returns_none_when_both_empty():
+    blocking_scan = _load_blocking_scan()
+    result = blocking_scan({"running": None, "waiting": []})
+    assert result is None
+
+
+def test_blocking_scan_returns_none_when_waiting_absent():
+    blocking_scan = _load_blocking_scan()
+    result = blocking_scan({"running": None})
+    assert result is None

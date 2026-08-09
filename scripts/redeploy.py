@@ -140,6 +140,24 @@ def req(method, path, body=None, timeout=180):
             return None
 
 
+def _blocking_scan(status: dict) -> dict | None:
+    """Return the scan that a redeploy would kill.
+
+    The status endpoint exposes an actively running scan plus a separate
+    ``waiting`` list of scans parked in the market-open or allocation-slot
+    wait. Both represent live, heartbeating workers whose container this
+    redeploy would recreate and kill. Prefer the running scan if present,
+    otherwise report the first waiting scan, otherwise None.
+    """
+    running = status.get("running")
+    if running:
+        return running
+    waiting = status.get("waiting")
+    if waiting:
+        return waiting[0]
+    return None
+
+
 # -1. pre-flight: refuse to deploy over a LIVE scan. Every redeploy recreates
 # the portfolio container, killing any in-flight worker — the scan then sits
 # 'running' with a dead worker until the reaper flags it "abandoned" an hour
@@ -160,7 +178,8 @@ def _scan_running() -> dict | None:
             r = urllib.request.Request(base + "/api/portfolio/status",
                                        headers={"X-Internal-Token": tok})
             with urllib.request.urlopen(r, context=ctx, timeout=10) as resp:
-                return (json.loads(resp.read()) or {}).get("running")
+                status = json.loads(resp.read()) or {}
+                return _blocking_scan(status)
         except Exception:
             continue
     print("pre-flight: status endpoint unreachable — proceeding (can't confirm idle)")
