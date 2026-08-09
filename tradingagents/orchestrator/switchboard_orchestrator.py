@@ -54,6 +54,7 @@ from tradingagents.dataflows.config import set_config
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.signal_processing import SignalProcessor
 from tradingagents.llm_clients import create_llm_client
+from tradingagents.orchestrator.gated_llm import wrap_llm
 
 logger = logging.getLogger(__name__)
 
@@ -134,10 +135,34 @@ class SwitchboardOrchestrator:
         config: dict[str, Any] | None = None,
         selected_analysts: list[str] | None = None,
         on_progress=None,
+        gate: Any = None,
     ) -> None:
+        """Constructor.
+
+        `gate` is an optional concurrency gate. It is duck-typed: any object
+        exposing `acquire(weight=1)` / `release(weight=1)` works (for example,
+        `web.llm_helpers.DynamicGate`). `tradingagents/` deliberately does not
+        type-import from `web/` so the core package has no web-layer
+        dependencies.
+
+        * `gate=None` (the default) leaves every LLM object untouched, which
+          preserves today's behaviour byte-for-byte for the CLI,
+          `web/runner.py`, and `web/portfolio_routes.py`.
+        * When a gate is supplied, both the deep and quick LLM roles are
+          wrapped so that every `llm.invoke()` takes and returns exactly one
+          permit.
+
+        Hard invariant: a permit wraps one `llm.invoke()` and is never held
+        across another acquire. The production `DynamicGate.acquire` blocks when
+        `in_use > 0 and in_use + weight > limit`, so callers must NOT also
+        hold a whole-run permit on the same gate — N outer permits plus N
+        inner permits would deadlock. See `web/spy_scanner.py`'s
+        `DEEP_DIVE_PER_CALL_GATING`.
+        """
         self.config = config or dict(DEFAULT_CONFIG)
         self.selected_analysts = selected_analysts or ["market", "social", "news", "fundamentals"]
         self.on_progress = on_progress  # callable(frame: dict) | None
+        self._gate = gate
 
         set_config(self.config)
         os.makedirs(self.config["data_cache_dir"], exist_ok=True)
@@ -170,8 +195,8 @@ class SwitchboardOrchestrator:
             on_token=self._emit_token,
             **self._provider_kwargs(quick_provider),
         )
-        self._deep_llm = deep_client.get_llm()
-        self._quick_llm = quick_client.get_llm()
+        self._deep_llm = wrap_llm(deep_client.get_llm(), gate)
+        self._quick_llm = wrap_llm(quick_client.get_llm(), gate)
         self.memory_log = TradingMemoryLog(self.config)
         self.signal_processor = SignalProcessor(self._quick_llm)
 
