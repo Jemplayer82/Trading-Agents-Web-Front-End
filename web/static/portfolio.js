@@ -647,9 +647,11 @@ async function pollScanActivity() {
     const data = await apiFetch("/api/portfolio/status");
     const run = (data && data.running) || null;
     const waiting = (data && data.waiting) || [];
-    // `=== "running"` for portfolio: /api/portfolio/status counts `pending` as
-    // busy (a row with all-zero counters), while the old list-based branch
-    // required exactly "running". A pending row must render nothing.
+    // `=== "running"` for portfolio: the portfolio arm of /api/portfolio/status
+    // only returns rows whose status is exactly "running" (spy rows can be
+    // "pending", but portfolio rows never are). The old list-based branch also
+    // required exactly "running", so a non-running status is unreachable here
+    // and must render nothing.
     if (run && run.scan_type === "portfolio" && run.status === "running") {
       blocks.push(scanActivityPortfolio(run));
     }

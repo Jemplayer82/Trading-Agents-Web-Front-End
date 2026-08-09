@@ -94,8 +94,8 @@ def test_hide_cancels_a_pending_reconnect():
     assert result == {"sockets": 1, "closeCalls": 0}
 
 
-def test_intentional_close_does_not_inflate_backoff():
-    """A hidden-tab close does not count toward the visible reconnect backoff."""
+def test_hidden_close_does_not_schedule_reconnect():
+    """A hidden-tab socket close must not schedule a reconnect while hidden."""
     result = run_js(
         sources=["bus.js"],
         bootstrap="globalThis.$ = (id) => document.getElementById(id);",
@@ -103,19 +103,14 @@ def test_intentional_close_does_not_inflate_backoff():
             "document.__fire('DOMContentLoaded', {type: 'DOMContentLoaded'}); "
             "document.hidden = true; "
             "document.__fire('visibilitychange', {type: 'visibilitychange'}); "
-            "__sockets[0].__fire('close', {code: 1000}); "
-            "document.hidden = false; "
-            "document.__fire('visibilitychange', {type: 'visibilitychange'}); "
-            "__sockets[1].__fire('close', {code: 1006}); "
-            "__advance(1000); "
-            "var at1000 = __sockets.length; "
-            "__advance(1000); "
-            "return {at1000: at1000, sockets: __sockets.length};"
+            "__sockets[0].__fire('close', {code: 1006}); "
+            "__advance(60000); "
+            "return {sockets: __sockets.length, closeCalls: __sockets[0].closeCalls.length};"
         ),
     )
-    # The first visible reconnection step is 2000 ms, and it must not be inflated
-    # by the intentional hidden close.
-    assert result == {"at1000": 2, "sockets": 3}
+    # The hidden close is intentional; it must not create a new socket or
+    # reconnect timer while the tab is still hidden.
+    assert result == {"sockets": 1, "closeCalls": 1}
 
 
 def test_late_close_from_hidden_socket_does_not_orphan_the_live_one():
