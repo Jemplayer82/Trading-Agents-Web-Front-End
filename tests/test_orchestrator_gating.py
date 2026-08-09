@@ -5,6 +5,8 @@ is supplied, and the default (gate=None) must preserve the pre-existing
 object graph byte-for-byte.
 """
 
+import threading
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -15,6 +17,7 @@ from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.orchestrator import switchboard_orchestrator as sbo_module
 from tradingagents.orchestrator.gated_llm import GatedLLM
 from tradingagents.orchestrator.switchboard_orchestrator import SwitchboardOrchestrator
+from web.llm_helpers import DynamicGate
 
 pytestmark = pytest.mark.unit
 
@@ -368,6 +371,47 @@ def test_parallel_analysts_are_each_gated(offline_orchestrator_factory, monkeypa
     assert signal == "Buy"
     assert gate.acquires == 12
     assert gate.releases == 12
+
+
+def test_parallel_analysts_respect_real_dynamic_gate_and_finish(offline_orchestrator_factory, monkeypatch):
+    """A saturated DynamicGate must serialize parallel analysts without deadlocking."""
+    gate = DynamicGate(1)
+    orch, _fake_deep, fake_quick = offline_orchestrator_factory(
+        gate=gate,
+        selected_analysts=["market", "social", "news", "fundamentals"],
+        extra_config={"analyst_concurrency_limit": 4},
+    )
+    _patch_all_factories(monkeypatch)
+
+    peak_lock = threading.Lock()
+    in_flight = 0
+    peak = 0
+    original_invoke = fake_quick.invoke
+
+    def tracking_invoke(value, config=None, **kwargs):
+        nonlocal in_flight, peak
+        with peak_lock:
+            in_flight += 1
+            if in_flight > peak:
+                peak = in_flight
+        try:
+            # Small delay inside the protected section so competing threads have
+            # a window to overlap if the gate were not actually limiting them.
+            time.sleep(0.05)
+            return original_invoke(value, config=config, **kwargs)
+        finally:
+            with peak_lock:
+                in_flight -= 1
+
+    monkeypatch.setattr(fake_quick, "invoke", tracking_invoke)
+
+    start = time.monotonic()
+    state, signal = orch.run("AAPL", "2026-08-08")
+    elapsed = time.monotonic() - start
+
+    assert signal == "Buy"
+    assert peak <= 1, f"observed peak concurrency {peak} exceeded gate limit 1"
+    assert elapsed < 10.0, f"orchestrator run took {elapsed:.2f}s; possible deadlock/hang"
 
 
 def test_multi_round_debate_scales_the_permit_count(offline_orchestrator_factory, monkeypatch):
