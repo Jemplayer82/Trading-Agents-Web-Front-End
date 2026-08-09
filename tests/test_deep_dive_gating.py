@@ -26,6 +26,7 @@ pytestmark = pytest.mark.unit
 _RECORDED_ORCHESTRATORS: list[Any] = []
 _CONSTRUCTED_GATES: list[spy_scanner.DynamicGate] = []
 _CAPTURED_POOL_SIZES: list[int | None] = []
+_CONSTRUCTED_LIMITS: list[int] = []
 
 
 @pytest.fixture(autouse=True)
@@ -33,6 +34,7 @@ def _clear_state():
     _RECORDED_ORCHESTRATORS.clear()
     _CONSTRUCTED_GATES.clear()
     _CAPTURED_POOL_SIZES.clear()
+    _CONSTRUCTED_LIMITS.clear()
     yield
 
 
@@ -103,6 +105,7 @@ def counting_gate(monkeypatch):
     def factory(limit: int) -> CountingGate:
         gate = CountingGate(limit)
         _CONSTRUCTED_GATES.append(gate)
+        _CONSTRUCTED_LIMITS.append(limit)
         return gate
 
     monkeypatch.setattr(spy_scanner, "DynamicGate", factory)
@@ -243,15 +246,24 @@ def test_pool_width_widens_with_explicit_multiplier(
     assert _CAPTURED_POOL_SIZES == [6]
 
 
+@pytest.mark.parametrize("per_call_gating_env", [
+    pytest.param(None, id="default-on"),
+    pytest.param("0", id="kill-switch-off"),
+])
 def test_gate_capacity_is_unchanged_by_the_switch(
     tmp_db, monkeypatch, tmp_path, counting_gate, recording_orch, recording_pool,
+    per_call_gating_env,
 ):
-    monkeypatch.delenv("DEEP_DIVE_PER_CALL_GATING", raising=False)
+    if per_call_gating_env is None:
+        monkeypatch.delenv("DEEP_DIVE_PER_CALL_GATING", raising=False)
+    else:
+        monkeypatch.setenv("DEEP_DIVE_PER_CALL_GATING", per_call_gating_env)
     monkeypatch.setenv("OLLAMA_MAX_CONCURRENCY", "3")
     recording_orch()
 
     _run(monkeypatch, tickers=("AAPL",))
 
+    assert _CONSTRUCTED_LIMITS[0] == 3
     assert _CONSTRUCTED_GATES[0].limit == 3
 
 
@@ -450,3 +462,4 @@ def test_dive_results_are_unchanged_by_the_switch(
     assert core(enriched_on[0]) == core(enriched_off[0])
     assert enriched_on[0]["analysis_id"] is not None
     assert enriched_off[0]["analysis_id"] is not None
+
