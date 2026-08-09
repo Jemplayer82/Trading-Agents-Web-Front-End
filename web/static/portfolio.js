@@ -71,7 +71,8 @@ function renderScanQueue(ul, data, opts) {
   const only = opts.only || null;
   const running = data && data.running ? [data.running] : [];
   const queued = (data && data.queued) || [];
-  let items = [...running, ...queued];
+  const waiting = (data && data.waiting) || [];
+  let items = [...running, ...waiting, ...queued];
   if (only) items = items.filter((it) => only.includes(scanTypeKey(it)));
   ul.innerHTML = "";
   if (!items.length) {
@@ -79,12 +80,23 @@ function renderScanQueue(ul, data, opts) {
     return;
   }
   const runningShown = data && data.running && (!only || only.includes(scanTypeKey(data.running))) ? 1 : 0;
+  const waitingShown = waiting.filter((it) => !only || only.includes(scanTypeKey(it))).length;
   items.forEach((item, idx) => {
     const li = document.createElement("li");
     li.dataset.id = item.id;
     const isRunning = data && item === data.running;
-    const label = isRunning ? "RUNNING" : ("#" + (idx - runningShown + 1) + " IN QUEUE");
-    const badgeClass = isRunning ? "HOLD" : "QUEUED";
+    const isWaiting = waiting.includes(item);
+    let label, badgeClass;
+    if (isRunning) {
+      label = "RUNNING";
+      badgeClass = "HOLD";
+    } else if (isWaiting) {
+      label = "WAITING";
+      badgeClass = "QUEUED";
+    } else {
+      label = "#" + (idx - runningShown - waitingShown + 1) + " IN QUEUE";
+      badgeClass = "QUEUED";
+    }
     const tag = SCAN_TYPE_TAG[scanTypeKey(item)] || "scan";
     li.innerHTML =
       '<span class="h-main">' +
@@ -94,7 +106,7 @@ function renderScanQueue(ul, data, opts) {
         "</span>" +
         '<span class="h-ts">' + fmtTs(item.created_at) + "</span>" +
       "</span>";
-    if (isRunning && opts.onOpen) {
+    if ((isRunning || isWaiting) && opts.onOpen) {
       li.querySelector(".h-main").addEventListener("click", () => opts.onOpen(item));
     }
     ul.appendChild(li);
