@@ -260,3 +260,58 @@ class TestQuickScanPriceDataCache:
         assert results[0] == results[1]
         assert calls["count"] <= 2
         assert spy_scanner._PRICE_DATA_CACHE.stats()["size"] == 1
+
+    def test_partial_download_below_threshold_is_not_cached(self, monkeypatch):
+        """Only 1 of 3 tickers came back — below 80% completeness, so the
+        cache write is skipped even though the function still returns the
+        partial map to the caller.
+        """
+        calls = {"count": 0}
+
+        def _download(tickers, *a, **kw):
+            calls["count"] += 1
+            return self._frame(["AAA"])
+
+        monkeypatch.setattr(spy_scanner.yf, "download", _download)
+
+        tickers = ["AAA", "BBB", "CCC"]
+        m1 = spy_scanner._fetch_price_data_map(1, tickers, "2026-08-08")
+        m2 = spy_scanner._fetch_price_data_map(2, tickers, "2026-08-08")
+
+        assert calls["count"] == 2
+        assert spy_scanner._PRICE_DATA_CACHE.stats()["size"] == 0
+        assert list(m1.keys()) == ["AAA"]
+        assert m1 == m2
+
+    def test_partial_download_still_returns_usable_tickers(self, monkeypatch):
+        """The completeness gate must block only the cache write, never the
+        return value.
+        """
+        def _download(tickers, *a, **kw):
+            return self._frame(["AAA"])
+
+        monkeypatch.setattr(spy_scanner.yf, "download", _download)
+
+        m = spy_scanner._fetch_price_data_map(1, ["AAA", "BBB", "CCC"], "2026-08-08")
+        assert list(m.keys()) == ["AAA"]
+        assert m["AAA"]["close"]
+        assert m["AAA"]["volume"]
+
+    def test_download_just_above_threshold_still_caches(self, monkeypatch):
+        """4 of 5 tickers present clears the 80% bar and is cached for reuse."""
+        calls = {"count": 0}
+
+        def _download(tickers, *a, **kw):
+            calls["count"] += 1
+            return self._frame(["T1", "T2", "T3", "T4"])
+
+        monkeypatch.setattr(spy_scanner.yf, "download", _download)
+
+        tickers = ["T1", "T2", "T3", "T4", "T5"]
+        m1 = spy_scanner._fetch_price_data_map(1, tickers, "2026-08-08")
+        m2 = spy_scanner._fetch_price_data_map(2, tickers, "2026-08-08")
+
+        assert calls["count"] == 1
+        assert m1 is m2
+        assert spy_scanner._PRICE_DATA_CACHE.stats()["size"] == 1
+        assert sorted(m1.keys()) == ["T1", "T2", "T3", "T4"]

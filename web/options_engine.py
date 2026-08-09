@@ -57,6 +57,12 @@ STALE_ALERT_THRESHOLD = 3
 # manually in the afternoon re-screens rather than trading off a stale
 # morning list.
 _PRESCREEN_TTL_SECONDS = 4 * 3600
+
+# A pre-screen built from fewer than 80% of the requested tickers is treated
+# as a degraded download. The truncated result is still returned to the
+# caller, but a degraded movers list is not pinned for the full TTL.
+_PRESCREEN_MIN_COMPLETENESS = 0.8
+
 _PRESCREEN_CACHE = market_cache.SameDayCache("options-prescreen",
                                              ttl_seconds=_PRESCREEN_TTL_SECONDS)
 
@@ -177,7 +183,9 @@ def prescreen(
 
     Cached same-trading-day so the three daily options accounts don't each
     pay for an identical ~500-ticker yfinance download.  trade_date=None
-    bypasses the cache for callers that need a fresh screen.
+    bypasses the cache for callers that need a fresh screen. Downloads covering
+    fewer than 80% of the requested universe are never cached, so a partial or
+    rate-limited download doesn't pin a degraded movers list for the full TTL.
     """
     if trade_date is not None:
         key = (
@@ -213,7 +221,7 @@ def prescreen(
                 scored.append((s, tickers[0]))
     scored.sort(key=lambda x: (-x[0], x[1]))
     result = [t for _, t in scored[:top_n]]
-    if result and trade_date is not None:
+    if result and trade_date is not None and len(scored) >= _PRESCREEN_MIN_COMPLETENESS * len(tickers):
         _PRESCREEN_CACHE.put(trade_date, key, list(result))
     return result
 
@@ -444,7 +452,7 @@ def refresh_positions(paper_account_id: int | None = None) -> dict[str, Any]:
 
     stopped = _apply_intraday_stops(positions, priced)
 
-    # Roll fresh equity onto each affected account's latest completed scan.
+    # Roll fresh equity onto each affected account's latest completed scan row.
     accounts = ([db.get_paper_account(paper_account_id)] if paper_account_id
                 else db.list_paper_accounts(kind="options"))
     account_values: dict[int, float] = {}
@@ -955,3 +963,4 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
         log.info("[options %s] done — %d closes / %d opens / %d holds, equity $%s (cash $%s)",
                  scan_id, len(alloc["closes"]), len(alloc["opens"]), len(alloc["holds"]),
                  f"{final['equity']:,.0f}", f"{final['cash']:,.0f}")
+

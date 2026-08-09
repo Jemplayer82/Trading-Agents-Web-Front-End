@@ -67,6 +67,14 @@ class ScanInfrastructureError(RuntimeError):
 # converge on the same movers set and therefore the same key. 4h TTL so
 # an intraday cache-clear or a long-running day eventually refreshes.
 _PRICE_DATA_TTL_SECONDS = 4 * 3600
+
+# A fetch covering fewer than 80% of the requested tickers is treated as a
+# degraded download. The partial map is still returned to the caller (the
+# current scan degrades gracefully) but it is never written to the same-day
+# cache, so a transient yfinance outage or rate-limit does not poison every
+# same-day scan for the full TTL.
+_PRICE_DATA_MIN_COMPLETENESS = 0.8
+
 _PRICE_DATA_CACHE = market_cache.SameDayCache("spy-price-data",
                                               ttl_seconds=_PRICE_DATA_TTL_SECONDS)
 
@@ -281,13 +289,19 @@ def _fetch_price_data_map(
     trade_date: str,
 ) -> dict[str, dict[str, list]]:
     """Bulk-download price data and cache it by (trade_date, ticker-set hash).
+
     On a cache hit, return the stored map; on a miss, run the single
     yf.download for the whole ticker set and build the per-ticker close/volume
     map exactly as run_quick_scan used to.
+
     The returned map is SHARED BY REFERENCE across same-day scans and must be
     treated as read-only. Verified today's only consumers are reads
     (price_data_map.get(...) and price_data.get("close"/"volume") inside
     _quick_scan_one), so we deliberately do not copy it.
+
+    A fetch covering fewer than 80% of the requested tickers (including a
+    totally empty or failed fetch) is never cached; the partial map is still
+    returned so the current scan degrades gracefully on whatever data it got.
     """
     key = _price_data_key(tickers)
     cached = _PRICE_DATA_CACHE.get(trade_date, key)
@@ -319,7 +333,7 @@ def _fetch_price_data_map(
             if tickers:
                 price_data_map[tickers[0]] = {"close": closes, "volume": volumes}
 
-    if price_data_map:
+    if price_data_map and len(price_data_map) >= _PRICE_DATA_MIN_COMPLETENESS * len(tickers):
         _PRICE_DATA_CACHE.put(trade_date, key, price_data_map)
 
     return price_data_map
@@ -352,8 +366,10 @@ def run_quick_scan(
     The bulk price download is cached in-process for the same trading day:
     key = (trade_date, sha256 of the sorted ticker set), TTL ~4 hours.
     Prior-day entries are evicted on the first write for a new date, and
-    empty or failed fetches are never cached so a transient yfinance outage
-    does not poison every same-day scan.
+    fetches covering fewer than 80% of the requested tickers (including a
+    totally empty or failed fetch) are never cached so a transient yfinance
+    outage or partial rate-limited download does not poison every same-day
+    scan for the full TTL.
     """
     log.info("[spy %s] quick scan: fetching price data for %d tickers", scan_id, len(tickers))
     quick_fingerprint = _quick_scan_fingerprint(config)

@@ -735,6 +735,15 @@ class TestPrescreenSameDayCache:
         monkeypatch.setattr(options_engine.yf, "download", _download)
         return {"calls": calls, "df": df, "download": _download}
 
+    @staticmethod
+    def _partial_df(present_tickers, rows=21):
+        data = {}
+        for i, ticker in enumerate(present_tickers):
+            start = 100.0 + i * 10.0
+            data[("Close", ticker)] = [start + j for j in range(rows)]
+            data[("Volume", ticker)] = [1_000_000 + i * 100_000] * rows
+        return pd.DataFrame(data)
+
     def test_second_same_day_call_is_a_cache_hit(self, fake_download):
         tickers = ["AAA", "BBB", "CCC"]
         trade_date = "2026-07-29"
@@ -871,3 +880,61 @@ class TestPrescreenSameDayCache:
         assert results[0] is not results[1]
         assert results[0] is not results[2]
         assert results[1] is not results[2]
+
+    def test_partial_prescreen_below_threshold_is_not_cached(self, monkeypatch):
+        """Only 1 of 5 tickers has usable data — below the 80% completeness
+        gate, so the cache write is skipped.
+        """
+        calls = {"n": 0}
+
+        def _download(*args, **kwargs):
+            calls["n"] += 1
+            return self._partial_df(["A"])
+
+        monkeypatch.setattr(options_engine.yf, "download", _download)
+
+        tickers = ["A", "B", "C", "D", "E"]
+        r1 = options_engine.prescreen(tickers, 5, trade_date="2026-07-29")
+        r2 = options_engine.prescreen(tickers, 5, trade_date="2026-07-29")
+
+        assert calls["n"] == 2
+        assert options_engine._PRESCREEN_CACHE.stats()["size"] == 0
+        assert r1 == ["A"]
+        assert r2 == ["A"]
+
+    def test_partial_prescreen_still_returns_usable_tickers(self, monkeypatch):
+        """The completeness gate must block only the cache write, never the
+        return value.
+        """
+        def _download(*args, **kwargs):
+            return self._partial_df(["A"])
+
+        monkeypatch.setattr(options_engine.yf, "download", _download)
+
+        tickers = ["A", "B", "C", "D", "E"]
+        r = options_engine.prescreen(tickers, 5, trade_date="2026-07-29")
+        assert r
+        assert set(r).issubset({"A"})
+
+    def test_prescreen_threshold_uses_scored_not_truncated_result(self, monkeypatch):
+        """4 of 5 tickers are scoreable (meets the 80% gate) but top_n=2
+        truncates the returned list to two names. The gate must see the
+        pre-truncation scored count, not the shorter result.
+        """
+        calls = {"n": 0}
+
+        def _download(*args, **kwargs):
+            calls["n"] += 1
+            return self._partial_df(["A", "B", "C", "D"])
+
+        monkeypatch.setattr(options_engine.yf, "download", _download)
+
+        tickers = ["A", "B", "C", "D", "E"]
+        r1 = options_engine.prescreen(tickers, 2, trade_date="2026-07-29")
+        r2 = options_engine.prescreen(tickers, 2, trade_date="2026-07-29")
+
+        assert calls["n"] == 1
+        assert options_engine._PRESCREEN_CACHE.stats()["size"] == 1
+        assert len(r1) == 2
+        assert set(r1).issubset({"A", "B", "C", "D"})
+        assert r1 == r2
