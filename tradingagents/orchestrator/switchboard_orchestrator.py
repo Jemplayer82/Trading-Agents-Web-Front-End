@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from typing import Any
 
 from langchain_core.messages import HumanMessage, ToolMessage
@@ -116,8 +117,15 @@ class SwitchboardOrchestrator:
         os.makedirs(self.config["results_dir"], exist_ok=True)
 
         # Tracks which agent is currently running so streaming token frames
-        # carry the right node name for the frontend progress grid.
-        self._current_node: str | None = None
+        # carry the right node name for the frontend progress grid. Per-thread
+        # (threading.local) because the analyst phase can run several analysts
+        # at once — see config['analyst_concurrency_limit'] — and a single
+        # shared attribute would let one analyst's tokens be labelled with a
+        # sibling's node name. Every other phase (debate, research manager,
+        # trader, risk debate, portfolio manager) runs on the main thread and
+        # behaves exactly as before: a thread always reads back what it wrote.
+        self._node_local = threading.local()
+        self._current_node = None
 
         deep_provider = self.config.get("deep_llm_provider") or self.config.get("llm_provider", "ollama")
         quick_provider = self.config.get("quick_llm_provider") or self.config.get("llm_provider", "ollama")
@@ -139,6 +147,21 @@ class SwitchboardOrchestrator:
         self._quick_llm = quick_client.get_llm()
         self.memory_log = TradingMemoryLog(self.config)
         self.signal_processor = SignalProcessor(self._quick_llm)
+
+    @property
+    def _current_node(self) -> str | None:
+        """Name of the agent node running ON THIS THREAD, or None.
+
+        Backed by threading.local() rather than a plain attribute so a
+        parallel analyst phase cannot cross-label another analyst's streaming
+        token frames. A thread that never set it reads None, which
+        _emit_token already treats as "don't emit".
+        """
+        return getattr(self._node_local, "name", None)
+
+    @_current_node.setter
+    def _current_node(self, value: str | None) -> None:
+        self._node_local.name = value
 
     def _provider_kwargs(self, provider: str) -> dict[str, Any]:
         provider = provider.lower()
