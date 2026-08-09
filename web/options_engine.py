@@ -75,10 +75,10 @@ _PRESCREEN_CACHE = market_cache.SameDayCache("options-prescreen",
 # reads. Acquired only AFTER the wait returns, so accounts allocate one
 # at a time in the order they finish waiting.
 #
-# Deadlock-free by construction: it is acquired at exactly ONE call
-# site, nothing inside the guarded region re-acquires it, and
-# scan_queue._SCAN_LOCK is never held while this is taken
-# (_dequeue_next_scan starts its worker thread outside its own hold).
+# Deadlock-free by construction: it is acquired at exactly ONE call site,
+# nothing inside the guarded region re-acquires it, and no code inside the
+# _allocation_slot block ever acquires scan_queue._SCAN_LOCK. A thread
+# holding _ALLOC_LOCK can never block on _SCAN_LOCK, even when _SCAN_LOCK is held across the worker start.
 _ALLOC_LOCK = threading.Lock()
 _ALLOC_POLL_SECONDS = 30.0
 _ALLOC_TIMEOUT_SECONDS = 3600.0
