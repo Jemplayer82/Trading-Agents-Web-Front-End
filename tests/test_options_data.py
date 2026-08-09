@@ -322,7 +322,7 @@ class TestContractCache:
         assert c is not None
         assert any("re-validation" in n for n in notes)
 
-        # Zero bid -> no usable mid, also falls back.
+        # Zero bid -> no usable mid (short-circuits before the liquidity gates) -> falls back.
         def zero_quotes(symbols):
             occ = self._contract()["occ_symbol"]
             return {occ: {"quote": {"bidPrice": 0.0, "askPrice": 0.05}}}
@@ -331,7 +331,7 @@ class TestContractCache:
         c, notes = options_data.fetch_contract("AAPL", "BUY")
         assert len(calls) == 3
         assert c is not None
-        assert any("refetching" in n for n in notes)
+        assert any("no usable bid/ask" in n for n in notes)
 
     def test_no_quote_for_the_symbol_falls_back(self, monkeypatch):
         calls = []
