@@ -23,6 +23,11 @@ Correctness rules enforced here (resolutions are irreversible once written):
 - **Noise short-circuit** — outcomes inside the noise band get a canned NOISE
   reflection with no LLM call; single-window moves that small carry no lesson.
   The band is volatility-scaled per ticker when enough price history exists.
+- **Relevance gate** — when the caller supplies ``relevant_tickers``, an
+  outcome for a ticker outside that set gets a canned NOT-RELEVANT reflection
+  instead of an LLM call, because nothing will ever retrieve a lesson about a
+  ticker nobody holds and nobody is analyzing. Omitting the parameter disables
+  the gate entirely.
 - **Shared history slicing** — shared price-history frames are always sliced
   to the exact per-entry window requested by ``fetch_returns``, so batching
   downloads changes only the number of network calls, never a resolved outcome.
@@ -284,6 +289,17 @@ def _censored_reflection(actual_days: int, holding_days: int, age_days: int) -> 
     )
 
 
+def _irrelevant_reflection(ticker: str, alpha: float, actual_days: int) -> str:
+    return (
+        f"CLASS: NOT-RELEVANT | HORIZON: {actual_days}d | EVIDENCE: none\n"
+        f"CALL: alpha {alpha:+.1%} — {ticker} is not held, not always-relevant, "
+        "and not recently analyzed\n"
+        "THESIS: not evaluated — ticker outside the caller's relevance set\n"
+        "LESSON: none — reflection skipped to conserve LLM budget\n"
+        "CONFIDENCE: low"
+    )
+
+
 def _fetch_news_context(ticker: str, start_date: str, end_date: str, limit: int = 8) -> str:
     """Best-effort holding-window news pull for the reflector.
 
@@ -319,6 +335,7 @@ def resolve_all_pending(
     config: dict,
     ticker: str | None = None,
     max_reflections: int | None = None,
+    relevant_tickers: set[str] | None = None,
 ) -> dict:
     """Resolve matured pending memory-log entries, optionally for one ticker.
 
@@ -338,16 +355,32 @@ def resolve_all_pending(
     budget — NOISE/CENSORED entries still resolve, so a missing/misconfigured
     LLM key degrades the sweep instead of killing it.
 
+    ``relevant_tickers`` is an optional set of ticker symbols the caller
+    considers relevant. When supplied, every non-NOISE, non-CENSORED outcome
+    whose ticker is not in the set receives a canned NOT-RELEVANT reflection
+    and resolves without an LLM call. ``None`` (the default) disables the gate
+    and preserves today's behavior. An empty set means nothing is relevant,
+    so all such outcomes take the canned path. The caller owns the definition
+    of relevance; this module is tier-agnostic and has no access to the web
+    database or the options scan.
+
     Returns summary counts for logging:
     ``{"resolved", "noise", "censored", "immature", "budget_deferred", "errors",
-    "llm_reflections"}``.
+    "llm_reflections", "irrelevant"}``.
     """
     holding_days = config.get("reflection_holding_days", 5)
     censor_after = config.get("sweep_censor_after_days", 30)
     summary = {
         "resolved": 0, "noise": 0, "censored": 0, "immature": 0,
         "budget_deferred": 0, "errors": 0, "llm_reflections": 0,
+        "irrelevant": 0,
     }
+
+    relevant = (
+        {t.upper() for t in relevant_tickers}
+        if relevant_tickers is not None
+        else None
+    )
 
     pending = memory_log.get_pending_entries()
     if ticker is not None:
@@ -428,6 +461,9 @@ def resolve_all_pending(
             elif abs(alpha) < band:
                 reflection = _noise_reflection(alpha, band, actual_days)
                 summary["noise"] += 1
+            elif relevant is not None and tkr.upper() not in relevant:
+                reflection = _irrelevant_reflection(tkr, alpha, actual_days)
+                summary["irrelevant"] += 1
             else:
                 if reflector is None or (
                     max_reflections is not None

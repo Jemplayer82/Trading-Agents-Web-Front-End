@@ -423,6 +423,164 @@ class TestSweep:
 
 
 # ---------------------------------------------------------------------------
+# resolve_all_pending: relevance gate
+# ---------------------------------------------------------------------------
+
+class TestRelevanceGate:
+
+    def test_none_preserves_llm_path(self, tmp_path):
+        """Omitting relevant_tickers keeps every non-noise entry on the LLM path."""
+        log = make_log(tmp_path)
+        d1, d2 = _recent_date(20), _recent_date(15)
+        log.store_decision("NVDA", d1, DECISION_BUY)
+        log.store_decision("AAPL", d2, DECISION_SELL)
+        reflector = MagicMock()
+        reflector.reflect_on_final_decision.return_value = "CLASS: CONFIRMED-THESIS"
+        with patch(
+            "tradingagents.graph.outcome_resolution.fetch_returns",
+            return_value=(0.08, 0.06, 5, None),
+        ), patch(
+            "tradingagents.graph.outcome_resolution._fetch_news_context",
+            return_value="",
+        ):
+            summary = resolve_all_pending(log, reflector, {})
+        assert reflector.reflect_on_final_decision.call_count == 2
+        assert summary["llm_reflections"] == 2
+        assert summary["irrelevant"] == 0
+        assert summary["resolved"] == 2
+        assert log.get_pending_entries() == []
+
+    def test_irrelevant_ticker_gets_canned_reflection(self, tmp_path):
+        log = make_log(tmp_path)
+        d1, d2 = _recent_date(20), _recent_date(15)
+        log.store_decision("NVDA", d1, DECISION_BUY)
+        log.store_decision("AAPL", d2, DECISION_SELL)
+        reflector = MagicMock()
+        reflector.reflect_on_final_decision.return_value = "CLASS: CONFIRMED-THESIS"
+        with patch(
+            "tradingagents.graph.outcome_resolution.fetch_returns",
+            return_value=(0.08, 0.06, 5, None),
+        ), patch(
+            "tradingagents.graph.outcome_resolution._fetch_news_context",
+            return_value="",
+        ):
+            summary = resolve_all_pending(log, reflector, {}, relevant_tickers={"NVDA"})
+        assert reflector.reflect_on_final_decision.call_count == 1
+        assert summary["llm_reflections"] == 1
+        assert summary["irrelevant"] == 1
+        assert summary["resolved"] == 2
+        assert log.get_pending_entries() == []
+        entries_by_ticker = {e["ticker"]: e for e in log.load_entries()}
+        assert entries_by_ticker["AAPL"]["reflection"].startswith("CLASS: NOT-RELEVANT")
+        assert not entries_by_ticker["NVDA"]["reflection"].startswith("CLASS: NOT-RELEVANT")
+
+    def test_case_insensitive_match(self, tmp_path):
+        log = make_log(tmp_path)
+        log.store_decision("NVDA", _recent_date(20), DECISION_BUY)
+        reflector = MagicMock()
+        reflector.reflect_on_final_decision.return_value = "CLASS: CONFIRMED-THESIS"
+        with patch(
+            "tradingagents.graph.outcome_resolution.fetch_returns",
+            return_value=(0.08, 0.06, 5, None),
+        ), patch(
+            "tradingagents.graph.outcome_resolution._fetch_news_context",
+            return_value="",
+        ):
+            summary = resolve_all_pending(log, reflector, {}, relevant_tickers={"nvda"})
+        assert reflector.reflect_on_final_decision.call_count == 1
+        assert summary["llm_reflections"] == 1
+        assert summary["irrelevant"] == 0
+
+    def test_empty_set_makes_everything_irrelevant(self, tmp_path):
+        log = make_log(tmp_path)
+        log.store_decision("NVDA", _recent_date(20), DECISION_BUY)
+        reflector = MagicMock()
+        with patch(
+            "tradingagents.graph.outcome_resolution.fetch_returns",
+            return_value=(0.08, 0.06, 5, None),
+        ):
+            summary = resolve_all_pending(log, reflector, {}, relevant_tickers=set())
+        reflector.reflect_on_final_decision.assert_not_called()
+        assert summary["irrelevant"] == 1
+        assert summary["resolved"] == 1
+        assert summary["llm_reflections"] == 0
+        assert log.get_pending_entries() == []
+        entry = log.load_entries()[0]
+        assert entry["reflection"].startswith("CLASS: NOT-RELEVANT")
+
+    def test_noise_still_wins_over_relevance(self, tmp_path):
+        log = make_log(tmp_path)
+        log.store_decision("NVDA", _recent_date(20), DECISION_BUY)
+        reflector = MagicMock()
+        with patch(
+            "tradingagents.graph.outcome_resolution.fetch_returns",
+            return_value=(0.01, 0.005, 5, None),
+        ):
+            summary = resolve_all_pending(log, reflector, {}, relevant_tickers=set())
+        reflector.reflect_on_final_decision.assert_not_called()
+        assert summary["noise"] == 1
+        assert summary["irrelevant"] == 0
+        entry = log.load_entries()[0]
+        assert entry["reflection"].startswith("CLASS: NOISE")
+
+    def test_censored_still_wins_over_relevance(self, tmp_path):
+        log = make_log(tmp_path)
+        log.store_decision("GONE", _recent_date(60), DECISION_BUY)
+        reflector = MagicMock()
+        with patch(
+            "tradingagents.graph.outcome_resolution.fetch_returns",
+            return_value=(-0.40, -0.42, 2, None),
+        ):
+            summary = resolve_all_pending(
+                log, reflector, {"sweep_censor_after_days": 30}, relevant_tickers=set()
+            )
+        reflector.reflect_on_final_decision.assert_not_called()
+        assert summary["censored"] == 1
+        assert summary["irrelevant"] == 0
+        entry = log.load_entries()[0]
+        assert entry["reflection"].startswith("CLASS: CENSORED")
+
+    def test_irrelevant_does_not_consume_budget(self, tmp_path):
+        log = make_log(tmp_path)
+        d1, d2, d3 = _recent_date(25), _recent_date(20), _recent_date(15)
+        log.store_decision("NVDA", d1, DECISION_BUY)
+        log.store_decision("AAPL", d2, DECISION_SELL)
+        log.store_decision("TSLA", d3, DECISION_SELL)
+        reflector = MagicMock()
+        reflector.reflect_on_final_decision.return_value = "CLASS: CONFIRMED-THESIS"
+        with patch(
+            "tradingagents.graph.outcome_resolution.fetch_returns",
+            return_value=(0.08, 0.06, 5, None),
+        ), patch(
+            "tradingagents.graph.outcome_resolution._fetch_news_context",
+            return_value="",
+        ):
+            summary = resolve_all_pending(
+                log, reflector, {}, max_reflections=1, relevant_tickers={"NVDA"}
+            )
+        assert summary["llm_reflections"] == 1
+        assert summary["irrelevant"] == 2
+        assert summary["budget_deferred"] == 0
+        assert summary["resolved"] == 3
+        assert log.get_pending_entries() == []
+
+    def test_reflector_none_still_resolves_irrelevant(self, tmp_path):
+        log = make_log(tmp_path)
+        log.store_decision("NVDA", _recent_date(20), DECISION_BUY)
+        with patch(
+            "tradingagents.graph.outcome_resolution.fetch_returns",
+            return_value=(0.08, 0.06, 5, None),
+        ):
+            summary = resolve_all_pending(log, None, {}, relevant_tickers={"SPY"})
+        assert summary["resolved"] == 1
+        assert summary["irrelevant"] == 1
+        assert summary["budget_deferred"] == 0
+        assert log.get_pending_entries() == []
+        entry = log.load_entries()[0]
+        assert entry["reflection"].startswith("CLASS: NOT-RELEVANT")
+
+
+# ---------------------------------------------------------------------------
 # resolve_all_pending fetch-budget assertions
 # ---------------------------------------------------------------------------
 
