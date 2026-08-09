@@ -283,6 +283,38 @@ def _quick_batch_size() -> int:
         return 20
 
 
+def _per_call_gating_enabled() -> bool:
+    """Kill switch for per-LLM-call gate acquisition AND the widened deep-dive
+    pool (env DEEP_DIVE_PER_CALL_GATING, read at call time, default on).
+
+    ON: a dive holds a gate permit only for the duration of one llm.invoke
+    (SwitchboardOrchestrator(gate=...)), so a dive parked on a slow news or
+    price fetch stops squatting on capacity it isn't using. LLM concurrency is
+    then capped by the gate itself rather than the pool, so the pool admits ~2x
+    budget dives and lets their non-LLM phases overlap.
+    OFF: restores BOTH the old per-dive `with gate:` wrapper AND the old
+    max_workers=budget pool.
+
+    The two halves cannot be split, and not merely for tidiness as with
+    options_engine._slot_release_enabled — splitting them DEADLOCKS. If a dive
+    held a whole-dive permit while the orchestrator inside it also acquired one
+    per call, `budget` dives would pin `budget` units and every per-call
+    acquire would wait forever (DynamicGate.acquire only admits while
+    in_use == 0 or in_use + weight <= limit). run_deep_dives therefore resolves
+    this flag ONCE per scan and uses that single value for both decisions; it
+    must never be re-read mid-scan.
+
+    Why a switch exists at all: this container runs under mem_limit 4g and two
+    host-level OOMs from concurrent scan activity are on record (see the
+    _SCAN_LOCK comment in web/portfolio_routes.py::start_scan). More concurrent
+    dives means more in-flight pipeline state, so an operator needs a rollback
+    that doesn't require a code revert.
+    """
+    return os.environ.get("DEEP_DIVE_PER_CALL_GATING", "1").strip().lower() not in {
+        "0", "false", "no", "off"
+    }
+
+
 def _build_quick_batch_prompt(rows: list[dict[str, Any]]) -> str:
     """Build a numbered batch prompt from `_quick_features`-shaped rows."""
     lines = []
@@ -504,9 +536,9 @@ def _fetch_price_data_map(
     _quick_scan_one), so we deliberately do not copy it.
 
     A fetch covering fewer than 80% of the requested tickers with usable
-    data (>=5 non-NaN closes per ticker, the same bar _quick_scan_one
-    applies) is never cached; the partial map is still returned so the
-    current scan degrades gracefully on whatever data it got.
+    data (>=5 non-NaN closes per ticker) is never cached; the partial map is
+    still returned so the current scan degrades gracefully on whatever data
+    it got.
     """
     key = _price_data_key(tickers)
     cached = _PRICE_DATA_CACHE.get(trade_date, key)
@@ -916,7 +948,7 @@ def run_deep_dives(
     config: dict[str, Any],
     selected_analysts: list[str],
 ) -> list[dict[str, Any]]:
-    """Run the full multi-agent graph on each candidate, under the shared gate.
+    """Run the full multi-agent graph on each candidate.
 
     Each dive gets its own analyses row (so it shows up in dashboard history);
     success backfills analysis_id + final signal onto the spy quick result.
@@ -932,6 +964,17 @@ def run_deep_dives(
     ticker on the same day avoid paying for the shared stage more than once.
     Reuse can never fail a dive: any problem with the donor or the rerun
     falls straight back to a full pipeline run.
+
+    Concurrency: by default a dive holds a DynamicGate permit only for each
+    individual LLM call inside SwitchboardOrchestrator, not for the whole
+    dive. That means a dive parked on a slow tool fetch (news, prices)
+    does not squat on LLM capacity it isn't using. The gate itself — sized
+    to OLLAMA_MAX_CONCURRENCY via _total_budget() — therefore caps real LLM
+    concurrency, so the worker pool is widened to 2*budget to let non-LLM
+    phases overlap. Set DEEP_DIVE_PER_CALL_GATING=0 to revert BOTH halves
+    together (per-dive gating + budget-sized pool); splitting them would
+    deadlock because a whole-dive permit plus an inner per-call permit would
+    pin the gate forever.
     """
     log.info("[spy %s] deep dive on %d tickers", scan_id, len(candidates))
     db.update_spy_scan(scan_id, status="running_deep", deep_total=len(candidates))
@@ -949,15 +992,38 @@ def run_deep_dives(
     reused = 0
     budget = _total_budget()
 
+    per_call_gating = _per_call_gating_enabled()
+    # Gate CAPACITY is unchanged either way (DynamicGate(budget) below); only
+    # the pool width and WHERE the permit is taken change.
+    pool_size = budget * 2 if per_call_gating else budget
+    log.info(
+        "[spy %s] deep dive: per-call gating %s, pool=%d, gate budget=%d",
+        scan_id, "on" if per_call_gating else "off", pool_size, budget,
+    )
+
     def _dive(c: dict[str, Any], gate: DynamicGate) -> dict[str, Any]:
         ticker = c["ticker"]
         if db.is_spy_scan_cancelled(scan_id):
             return {**c, "skipped": True}
+        if per_call_gating:
+            # Permits are taken per llm.invoke inside the orchestrator; taking
+            # one here too would re-serialise the tool-fetch phases (and can
+            # deadlock the gate — see _per_call_gating_enabled).
+            return _dive_inner(c, ticker, gate)
         with gate:
-            return _dive_inner(c, ticker)
+            # Legacy: one permit for the whole dive, orchestrator ungated.
+            return _dive_inner(c, ticker, None)
 
-    def _dive_inner(c: dict[str, Any], ticker: str) -> dict[str, Any]:
+    def _dive_inner(c: dict[str, Any], ticker: str, orch_gate: DynamicGate | None) -> dict[str, Any]:
         fingerprint = _deep_dive_fingerprint(config, selected_analysts)
+
+        def _new_orchestrator() -> SwitchboardOrchestrator:
+            # One helper so the gate can't be wired into the full-run path and
+            # forgotten on the same-day-reuse path, which still makes one
+            # Portfolio Manager LLM call via rerun_decision().
+            return SwitchboardOrchestrator(
+                config=config, selected_analysts=selected_analysts, gate=orch_gate,
+            )
 
         def _analysis_params() -> dict[str, Any]:
             return {
@@ -1011,7 +1077,7 @@ def run_deep_dives(
                 donor = None
             if donor is not None:
                 try:
-                    orch = SwitchboardOrchestrator(config=config, selected_analysts=selected_analysts)
+                    orch = _new_orchestrator()
                     final_state, signal = orch.rerun_decision(donor["full_state"], ticker)
                 except Exception:
                     # Cache path failed for ANY reason (malformed/corrupt donor
@@ -1039,7 +1105,7 @@ def run_deep_dives(
 
         analysis_id = db.create_analysis(_analysis_params())
         try:
-            orch = SwitchboardOrchestrator(config=config, selected_analysts=selected_analysts)
+            orch = _new_orchestrator()
             final_state, signal = orch.run(ticker, trade_date)
             return _finish(analysis_id, orch, final_state, signal, None)
         except Exception as exc:
@@ -1047,8 +1113,9 @@ def run_deep_dives(
             db.fail_analysis(analysis_id, str(exc))
             return {**c, "error": str(exc), "analysis_id": analysis_id}
 
+    # DynamicGate(budget) is deliberate: the gate caps LLM concurrency; the pool is only admission width.
     with _GateMonitor(DynamicGate(budget)) as gate:
-        with ThreadPoolExecutor(max_workers=budget) as pool:
+        with ThreadPoolExecutor(max_workers=pool_size) as pool:
             futures = {pool.submit(_dive, c, gate): c["ticker"] for c in candidates}
             for fut in as_completed(futures):
                 # See run_quick_scan's identical del — drop the entry once
