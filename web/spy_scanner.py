@@ -656,17 +656,28 @@ def run_quick_scan(
                 "reused_quick": True,
             })
             continue
-        feats = _quick_features(t, price_data, "Unknown")
-        if feats is None:
+        try:
+            feats = _quick_features(t, price_data, "Unknown")
+            if feats is None:
+                pre_rows.append({
+                    "ticker": t,
+                    "signal": "HOLD",
+                    "conviction": 1,
+                    "reasoning": "Insufficient price data.",
+                    "entry_price": 0.0,
+                })
+                continue
+            feature_rows.append(feats)
+        except Exception as exc:
+            log.warning("Quick scan failed for %s: %s", t, exc)
             pre_rows.append({
                 "ticker": t,
                 "signal": "HOLD",
                 "conviction": 1,
-                "reasoning": "Insufficient price data.",
+                "reasoning": f"scan error: {exc}",
                 "entry_price": 0.0,
+                "error": str(exc),
             })
-            continue
-        feature_rows.append(feats)
 
     for row in pre_rows:
         _record(row)
