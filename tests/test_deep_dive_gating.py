@@ -337,6 +337,7 @@ def test_kill_switch_off_restores_both_halves_together(
     gate = _CONSTRUCTED_GATES[0]
     assert gate.acquires == 2
     assert gate.releases == 2
+    assert gate.limit == 3
 
 
 def test_kill_switch_off_also_passes_gate_none_on_the_reuse_path(
