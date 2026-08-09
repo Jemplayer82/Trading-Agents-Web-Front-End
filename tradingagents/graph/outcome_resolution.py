@@ -140,6 +140,7 @@ class PriceHistoryCache:
     def __init__(self) -> None:
         self._planned: dict[str, tuple[str, str] | None] = {}
         self._frames: dict[str, pd.DataFrame] = {}
+        self._failed: set[str] = set()
         self._downloads = 0
 
     def plan(self, symbol: str, start: str, end: str) -> None:
@@ -158,9 +159,18 @@ class PriceHistoryCache:
             # If a window was planned, download the unioned frame; otherwise
             # fetch exactly the requested window.
             dl_start, dl_end = self._planned.get(symbol) or (start, end)
-            df = _normalize_history(yf.Ticker(symbol).history(start=dl_start, end=dl_end))
-            self._frames[symbol] = df
             self._downloads += 1
+            try:
+                df = _normalize_history(yf.Ticker(symbol).history(start=dl_start, end=dl_end))
+            except Exception as e:
+                logger.warning(
+                    "Failed to download history for %s (%s..%s): %s; "
+                    "treating as empty for this sweep",
+                    symbol, dl_start, dl_end, e,
+                )
+                df = _normalize_history(pd.DataFrame())
+                self._failed.add(symbol)
+            self._frames[symbol] = df
         frame = self._frames[symbol]
         # Exact slice: start-inclusive, end-exclusive, matching yfinance.
         return frame[(frame.index >= pd.Timestamp(start)) & (frame.index < pd.Timestamp(end))]
