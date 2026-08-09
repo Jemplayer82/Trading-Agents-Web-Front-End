@@ -202,25 +202,26 @@ def _analyze_one_holding(scan_id, pos, trade_date, config, selected_analysts, la
     autocommit (isolation_level=None) mode — no lock is needed around these DB
     writes, and one must not be added.
     """
-    ticker = pos["symbol"]
-
-    # Keep this import local. The two existing portfolio-progress tests
-    # monkeypatch "tradingagents.orchestrator.SwitchboardOrchestrator" and
-    # depend on call-time resolution; hoisting it to module level would break
-    # those tests and cause real runs to hit the live LLM.
-    from tradingagents.orchestrator import SwitchboardOrchestrator
-
-    analysis_id = db.create_analysis({
-        "ticker": ticker,
-        "trade_date": trade_date,
-        "provider": config["llm_provider"],
-        "deep_model": config["deep_think_llm"],
-        "quick_model": config["quick_think_llm"],
-        "analysts": selected_analysts,
-        "research_depth": config["max_debate_rounds"],
-        "language": language,
-    })
+    analysis_id: int | None = None
     try:
+        ticker = pos["symbol"]
+
+        # Keep this import local. The two existing portfolio-progress tests
+        # monkeypatch "tradingagents.orchestrator.SwitchboardOrchestrator" and
+        # depend on call-time resolution; hoisting it to module level would break
+        # those tests and cause real runs to hit the live LLM.
+        from tradingagents.orchestrator import SwitchboardOrchestrator
+
+        analysis_id = db.create_analysis({
+            "ticker": ticker,
+            "trade_date": trade_date,
+            "provider": config["llm_provider"],
+            "deep_model": config["deep_think_llm"],
+            "quick_model": config["quick_think_llm"],
+            "analysts": selected_analysts,
+            "research_depth": config["max_debate_rounds"],
+            "language": language,
+        })
         orch = SwitchboardOrchestrator(config=config, selected_analysts=selected_analysts)
         final_state, signal = orch.run(ticker, trade_date)
         signal = (signal or "").upper()
@@ -246,14 +247,20 @@ def _analyze_one_holding(scan_id, pos, trade_date, config, selected_analysts, la
             "final_decision": final_state.get("final_trade_decision", ""),
         }
     except Exception as exc:
+        ticker = pos.get("symbol", "?")
         log.exception("[scan %s] failed for %s", scan_id, ticker)
-        db.fail_analysis(analysis_id, str(exc))
-        db.add_scan_ticker(scan_id, ticker, analysis_id, pos["quantity"], pos["market_value"], None, error=str(exc))
+        if analysis_id is not None:
+            db.fail_analysis(analysis_id, str(exc))
+        db.add_scan_ticker(
+            scan_id, ticker, analysis_id,
+            pos.get("quantity", 0.0), pos.get("market_value", 0.0),
+            None, error=str(exc),
+        )
         return {
             "ticker": ticker,
             "signal": "",
-            "quantity": pos["quantity"],
-            "market_value": pos["market_value"],
+            "quantity": pos.get("quantity", 0.0),
+            "market_value": pos.get("market_value", 0.0),
             "trader_plan": "",
             "final_decision": f"(failed: {exc})",
         }

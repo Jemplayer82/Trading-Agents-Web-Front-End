@@ -425,8 +425,14 @@ def connect() -> Iterator[sqlite3.Connection]:
     another writes. foreign_keys is per-connection in SQLite and must be
     re-enabled here every time (portfolio_tickers and spy_quick_results rely
     on ON DELETE CASCADE).
+
+    timeout is explicit because the portfolio scanner now runs ~9 concurrent
+    writers (8 workers + the collector thread) against SQLite's single WAL write
+    lock. Without an explicit value the connection inherits sqlite3's 5.0s
+    default, which is too short under that contention and surfaces as
+    OperationalError: database is locked.
     """
-    conn = sqlite3.connect(DB_PATH, isolation_level=None, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, isolation_level=None, check_same_thread=False, timeout=60.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
