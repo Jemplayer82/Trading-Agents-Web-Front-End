@@ -1,3 +1,22 @@
+"""
+Gated concurrency wrapper for LLM objects used by tradingagents.
+
+The agent factories in `tradingagents/agents/**` invoke the model inside closures
+the orchestrator never sees, and several make multiple LLM round-trips per
+logical node call (e.g. tool-call retry and structured-output fallback).
+Gating at the orchestrator would undercount real round-trips; gating the LLM
+object itself counts every `.invoke()` automatically with no factory changes.
+
+The gate is duck-typed -- any object exposing `acquire(weight=1)` /
+`release(weight=1)` works -- and this module deliberately imports nothing from
+`web/` so `tradingagents/` remains free of web-layer dependencies.
+
+Hard invariant: a permit wraps exactly ONE `.invoke()` and is NEVER held while
+acquiring another. The production `DynamicGate.acquire` blocks when
+`in_use > 0 and in_use + weight > limit`, so nested permit-holding would
+deadlock it.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
