@@ -400,32 +400,50 @@ class SwitchboardOrchestrator:
     def _analyst_local_state(self, state: dict, ticker: str) -> dict:
         """A private, per-analyst copy of the shared pipeline state.
 
-        A SHALLOW copy is correct and deliberate: analysts read only scalars
-        off state and write only top-level `messages` plus their own report
-        key, never a nested container. The messages list is a brand-new object
-        seeded exactly like run()'s pre-analyst-phase state, so concurrent
-        tool-calling loops can never interleave ToolMessages into each other's
-        conversation, and it is non-empty with a leading human turn -- the same
-        guarantee _clear_messages's placeholder exists to give Anthropic.
+        A shallow copy is correct for most keys because analysts read only
+        scalars off state and write only top-level `messages` plus their own
+        report key. The two nested mutable containers, `investment_debate_state`
+        and `risk_debate_state`, are explicitly deep-copied (one level is enough
+        because their leaves are immutable strings/ints) so an errant in-place
+        mutation inside a worker can never leak back to the shared state or to
+        sibling workers. The messages list is a brand-new object seeded exactly
+        like run()'s pre-analyst-phase state, so concurrent tool-calling loops
+        can never interleave ToolMessages into each other's conversation, and it
+        is non-empty with a leading human turn -- the same guarantee
+        _clear_messages's placeholder exists to give Anthropic.
 
         Built on the MAIN thread before submit, so no worker ever reads the
         shared state dict while the main thread is merging into it.
         """
         local = dict(state)
+        if "investment_debate_state" in local:
+            local["investment_debate_state"] = dict(local["investment_debate_state"])
+        if "risk_debate_state" in local:
+            local["risk_debate_state"] = dict(local["risk_debate_state"])
         local["messages"] = [("human", ticker)]
         return local
 
-    def _run_analyst_isolated(self, node, node_name: str, report_key: str, local_state: dict) -> str:
+    def _run_analyst_isolated(self, node, node_name: str, report_key: str, local_state: dict) -> tuple[str, dict]:
         """Worker-thread body: run ONE analyst against its OWN state copy.
 
-        Returns only that analyst's report text; the caller merges it into the
-        shared state ON THE MAIN THREAD. `local_state` must already be private
-        to this call -- nothing in here may touch the shared state dict.
+        Returns that analyst's report text plus a dict of every non-message key
+        the analyst node wrote during its tool-calling loop; the caller merges
+        those keys into the shared state ON THE MAIN THREAD. `local_state` must
+        already be private to this call -- nothing in here may touch the shared
+        state dict.
         """
         self._current_node = node_name
         try:
-            self._run_analyst(node, local_state)
-            return local_state.get(report_key, "") or ""
+            written_keys = set()
+            def _tracking_node(state):
+                update = node(state)
+                for key in update:
+                    if key != "messages":
+                        written_keys.add(key)
+                return update
+            self._run_analyst(_tracking_node, local_state)
+            analyst_update = {k: local_state[k] for k in written_keys if k in local_state}
+            return local_state.get(report_key, "") or "", analyst_update
         finally:
             # Pool threads are reused -- never leak the label to the next task.
             self._current_node = None
@@ -438,7 +456,9 @@ class SwitchboardOrchestrator:
             submit time, keeping factory-call order deterministic (several
             tests monkeypatch the factories and assert on what they received).
           * NOTHING writes the shared `state` dict from a worker; the main
-            thread merges each analyst's own report key as its future resolves.
+            thread merges each analyst's own returned keys (everything the
+            analyst node wrote during its tool-calling loop, except `messages`)
+            as its future resolves.
           * `self._current_node` is thread-local, so each worker labels its own
             streaming token frames.
           * `self.on_progress` may therefore be invoked concurrently from
@@ -459,9 +479,13 @@ class SwitchboardOrchestrator:
             `report_update`/`debate` frames from a worker unless `RunMirror` is
             made thread-safe or the invariant is re-established some other way.
 
-        Post-condition matches _run_analysts_sequential exactly: the shared
-        state ends with _clear_messages applied, so every downstream phase sees
-        identical input on both paths.
+        Post-condition: the shared state ends with every analyst's own returned
+        non-message key merged in, and `_clear_messages` applied, so every
+        downstream phase sees the same final report keys and the same
+        `messages` placeholder as the sequential path. Per-analyst `messages`
+        histories remain private to each worker and are NOT merged into shared
+        state; this is an intentional divergence from the sequential path's
+        single shared `messages` list.
         """
         ticker = state["company_of_interest"]
         pool = ThreadPoolExecutor(max_workers=limit, thread_name_prefix="analyst")
@@ -489,7 +513,8 @@ class SwitchboardOrchestrator:
                 # no analyst thread leaks out of a failed run. Already-running
                 # worker threads cannot be forcibly killed by Python's
                 # ThreadPoolExecutor.
-                report = fut.result()
+                report, analyst_update = fut.result()
+                self._merge(state, analyst_update)
                 state[spec.report_key] = report
                 if report:
                     self._emit({"type": "report_update", "reports": {spec.report_key: report}})
