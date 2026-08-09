@@ -30,6 +30,7 @@ import vm from 'node:vm';
 
 const payloadPath = process.argv[2];
 const payload = JSON.parse(fs.readFileSync(payloadPath, 'utf8'));
+const resultPath = payload.resultPath;
 
 const PRELUDE = `
 (function () {
@@ -193,7 +194,17 @@ const PRELUDE = `
 })();
 `;
 
-const sandbox = { process };
+// Minimal, deliberate shim: only process.stderr.write is exposed to the VM.
+// The real host process object and its capabilities (env, binding, dlopen,
+// cwd, exit, stdout, etc.) are never placed in the sandbox.
+const realStderrWrite = process.stderr.write.bind(process.stderr);
+const sandbox = {
+  process: {
+    stderr: {
+      write: realStderrWrite,
+    },
+  },
+};
 const ctx = vm.createContext(sandbox);
 
 vm.runInContext(PRELUDE, ctx, { filename: '<prelude>' });
@@ -216,9 +227,11 @@ for (const src of payload.sources) {
       value = await Promise.resolve(value);
     }
     value = value ?? null;
-    process.stdout.write('<<<JSON>>>' + JSON.stringify(value));
+    fs.writeFileSync(resultPath, JSON.stringify({ ok: true, value }), 'utf8');
   } catch (err) {
-    console.error(err && err.stack ? err.stack : err);
+    const errInfo = err && err.stack ? err.stack : String(err);
+    console.error(errInfo);
+    fs.writeFileSync(resultPath, JSON.stringify({ ok: false, error: errInfo }), 'utf8');
     process.exit(1);
   }
 })();
@@ -254,7 +267,9 @@ def run_js(
         tmp = Path(tmpdir)
         payload_path = tmp / "payload.json"
         driver_path = tmp / "driver.mjs"
+        result_path = tmp / "result.json"
 
+        payload["resultPath"] = str(result_path)
         payload_path.write_text(json.dumps(payload), encoding="utf-8")
         driver_path.write_text(_DRIVER_MJS, encoding="utf-8")
 
@@ -265,18 +280,31 @@ def run_js(
             timeout=timeout,
         )
 
-    if proc.returncode != 0 or "<<<JSON>>>" not in proc.stdout:
-        raise AssertionError(
-            f"JSVM exited {proc.returncode} and did not emit result sentinel.\n"
-            f"--- STDOUT ---\n{proc.stdout}\n"
-            f"--- STDERR ---\n{proc.stderr}"
-        )
+        try:
+            result_text = result_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            raise AssertionError(
+                f"JSVM exited {proc.returncode} and did not write a result file.\n"
+                f"--- STDOUT ---\n{proc.stdout}\n"
+                f"--- STDERR ---\n{proc.stderr}"
+            ) from exc
 
-    try:
-        return json.loads(proc.stdout.split("<<<JSON>>>", 1)[1])
-    except Exception as exc:
-        raise AssertionError(
-            f"JSVM result parse error: {exc}\n"
-            f"--- STDOUT ---\n{proc.stdout}\n"
-            f"--- STDERR ---\n{proc.stderr}"
-        ) from exc
+        try:
+            result = json.loads(result_text)
+        except Exception as exc:
+            raise AssertionError(
+                f"JSVM result parse error: {exc}\n"
+                f"--- STDOUT ---\n{proc.stdout}\n"
+                f"--- STDERR ---\n{proc.stderr}"
+            ) from exc
+
+        if proc.returncode != 0 or not result.get("ok"):
+            error_detail = result.get("error") or ""
+            raise AssertionError(
+                f"JSVM exited {proc.returncode} and did not emit a successful result.\n"
+                f"{error_detail}\n"
+                f"--- STDOUT ---\n{proc.stdout}\n"
+                f"--- STDERR ---\n{proc.stderr}"
+            )
+
+        return result["value"]
