@@ -335,7 +335,13 @@
   document.addEventListener("DOMContentLoaded", function () {
     initDom();
     if (feed) feed.addEventListener("scroll", onFeedScroll);
-    connect();
+
+    if (document.hidden) {
+      hiddenPaused = true;
+      setDot("amber", "paused — tab hidden");
+    } else {
+      connect();
+    }
   });
 
 }());
