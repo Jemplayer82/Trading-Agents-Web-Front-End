@@ -5,7 +5,7 @@ patched yfinance.Ticker returning DatetimeIndex DataFrames, MagicMock LLM.
 """
 
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pandas as pd
 import pytest
@@ -15,10 +15,13 @@ from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.agents.utils.scoring import HIT, MISS, UNINFORMATIVE, score_outcome
 from tradingagents.graph.outcome_resolution import (
     ABSOLUTE_BENCHMARK,
+    PriceHistoryCache,
     fetch_returns,
     noise_band,
     resolve_all_pending,
     resolve_benchmark,
+    _benchmark_window,
+    _stock_window,
 )
 
 DECISION_BUY = "Rating: Buy\n\nStrong momentum and expanding margins."
@@ -46,6 +49,126 @@ def _patch_tickers(price_map):
         return m
     p = patch("yfinance.Ticker")
     return p, _make
+
+
+# ---------------------------------------------------------------------------
+# PriceHistoryCache
+# ---------------------------------------------------------------------------
+
+class TestPriceHistoryCache:
+
+    def test_single_download_per_symbol(self):
+        prices = _price_df(list(range(60)), start="2026-01-05")
+        p, make = _patch_tickers({"NVDA": prices})
+        created = []
+
+        def tracking_make(sym):
+            m = make(sym)
+            created.append(m)
+            return m
+
+        cache = PriceHistoryCache()
+        cache.plan("NVDA", "2026-01-05", "2026-04-01")
+        with p as cls:
+            cls.side_effect = tracking_make
+            s1 = cache.get("NVDA", "2026-01-12", "2026-01-20")
+            s2 = cache.get("NVDA", "2026-01-20", "2026-01-30")
+            s3 = cache.get("NVDA", "2026-02-02", "2026-02-13")
+
+        assert cls.call_count == 1
+        assert created[0].history.call_count == 1
+        assert cache.download_count == 1
+        assert not s1.empty
+        assert not s2.empty
+        assert not s3.empty
+
+    def test_get_returns_exact_slice(self):
+        prices = _price_df(list(range(30)), start="2026-01-05")
+        p, make = _patch_tickers({"SYM": prices})
+        cache = PriceHistoryCache()
+        with p as cls:
+            cls.side_effect = make
+            s = cache.get("SYM", "2026-01-12", "2026-01-26")
+
+        # Business days between 2026-01-12 (inclusive) and 2026-01-26 (exclusive).
+        assert len(s) == 10
+        assert s.index.min() == pd.Timestamp("2026-01-12")
+        assert s.index.max() == pd.Timestamp("2026-01-23")
+        assert (s.index >= pd.Timestamp("2026-01-12")).all()
+        assert (s.index < pd.Timestamp("2026-01-26")).all()
+
+    def test_unplanned_symbol_fetches_requested_window(self):
+        prices = _price_df(list(range(30)), start="2026-01-05")
+        p, make = _patch_tickers({"SYM": prices})
+        created = []
+
+        def tracking_make(sym):
+            m = make(sym)
+            created.append(m)
+            return m
+
+        cache = PriceHistoryCache()
+        with p as cls:
+            cls.side_effect = tracking_make
+            s = cache.get("SYM", "2026-01-15", "2026-01-26")
+
+        assert cache.download_count == 1
+        assert created[0].history.call_count == 1
+        assert created[0].history.call_args == call(start="2026-01-15", end="2026-01-26")
+        assert not s.empty
+        assert s.index.min() == pd.Timestamp("2026-01-15")
+        assert (s.index < pd.Timestamp("2026-01-26")).all()
+
+    def test_empty_download_is_memoized(self):
+        p, make = _patch_tickers({"GONE": pd.DataFrame({"Close": []})})
+        created = []
+
+        def tracking_make(sym):
+            m = make(sym)
+            created.append(m)
+            return m
+
+        cache = PriceHistoryCache()
+        with p as cls:
+            cls.side_effect = tracking_make
+            s1 = cache.get("GONE", "2026-01-05", "2026-01-12")
+            s2 = cache.get("GONE", "2026-01-12", "2026-01-20")
+
+        assert cache.download_count == 1
+        assert created[0].history.call_count == 1
+        assert s1.empty
+        assert s2.empty
+
+    def test_planned_and_unplanned_agree(self):
+        trade_date = "2026-01-15"
+        prices = _price_df(list(range(500)), start="2025-03-03")
+        p, make = _patch_tickers({"NVDA": prices, "SPY": prices})
+
+        stock_start, stock_end = _stock_window(trade_date, 5)
+        bench_start, bench_end = _benchmark_window(trade_date, 5)
+        wide_stock_start = (
+            datetime.strptime(stock_start, "%Y-%m-%d") - timedelta(days=200)
+        ).strftime("%Y-%m-%d")
+        wide_stock_end = (
+            datetime.strptime(stock_end, "%Y-%m-%d") + timedelta(days=200)
+        ).strftime("%Y-%m-%d")
+        wide_bench_start = (
+            datetime.strptime(bench_start, "%Y-%m-%d") - timedelta(days=200)
+        ).strftime("%Y-%m-%d")
+        wide_bench_end = (
+            datetime.strptime(bench_end, "%Y-%m-%d") + timedelta(days=200)
+        ).strftime("%Y-%m-%d")
+
+        cache = PriceHistoryCache()
+        cache.plan("NVDA", wide_stock_start, wide_stock_end)
+        cache.plan("SPY", wide_bench_start, wide_bench_end)
+
+        with p as cls:
+            cls.side_effect = make
+            fresh = fetch_returns("NVDA", trade_date, 5, "SPY", history=None)
+            cached = fetch_returns("NVDA", trade_date, 5, "SPY", history=cache)
+
+        assert fresh == pytest.approx(cached, rel=1e-9)
 
 
 # ---------------------------------------------------------------------------

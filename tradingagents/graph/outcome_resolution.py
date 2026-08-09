@@ -23,6 +23,9 @@ Correctness rules enforced here (resolutions are irreversible once written):
 - **Noise short-circuit** — outcomes inside the noise band get a canned NOISE
   reflection with no LLM call; single-window moves that small carry no lesson.
   The band is volatility-scaled per ticker when enough price history exists.
+- **Shared history slicing** — shared price-history frames are always sliced
+  to the exact per-entry window requested by ``fetch_returns``, so batching
+  downloads changes only the number of network calls, never a resolved outcome.
 """
 
 from __future__ import annotations
@@ -83,6 +86,8 @@ def resolve_benchmark(ticker: str, config: dict) -> str:
 def _normalize_history(df: pd.DataFrame) -> pd.DataFrame:
     """Strip timezone and time-of-day so rows join cleanly on calendar date."""
     if df.empty:
+        df = df.copy()
+        df.index = pd.DatetimeIndex([], dtype="datetime64[ns]")
         return df
     idx = df.index
     if getattr(idx, "tz", None) is not None:
@@ -92,6 +97,75 @@ def _normalize_history(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _stock_window(trade_date: str, holding_days: int) -> tuple[str, str]:
+    """Return the (start, end) calendar window for a stock price fetch."""
+    start_dt = datetime.strptime(trade_date, "%Y-%m-%d")
+    start = (start_dt - timedelta(days=_VOL_LOOKBACK_CALENDAR_DAYS)).strftime("%Y-%m-%d")
+    end = (start_dt + timedelta(days=holding_days + 7)).strftime("%Y-%m-%d")
+    return start, end
+
+
+def _benchmark_window(trade_date: str, holding_days: int) -> tuple[str, str]:
+    """Return the (start, end) calendar window for a benchmark price fetch."""
+    start_dt = datetime.strptime(trade_date, "%Y-%m-%d")
+    start = (start_dt - timedelta(days=7)).strftime("%Y-%m-%d")
+    end = (start_dt + timedelta(days=holding_days + 7)).strftime("%Y-%m-%d")
+    return start, end
+
+
+class PriceHistoryCache:
+    """Shared, lazy price-history cache.
+
+    ``plan()`` unions the windows a sweep will need for each symbol so the
+    sweep can download one wide frame per symbol instead of one per entry.
+    Downloads are lazy: nothing happens until ``fetch_returns`` actually calls
+    ``get()``, so callers that mock ``fetch_returns`` wholesale (e.g.
+    TestSweep) keep making zero network calls with no edits at all.
+
+    Frames are always sliced back to the exact per-entry window requested by
+    ``get()`` (start-inclusive, end-exclusive, matching yfinance semantics).
+    This is correctness-critical: ``fetch_returns`` derives ``sigma_5d``
+    from every row before the trade date, uses benchmark ``asof`` lookups,
+    and detects halted-then-resumed tickers via the post-window rows. Handing
+    it a wider shared frame would change those values and silently
+    reclassify entries. Batching therefore changes only the number of network
+    calls, never a resolved outcome.
+    """
+
+    def __init__(self) -> None:
+        self._planned: dict[str, tuple[str, str] | None] = {}
+        self._frames: dict[str, pd.DataFrame] = {}
+        self._downloads = 0
+
+    def plan(self, symbol: str, start: str, end: str) -> None:
+        """Union the future download window for ``symbol``; performs no I/O."""
+        existing = self._planned.get(symbol)
+        if existing is None:
+            self._planned[symbol] = (start, end)
+        else:
+            p_start, p_end = existing
+            # ISO date strings compare correctly lexicographically.
+            self._planned[symbol] = (min(p_start, start), max(p_end, end))
+
+    def get(self, symbol: str, start: str, end: str) -> pd.DataFrame:
+        """Return the exact ``[start, end)`` slice, downloading lazily if needed."""
+        if symbol not in self._frames:
+            # If a window was planned, download the unioned frame; otherwise
+            # fetch exactly the requested window.
+            dl_start, dl_end = self._planned.get(symbol) or (start, end)
+            df = _normalize_history(yf.Ticker(symbol).history(start=dl_start, end=dl_end))
+            self._frames[symbol] = df
+            self._downloads += 1
+        frame = self._frames[symbol]
+        # Exact slice: start-inclusive, end-exclusive, matching yfinance.
+        return frame[(frame.index >= pd.Timestamp(start)) & (frame.index < pd.Timestamp(end))]
+
+    @property
+    def download_count(self) -> int:
+        """Number of symbol downloads actually performed."""
+        return self._downloads
+
+
 def fetch_returns(
     ticker: str,
     trade_date: str,
@@ -99,6 +173,7 @@ def fetch_returns(
     benchmark: str = "SPY",
     *,
     allow_partial: bool = False,
+    history: PriceHistoryCache | None = None,
 ) -> tuple[float | None, float | None, int | None, float | None]:
     """Forward return, alpha, actual holding days, and 5-day sigma for ``ticker``.
 
@@ -110,15 +185,19 @@ def fetch_returns(
     ``allow_partial=True`` (censor path) resolves with fewer than
     ``holding_days`` of data when the price series ended early — the caller is
     responsible for gating this on entry age.
+
+    ``history`` may be a shared ``PriceHistoryCache`` so a sweep can collapse
+    per-entry downloads into one download per symbol. Slices are exact, so
+    per-entry results are identical whether the frame came from the cache or a
+    fresh fetch.
     """
     try:
-        start_dt = datetime.strptime(trade_date, "%Y-%m-%d")
-        # Fetch back far enough to estimate volatility, forward far enough to
-        # cover the holding window across weekends/holidays.
-        fetch_start = (start_dt - timedelta(days=_VOL_LOOKBACK_CALENDAR_DAYS)).strftime("%Y-%m-%d")
-        fetch_end = (start_dt + timedelta(days=holding_days + 7)).strftime("%Y-%m-%d")
+        if history is None:
+            history = PriceHistoryCache()
 
-        stock = _normalize_history(yf.Ticker(ticker).history(start=fetch_start, end=fetch_end))
+        start_dt = datetime.strptime(trade_date, "%Y-%m-%d")
+        stock_start, stock_end = _stock_window(trade_date, holding_days)
+        stock = history.get(ticker, stock_start, stock_end)
         if stock.empty:
             return None, None, None, None
 
@@ -150,24 +229,20 @@ def fetch_returns(
         if benchmark == ABSOLUTE_BENCHMARK:
             return raw, raw, actual_days, sigma_5d
 
-        bench = _normalize_history(
-            yf.Ticker(benchmark).history(
-                start=(start_dt - timedelta(days=7)).strftime("%Y-%m-%d"),
-                end=fetch_end,
-            )
-        )
+        bench_start, bench_end = _benchmark_window(trade_date, holding_days)
+        bench = history.get(benchmark, bench_start, bench_end)
         if bench.empty or bench.index[-1] < end_ts:
             # Benchmark data hasn't caught up to the stock's end date yet.
             return None, None, None, None
 
         # Date-aligned closes: as-of lookups tolerate benchmark holidays by
         # falling back to the most recent prior close.
-        bench_start = bench["Close"].asof(post.index[0])
-        bench_end = bench["Close"].asof(end_ts)
-        if pd.isna(bench_start) or pd.isna(bench_end):
+        bench_start_close = bench["Close"].asof(post.index[0])
+        bench_end_close = bench["Close"].asof(end_ts)
+        if pd.isna(bench_start_close) or pd.isna(bench_end_close):
             return None, None, None, None
 
-        bench_ret = float((bench_end - bench_start) / bench_start)
+        bench_ret = float((bench_end_close - bench_start_close) / bench_start_close)
         alpha = raw - bench_ret
         return raw, alpha, actual_days, sigma_5d
     except Exception as e:
