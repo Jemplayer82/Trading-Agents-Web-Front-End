@@ -12,6 +12,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -502,8 +503,19 @@ class TestRunScanParallelism:
         assert counts["HOLD"] == 3
         assert counts["SELL"] == 3
 
-    def test_portfolio_routes_does_not_depend_on_spy_scanner(self, monkeypatch, tmp_path):
-        """This file must never import spy_scanner, even lazily — spy_scanner.py is deleted at tier-2 build time."""
+    def test_portfolio_routes_does_not_depend_on_spy_scanner(self):
+        """web/portfolio_routes.py must never reference spy_scanner — spy_scanner.py is deleted at tier-2 build time."""
         from web import portfolio_routes
 
         assert not hasattr(portfolio_routes, "spy_scanner")
+
+        routes_path = (
+            Path(__file__).resolve().parent.parent
+            / "web"
+            / "portfolio_routes.py"
+        )
+        source = routes_path.read_text(encoding="utf-8")
+        assert "spy_scanner" not in source, (
+            f"{routes_path} must not reference spy_scanner; "
+            f"found {source.count('spy_scanner')} occurrence(s)"
+        )
