@@ -124,12 +124,19 @@ def _total_budget() -> int:
 
 
 class DynamicGate:
-    """A resizable concurrency limiter.
+    """A weighted resizable concurrency limiter.
 
-    Workers wrap their LLM call in `with gate:`. A monitor thread calls
-    set_limit() to shrink/grow the number of permitted concurrent calls.
-    Shrinking below the in-flight count is allowed — in-flight calls finish,
-    and no new ones are admitted until usage drops below the new limit.
+    Workers acquire `weight` units of the gate before their LLM call and
+    release the same amount afterwards. A call that packs `n` tickers
+    into a single `llm.invoke()` should acquire `weight=n`, so the gate
+    tracks ticker-equivalent prompt volume/backend load against the budget
+    rather than just call count. A monitor thread calls set_limit() to
+    shrink/grow the number of permitted concurrent units. Shrinking below
+    the in-use count is allowed — in-flight calls finish, and no new calls
+    are admitted until usage drops below the new limit. When the gate is
+    completely idle, a request is admitted immediately regardless of its
+    weight, so a very large batch is never starved forever; it just runs
+    alone until it releases.
     """
 
     def __init__(self, limit: int) -> None:
@@ -146,17 +153,25 @@ class DynamicGate:
     def limit(self) -> int:
         return self._limit
 
-    def __enter__(self) -> DynamicGate:
+    def acquire(self, weight: int = 1) -> None:
         with self._cv:
-            while self._in_use >= self._limit:
+            weight = max(1, weight)
+            while self._in_use > 0 and self._in_use + weight > self._limit:
                 self._cv.wait(timeout=1.0)
-            self._in_use += 1
+            self._in_use += weight
+
+    def release(self, weight: int = 1) -> None:
+        with self._cv:
+            weight = max(1, weight)
+            self._in_use = max(0, self._in_use - weight)
+            self._cv.notify_all()
+
+    def __enter__(self) -> DynamicGate:
+        self.acquire(1)
         return self
 
     def __exit__(self, *exc: Any) -> None:
-        with self._cv:
-            self._in_use -= 1
-            self._cv.notify_all()
+        self.release(1)
 
 
 class _GateMonitor:

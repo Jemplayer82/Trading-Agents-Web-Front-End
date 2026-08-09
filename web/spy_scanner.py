@@ -222,13 +222,22 @@ def _quick_features(ticker: str, price_data: dict[str, Any], sector: str) -> dic
     }
 
 
-def _invoke_with_retry(llm: ChatOpenAI, messages: list[dict], label: str, gate: DynamicGate | None = None) -> str:
-    """Invoke the LLM, retrying up to 3 times on 429/rate-limit errors."""
+def _invoke_with_retry(llm: ChatOpenAI, messages: list[dict], label: str, gate: DynamicGate | None = None, weight: int = 1) -> str:
+    """Invoke the LLM, retrying up to 3 times on 429/rate-limit errors.
+
+    Args:
+        weight: permit units to take on the shared DynamicGate (default 1).
+            A batched call should pass the number of tickers in the batch so
+            the gate tracks prompt volume/backend load rather than call count.
+    """
     for attempt in range(4):
         try:
             if gate is not None:
-                with gate:
+                gate.acquire(weight)
+                try:
                     resp = llm.invoke(messages)
+                finally:
+                    gate.release(weight)
             else:
                 resp = llm.invoke(messages)
             break
@@ -390,6 +399,7 @@ def _quick_scan_batch(rows: list[dict[str, Any]], llm, gate=None) -> list[dict[s
             ],
             label=f"batch of {len(rows)}",
             gate=gate,
+            weight=len(rows),
         )
     except Exception as exc:
         log.warning("Quick scan batch failed (%d tickers): %s", len(rows), exc)
