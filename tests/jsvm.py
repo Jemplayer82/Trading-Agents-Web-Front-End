@@ -156,7 +156,7 @@ const PRELUDE = `
     for (const t of due) {
       if (timers.has(t.id)) {
         timers.delete(t.id);
-        try { t.fn(); } catch (e) { console.error('setTimeout callback error:', e); }
+        t.fn();
       }
     }
   };
