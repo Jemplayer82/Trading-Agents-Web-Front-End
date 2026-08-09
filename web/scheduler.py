@@ -379,9 +379,12 @@ def _sweep_relevant_tickers() -> set[str] | None:
     """Uppercased tickers whose resolved outcomes anyone will actually read."""
     try:
         out: set[str] = set()
+        attempted = 0
+        failed = 0
 
         # 1. Equity paper holdings.
         if features.enabled("sp500") or features.enabled("options"):
+            attempted += 1
             try:
                 for acct in db.list_paper_accounts(kind="equity"):
                     latest = db.get_latest_completed_spy_scan(
@@ -406,6 +409,7 @@ def _sweep_relevant_tickers() -> set[str] | None:
                             if ticker:
                                 out.add(str(ticker).upper())
             except Exception:
+                failed += 1
                 log.warning(
                     "[outcome_sweep] equity holdings relevance source failed",
                     exc_info=True,
@@ -413,28 +417,39 @@ def _sweep_relevant_tickers() -> set[str] | None:
 
         # 2. Open options underlyings.
         if features.enabled("options"):
+            attempted += 1
             try:
                 for pos in db.list_options_positions(status="open"):
                     underlying = pos.get("underlying")
                     if underlying:
                         out.add(str(underlying).upper())
             except Exception:
+                failed += 1
                 log.warning(
                     "[outcome_sweep] options underlyings relevance source failed",
                     exc_info=True,
                 )
 
-        # 3. Always relevant.
-        out.update(_ALWAYS_RELEVANT)
-
-        # 4. Recently analyzed tickers.
+        # 3. Recently analyzed tickers.
+        attempted += 1
         try:
             out.update(db.recent_analysis_tickers(_cutoff_iso(SWEEP_RELEVANCE_DAYS * 24 * 60)))
         except Exception:
+            failed += 1
             log.warning(
                 "[outcome_sweep] recent analysis relevance source failed",
                 exc_info=True,
             )
+
+        # If every DB-backed source we actually attempted errored, the gate
+        # has no reliable view of the world. Fail open rather than letting
+        # the hardcoded always-relevant floor paper over a real outage.
+        if attempted and attempted == failed:
+            log.warning("[outcome_sweep] all DB-backed relevance sources failed — disabling gate")
+            return None
+
+        # 4. Always relevant.
+        out.update(_ALWAYS_RELEVANT)
 
         # Empty set ⇒ fail-open to ungated behavior so a DB hiccup can't
         # silently stop the agents from learning.
