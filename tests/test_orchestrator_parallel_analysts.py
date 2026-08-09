@@ -127,13 +127,23 @@ _ANALYST_FACTORY_MAP = {
 
 
 def _patch_default_analyst_factories(monkeypatch):
-    """Patch all four analyst factories to deterministic one-turn nodes."""
+    """Patch all four analyst factories to deterministic one-turn nodes.
+
+    Each stub derives its returned report (and the AI message content) from
+    the conversation seed it was actually handed, so tests using this helper
+    are sensitive to the real message-seed asymmetry between the sequential
+    and parallel analyst paths.
+    """
     def make(key, report_key):
         def factory(llm, **kwargs):
             def node(state):
+                messages = state.get("messages", [])
+                seed_len = len(messages)
+                first_type = type(messages[0]).__name__ if messages else "None"
+                report = f"{key}|{seed_len}|{first_type}"
                 return {
-                    "messages": [AIMessage(content=f"{key} report", tool_calls=[])],
-                    report_key: f"{key} report",
+                    "messages": [AIMessage(content=report, tool_calls=[])],
+                    report_key: report,
                 }
             return node
         return factory
@@ -151,7 +161,9 @@ def test_default_config_analyst_concurrency_limit_is_still_one():
     assert DEFAULT_CONFIG["analyst_concurrency_limit"] == 1
 
 
-def test_limit_1_and_limit_4_produce_identical_state_and_signal(tmp_path, monkeypatch):
+def test_limit_1_and_limit_4_produce_identical_signal_and_known_report_divergence(
+    tmp_path, monkeypatch
+):
     _patch_downstream_factories(monkeypatch)
     _patch_default_analyst_factories(monkeypatch)
 
@@ -176,8 +188,31 @@ def test_limit_1_and_limit_4_produce_identical_state_and_signal(tmp_path, monkey
     state_seq, signal_seq = seq_orch.run("AAPL", "2026-08-08")
     state_par, signal_par = par_orch.run("AAPL", "2026-08-08")
 
-    assert signal_seq == signal_par
-    assert state_seq == state_par
+    assert signal_seq == signal_par == "Buy"
+
+    # The sequential path preserves the historical message-seed asymmetry on
+    # purpose: the first analyst (market) sees run()'s original ("human", ticker)
+    # seed, and every later analyst sees [HumanMessage("Continue")] because the
+    # shared messages list is reset after each analyst. The parallel path gives
+    # every analyst a private state copy seeded with ("human", ticker). Our stubs
+    # encode that seed in the report text, so only the market report is
+    # identical across the two paths; the other three reports differ exactly by
+    # the type name of the first message they received.
+    assert state_seq["market_report"] == state_par["market_report"] == "market|1|tuple"
+
+    assert state_seq["sentiment_report"] == "social|1|HumanMessage"
+    assert state_par["sentiment_report"] == "social|1|tuple"
+
+    assert state_seq["news_report"] == "news|1|HumanMessage"
+    assert state_par["news_report"] == "news|1|tuple"
+
+    assert state_seq["fundamentals_report"] == "fundamentals|1|HumanMessage"
+    assert state_par["fundamentals_report"] == "fundamentals|1|tuple"
+
+    report_keys = {report_key for _, report_key in _ANALYST_FACTORY_MAP.values()}
+    non_report_seq = {k: v for k, v in state_seq.items() if k not in report_keys}
+    non_report_par = {k: v for k, v in state_par.items() if k not in report_keys}
+    assert non_report_seq == non_report_par
 
 
 @pytest.mark.parametrize(
@@ -526,7 +561,7 @@ def test_unknown_analyst_keys_are_skipped_at_both_limits(tmp_path, monkeypatch, 
     state, signal = orch.run("AAPL", "2026-08-08")
 
     assert signal == "Buy"
-    assert state["market_report"] == "market report"
+    assert state["market_report"] == "market|1|tuple"
     assert state["sentiment_report"] == ""
     assert state["news_report"] == ""
     assert state["fundamentals_report"] == ""
@@ -574,3 +609,4 @@ def test_empty_analyst_selection_completes_at_limit_4(tmp_path, monkeypatch):
     assert state["fundamentals_report"] == ""
     assert calls["sequential"]
     assert not calls["parallel"]
+
