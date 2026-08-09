@@ -423,7 +423,14 @@ class SwitchboardOrchestrator:
         local["messages"] = [("human", ticker)]
         return local
 
-    def _run_analyst_isolated(self, node, node_name: str, report_key: str, local_state: dict) -> tuple[str, dict]:
+    def _run_analyst_isolated(
+        self,
+        node,
+        node_name: str,
+        report_key: str,
+        local_state: dict,
+        failed_event: threading.Event,
+    ) -> tuple[str, dict]:
         """Worker-thread body: run ONE analyst against its OWN state copy.
 
         Returns that analyst's report text plus a dict of every non-message key
@@ -431,7 +438,20 @@ class SwitchboardOrchestrator:
         those keys into the shared state ON THE MAIN THREAD. `local_state` must
         already be private to this call -- nothing in here may touch the shared
         state dict.
+
+        Cooperative fail-fast: ``failed_event`` is shared by every worker.
+        If a sibling has already failed, the event is already set and this
+        worker bails out immediately without doing any real LLM/tool work,
+        returning an empty report. If this worker is the one that fails, it
+        sets the event synchronously in its own thread before the exception
+        propagates out of this function, closing the race where a
+        ``ThreadPoolExecutor`` worker could otherwise finish the failed work
+        item, loop back to the internal queue, pull the NEXT queued analyst,
+        and start its expensive tool-calling loop before the main thread has
+        had any chance to react.
         """
+        if failed_event.is_set():
+            return "", {}
         self._current_node = node_name
         try:
             written_keys = set()
@@ -444,6 +464,9 @@ class SwitchboardOrchestrator:
             self._run_analyst(_tracking_node, local_state)
             analyst_update = {k: local_state[k] for k in written_keys if k in local_state}
             return local_state.get(report_key, "") or "", analyst_update
+        except BaseException:
+            failed_event.set()
+            raise
         finally:
             # Pool threads are reused -- never leak the label to the next task.
             self._current_node = None
@@ -479,6 +502,19 @@ class SwitchboardOrchestrator:
             `report_update`/`debate` frames from a worker unless `RunMirror` is
             made thread-safe or the invariant is re-established some other way.
 
+        Cooperative fail-fast: a shared ``threading.Event`` is passed to every
+        worker. The first thing each worker does is check the event, and any
+        worker that sees a sibling has already failed returns an empty report
+        immediately, without starting real LLM/tool work. The failing worker
+        itself sets the event synchronously inside its own thread before its
+        exception propagates, so that the same OS thread cannot race back to
+        the executor's internal queue and dispatch another queued analyst
+        before the main thread has had a chance to react. This is necessary
+        because ``ThreadPoolExecutor.shutdown(cancel_futures=True)`` only
+        cancels futures still sitting in the internal queue at the moment it
+        is called; it cannot recall a work item that a worker thread has
+        already pulled off the queue.
+
         Post-condition: the shared state ends with every analyst's own returned
         non-message key merged in, and `_clear_messages` applied, so every
         downstream phase sees the same final report keys and the same
@@ -488,6 +524,7 @@ class SwitchboardOrchestrator:
         single shared `messages` list.
         """
         ticker = state["company_of_interest"]
+        failed_event = threading.Event()
         pool = ThreadPoolExecutor(max_workers=limit, thread_name_prefix="analyst")
         try:
             futures = {}
@@ -502,17 +539,23 @@ class SwitchboardOrchestrator:
                 node = self._build_analyst_node(analyst_key)
                 local_state = self._analyst_local_state(state, ticker)
                 futures[pool.submit(
-                    self._run_analyst_isolated, node, spec.node_name, spec.report_key, local_state,
+                    self._run_analyst_isolated,
+                    node,
+                    spec.node_name,
+                    spec.report_key,
+                    local_state,
+                    failed_event,
                 )] = analyst_key
             for fut in as_completed(futures):
                 spec = _ANALYST_SPECS[futures[fut]]
                 # Re-raises a worker exception on the main thread, matching the
-                # sequential path's fail-the-run behaviour. Any futures still
-                # queued are cancelled and the pool waits for already-running
-                # worker threads to finish before the exception is re-raised, so
-                # no analyst thread leaks out of a failed run. Already-running
-                # worker threads cannot be forcibly killed by Python's
-                # ThreadPoolExecutor.
+                # sequential path's fail-the-run behaviour. The per-worker
+                # ``failed_event`` check ensures that any task picked from the
+                # executor queue after a sibling has already failed bails out
+                # before doing real LLM/tool work; ``cancel_futures=True`` on
+                # shutdown still cancels items that were still purely queued.
+                # Already-running worker threads cannot be forcibly killed by
+                # Python's ThreadPoolExecutor.
                 report, analyst_update = fut.result()
                 self._merge(state, analyst_update)
                 state[spec.report_key] = report

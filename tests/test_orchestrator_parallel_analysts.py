@@ -531,6 +531,74 @@ def test_analyst_exception_propagates_out_of_run(tmp_path, monkeypatch):
     assert [t for t in threading.enumerate() if t.name.startswith("analyst")] == []
 
 
+def test_fast_analyst_failure_cancels_queued_siblings(tmp_path, monkeypatch):
+    """A fast-failing analyst with queued siblings must not let those siblings
+    start real work after the failure.
+
+    The pool has only 2 workers and 4 analysts.  ``market`` raises instantly,
+    so at most one non-market analyst can legitimately have been dispatched
+    before the failure.  Any further invocation means a queued sibling leaked
+    past the cooperative cancellation check and started its node body.
+    """
+    _patch_downstream_factories(monkeypatch)
+
+    invoked_lock = threading.Lock()
+    invoked = []
+
+    def market_boom_factory(llm, **kwargs):
+        def node(state):
+            with invoked_lock:
+                invoked.append("market")
+            raise RuntimeError("boom")
+        return node
+
+    def make_counting(key, report_key):
+        def factory(llm, **kwargs):
+            def node(state):
+                with invoked_lock:
+                    # The pool has max_workers=2.  The first invocation is
+                    # market, which fails fast.  The second invocation is the
+                    # one other analyst the pool legitimately dispatched.  Any
+                    # additional invocation can only happen if a queued sibling
+                    # started real work after the failure, which is the bug.
+                    if len(invoked) >= 2:
+                        raise AssertionError(
+                            f"queued sibling {key!r} started real work after a failure"
+                        )
+                    invoked.append(key)
+                return {
+                    "messages": [AIMessage(content=f"{key} report", tool_calls=[])],
+                    report_key: f"{key} report",
+                }
+            return node
+        return factory
+
+    monkeypatch.setattr(sbo_module, "create_market_analyst", market_boom_factory)
+    for key, (factory_name, report_key) in _ANALYST_FACTORY_MAP.items():
+        if key == "market":
+            continue
+        monkeypatch.setattr(sbo_module, factory_name, make_counting(key, report_key))
+
+    orch = _make_orchestrator(
+        tmp_path,
+        selected_analysts=_selected_all(),
+        extra_config={"analyst_concurrency_limit": 2},
+    )
+    orch.signal_processor.process_signal = lambda decision: "Buy"
+
+    with pytest.raises(RuntimeError, match="boom"):
+        orch.run("AAPL", "2026-08-08")
+
+    with invoked_lock:
+        assert "market" in invoked
+        # market plus at most one non-market analyst may have started; the
+        # remaining two analysts were still queued and must never have run.
+        assert len(invoked) <= 2
+        assert set(_selected_all()).issuperset(invoked)
+
+    assert [t for t in threading.enumerate() if t.name.startswith("analyst")] == []
+
+
 @pytest.mark.parametrize("limit", [1, 4])
 def test_unknown_analyst_keys_are_skipped_at_both_limits(tmp_path, monkeypatch, limit):
     _patch_downstream_factories(monkeypatch)
@@ -609,4 +677,3 @@ def test_empty_analyst_selection_completes_at_limit_4(tmp_path, monkeypatch):
     assert state["fundamentals_report"] == ""
     assert calls["sequential"]
     assert not calls["parallel"]
-
