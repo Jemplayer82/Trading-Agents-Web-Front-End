@@ -401,7 +401,8 @@ class SwitchboardOrchestrator:
         identical input on both paths.
         """
         ticker = state["company_of_interest"]
-        with ThreadPoolExecutor(max_workers=limit, thread_name_prefix="analyst") as pool:
+        pool = ThreadPoolExecutor(max_workers=limit, thread_name_prefix="analyst")
+        try:
             futures = {}
             for analyst_key in analyst_keys:
                 spec = _ANALYST_SPECS[analyst_key]
@@ -419,12 +420,21 @@ class SwitchboardOrchestrator:
             for fut in as_completed(futures):
                 spec = _ANALYST_SPECS[futures[fut]]
                 # Re-raises a worker exception on the main thread, matching the
-                # sequential path's fail-the-run behaviour. The enclosing `with`
-                # still shuts the pool down with wait=True first.
+                # sequential path's fail-the-run behaviour. Any futures still
+                # queued are cancelled and the pool waits for already-running
+                # worker threads to finish before the exception is re-raised, so
+                # no analyst thread leaks out of a failed run. Already-running
+                # worker threads cannot be forcibly killed by Python's
+                # ThreadPoolExecutor.
                 report = fut.result()
                 state[spec.report_key] = report
                 if report:
                     self._emit({"type": "report_update", "reports": {spec.report_key: report}})
+        except BaseException:
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
         self._clear_messages(state)
 
     def _run_analyst(self, analyst_node, state: dict) -> None:
