@@ -13,16 +13,18 @@ namespaced "schwab:12345678"), each equity through SwitchboardOrchestrator,
 then the aggregator briefing. Option positions are display-only on the
 dashboard and are skipped (logged) before the analysis loop.
 
-Progress contract: _run_scan writes scan_total once, then scanned_count /
-current_ticker per ticker as holdings finish. scanned_count is
-"completed-so-far" and reaches the full scan_total when the last holding
-finishes (previously it topped out at N-1 because it was written before each
-ticker started). current_ticker now reports the most recently completed
-holding, since under concurrency there is no single "in-flight" ticker.
-Concurrency is bounded by the same cross-container OLLAMA_MAX_CONCURRENCY
-budget the S&P scanner uses (via _total_budget/_GateMonitor), so single-ticker
-ad-hoc analyses keep priority and the scan never fully starves (floors at 1
-worker).
+Progress contract: _run_scan writes scan_total once, then an initial progress
+update (scanned_count=0, current_ticker=<first ticker>) before the pool starts
+so the frontend banner shows "0/N analyzed, <first ticker>" immediately.
+After each holding finishes, scanned_count / current_ticker is updated again.
+scanned_count is "completed-so-far" and reaches the full scan_total when the
+last holding finishes (previously it topped out at N-1 because it was written
+before each ticker started). current_ticker now reports the most recently
+completed holding, since under concurrency there is no single "in-flight"
+ticker. Concurrency is bounded by the same cross-container
+OLLAMA_MAX_CONCURRENCY budget the S&P scanner uses (via
+_total_budget/_GateMonitor), so single-ticker ad-hoc analyses keep priority
+and the scan never fully starves (floors at 1 worker).
 """
 from __future__ import annotations
 
@@ -269,9 +271,11 @@ def _run_scan(scan_id: int, trade_date: str, aggressiveness: int = 5, bias: str 
     payload) and the scan continues; only a failure outside the loop fails
     the whole scan.
 
-    scanned_count is updated after each holding completes and reaches the
-    full scan_total on the final update; current_ticker is the most recently
-    completed holding.
+    An initial progress update (scanned_count=0, current_ticker=<first ticker>)
+    is written before the pool starts so the frontend shows a non-empty
+    "0/N analyzed, <first ticker>" banner immediately. scanned_count is then
+    updated after each holding completes and reaches the full scan_total on
+    the final update; current_ticker is the most recently completed holding.
     """
     log.info("[scan %s] starting for %s", scan_id, trade_date)
 
@@ -293,6 +297,10 @@ def _run_scan(scan_id: int, trade_date: str, aggressiveness: int = 5, bias: str 
 
     # Record the total number of tickers to be scanned so the frontend can show a progress bar.
     db.update_portfolio_scan(scan_id, scan_total=len(pos_dicts))
+
+    # Show the first ticker in the banner before any work completes, so a long
+    # first batch doesn't look like a stuck/wedged scan.
+    db.update_portfolio_scan(scan_id, scanned_count=0, current_ticker=pos_dicts[0]["symbol"])
 
     # Step 2: load user preferences for LLM / analyst config. Aggressiveness
     # (from the Run Scan form) drives debate depth; bias flows to each ticker's
