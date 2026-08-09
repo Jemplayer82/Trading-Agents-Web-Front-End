@@ -388,3 +388,84 @@ class TestWaitReleasesTheQueueSlot:
         finally:
             wait_thread.join(timeout=5)
             assert not wait_thread.is_alive()
+
+
+class TestRunOptionsBuildHoldsAllocationLock:
+    """run_options_build end-to-end: the global allocation lock is held during
+    the post-wait phase and released afterward. Also guards that prescreen
+    is invoked with the keyword-only trade_date argument."""
+
+    def _release_lock(self):
+        if options_engine._ALLOC_LOCK.locked():
+            options_engine._ALLOC_LOCK.release()
+
+    def test_run_options_build_holds_allocation_lock_during_refresh_positions(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(db, "DB_PATH", tmp_path / "web.db")
+        db.init_db()
+
+        from datetime import datetime
+
+        trade_date = "2026-06-06"
+        account_id = db.create_paper_account("lock-e2e", 100_000.0, "options")
+        scan_id = db.create_spy_scan(
+            trade_date, kind="options", paper_account_id=account_id
+        )
+
+        captured: dict[str, Any] = {}
+
+        # Phase 1: universe + movers pre-screen.
+        monkeypatch.setattr(options_engine, "get_sp500_tickers", lambda: ["AAPL"])
+
+        def fake_prescreen(tickers, top_n=None, *, trade_date=None):
+            captured["prescreen_trade_date"] = trade_date
+            assert trade_date == trade_date  # keyword-only, asserted below too
+            return ["AAPL"]
+
+        monkeypatch.setattr(options_engine, "prescreen", fake_prescreen)
+
+        # Phase 2: quick scan returns only a HOLD name + no SPY row, so
+        # select_deep_dive_targets() is empty and the real run_deep_dives path
+        # is never reached.
+        def fake_run_quick_scan(scan_id_arg, movers, trade_date_arg, config):
+            return [{"ticker": "AAPL", "signal": "HOLD", "conviction": 1}]
+
+        monkeypatch.setattr(
+            options_engine.spy_scanner, "run_quick_scan", fake_run_quick_scan
+        )
+
+        # Skip the market-open wait: Saturday after open returns immediately.
+        monkeypatch.setattr(
+            options_engine.options_data,
+            "now_et",
+            lambda: datetime(2026, 6, 6, 10, 0),
+        )
+
+        # The load-bearing assertion: refresh_positions runs inside _allocation_slot.
+        def fake_refresh_positions(paper_account_id=None):
+            captured["lock_during_refresh"] = options_engine._ALLOC_LOCK.locked()
+            assert captured["lock_during_refresh"] is True
+
+        monkeypatch.setattr(options_engine, "refresh_positions", fake_refresh_positions)
+
+        # Avoid the real LLM allocator while keeping the contract shape intact.
+        def fake_allocator_run(*args, **kwargs):
+            return {
+                "closes": [],
+                "holds": [],
+                "opens": [],
+                "report_md": "test allocation report",
+            }
+
+        monkeypatch.setattr(options_engine.options_allocator, "run", fake_allocator_run)
+
+        try:
+            options_engine.run_options_build(scan_id, trade_date)
+        finally:
+            self._release_lock()
+
+        assert captured["prescreen_trade_date"] == trade_date
+        assert captured["lock_during_refresh"] is True
+        assert not options_engine._ALLOC_LOCK.locked()
+        assert db.get_spy_scan_status(scan_id)["status"] == "completed"
