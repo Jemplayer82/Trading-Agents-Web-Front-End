@@ -441,21 +441,26 @@ def _sweep_relevant_tickers() -> set[str] | None:
                 exc_info=True,
             )
 
-        # If every DB-backed source we actually attempted errored, the gate
-        # has no reliable view of the world. Fail open rather than letting
-        # the hardcoded always-relevant floor paper over a real outage.
-        if attempted and attempted == failed:
-            log.warning("[outcome_sweep] all DB-backed relevance sources failed — disabling gate")
+        # If any DB-backed source we attempted errored, the gate has an
+        # incomplete view of the world. Fail open rather than over-suppress.
+        if failed:
+            log.warning(
+                "[outcome_sweep] %d of %d relevance sources failed — disabling gate",
+                failed,
+                attempted,
+            )
             return None
+
+        # Empty DB-backed set before applying the always-relevant floor.
+        # If there is no floor at all, disable the gate; otherwise keep it
+        # armed with the floor tickers.
+        if not out:
+            if not _ALWAYS_RELEVANT:
+                log.warning("[outcome_sweep] relevance set assembled empty — disabling gate")
+                return None
 
         # 4. Always relevant.
         out.update(_ALWAYS_RELEVANT)
-
-        # Empty set ⇒ fail-open to ungated behavior so a DB hiccup can't
-        # silently stop the agents from learning.
-        if not out:
-            log.warning("[outcome_sweep] relevance set assembled empty — disabling gate")
-            return None
         return out
     except Exception:
         log.exception("[outcome_sweep] relevance computation crashed")

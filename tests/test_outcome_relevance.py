@@ -1,6 +1,6 @@
 """Tier-agnostic tests for the outcome-sweep relevance gate.
 
-The sweep's relevance set is computed in web/scheduler.py (the only container
+The sweep's relevance set is computed in web.scheduler.py (the only container
 with DB access) and passed into resolve_all_pending. These tests exercise
 web.db's new recent_analysis_tickers helper and scheduler._sweep_relevant_tickers
 without touching any tier-4-only modules.
@@ -110,13 +110,12 @@ class TestSweepRelevantTickers:
         assert "AMD" in result
         assert "amd" not in result
 
-    def test_per_source_failure_isolated(self, tmp_db, monkeypatch):
+    def test_single_source_failure_fails_open(self, tmp_db, monkeypatch):
         def boom(cutoff):
             raise RuntimeError("boom")
         monkeypatch.setattr(db, "recent_analysis_tickers", boom)
         result = scheduler._sweep_relevant_tickers()
-        assert result is not None
-        assert "SPY" in result
+        assert result is None
 
     def test_empty_set_returns_none(self, tmp_db, monkeypatch):
         monkeypatch.setenv("FEATURES", "")
