@@ -997,7 +997,7 @@ async def bus_ws(ws: WebSocket) -> None:
                         "dashboard-bridge",
                         channel_id=channel,
                         since_id=cursor,
-                        limit=50,
+                        limit=250,
                         peek=True,
                     )
                     if bus_ok is False:
@@ -1028,6 +1028,21 @@ async def bus_ws(ws: WebSocket) -> None:
                         return
 
                 await asyncio.sleep(poll_interval)
+
+                # Drain incoming again in case a channel-switch/disconnect
+                # frame arrives during the sleep window, so we act promptly
+                # instead of waiting for the next full poll iteration.
+                try:
+                    raw = incoming.get_nowait()
+                    if raw is None:
+                        return  # client disconnected
+                    new_channel = _parse_channel_switch(raw)
+                    if new_channel and new_channel != channel:
+                        channel = new_channel
+                        cursor = 0
+                        break  # re-announce + re-backfill
+                except asyncio.QueueEmpty:
+                    pass
 
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass
