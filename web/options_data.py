@@ -514,6 +514,7 @@ def fetch_candidates(
     """
     # ── PHASE 1 — FILTER (input order, no network) ──────────────────────────
     eligible: list[tuple[int, dict[str, Any], str, int]] = []
+    eligible_meta: dict[int, tuple[dict[str, Any], str, int]] = {}
     row_notes: list[list[str]] = [[] for _ in signals]
     for idx, row in enumerate(signals):
         sig_raw = (row.get("signal") or "").upper()
@@ -526,6 +527,7 @@ def fetch_candidates(
             row_notes[idx].append(f"{ticker}: conviction {conviction} < {MIN_CONVICTION}")
             continue
         eligible.append((idx, row, direction, conviction))
+        eligible_meta[idx] = (row, direction, conviction)
 
     # ── PHASE 2 — FETCH concurrently (only if there is work to do) ────────────
     fetched: dict[int, tuple[dict[str, Any] | None, list[str]]] = {}
@@ -548,11 +550,7 @@ def fetch_candidates(
             contract, c_notes = fetched[idx]
             notes += c_notes
             ticker = row.get("ticker")
-            _, _, direction, conviction = next(
-                (e for e in eligible if e[0] == idx),
-                (idx, row, _DIRECTION_BY_SIGNAL.get((row.get("signal") or "").upper(), "BUY"),
-                 int(row.get("conviction") or 0)),
-            )
+            _, direction, conviction = eligible_meta[idx]
             if contract is None:
                 notes.append(f"{ticker}: no tradeable contract")
             else:
