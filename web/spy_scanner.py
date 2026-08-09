@@ -64,9 +64,11 @@ class ScanInfrastructureError(RuntimeError):
 # Key is (trade_date, hash of the sorted ticker set) so the equity
 # scan's ~500-ticker request and an options build's ~151-ticker movers
 # request are separate entries, while the three daily options builds
-# converge on the same movers set and therefore the same key. 4h TTL so
-# an intraday cache-clear or a long-running day eventually refreshes.
-_PRICE_DATA_TTL_SECONDS = 4 * 3600
+# converge on the same movers set and therefore the same key. 15-minute
+# TTL so the cached last close used as entry_price stays within an
+# execution-tolerable window while still avoiding a fresh yfinance bulk
+# download for every paper account.
+_PRICE_DATA_TTL_SECONDS = 15 * 60
 
 # A fetch covering fewer than 80% of the requested tickers is treated as a
 # degraded download. The partial map is still returned to the caller (the
@@ -356,15 +358,18 @@ def run_quick_scan(
     fetch signal/conviction/reasoning for any ticker already scored today by
     another same-day scan with an identical quick-scan fingerprint (see
     _quick_scan_fingerprint) and skip the LLM call for those tickers.
-    entry_price is always recomputed from this scan's own price data — never
-    reused — since spy_quick_results doesn't store it and the allocators
-    depend on a current price. The main payoff isn't the quick-LLM savings
-    themselves; it's that identical quick results make every same-day scan
-    converge on the same top-N tickers, which is what drives deep-dive reuse
-    toward a full hit rate.
+    entry_price is not persisted in spy_quick_results, so it is sourced from
+    the same-day bulk price download used by this scan. That download is
+    cached in-process with a short TTL (currently ~15 minutes), so the
+    entry_price may be shared among scans inside that window but is never
+    more than ~15 minutes stale — acceptable for an execution price in
+    this context. The main payoff isn't the quick-LLM savings themselves;
+    it's that identical quick results make every same-day scan converge on
+    the same top-N tickers, which is what drives deep-dive reuse toward a
+    full hit rate.
 
     The bulk price download is cached in-process for the same trading day:
-    key = (trade_date, sha256 of the sorted ticker set), TTL ~4 hours.
+    key = (trade_date, sha256 of the sorted ticker set), TTL ~15 minutes.
     Prior-day entries are evicted on the first write for a new date, and
     fetches covering fewer than 80% of the requested tickers (including a
     totally empty or failed fetch) are never cached so a transient yfinance
@@ -415,10 +420,11 @@ def run_quick_scan(
             cached = reuse_map.get(t)
             if cached is not None:
                 closes = price_data.get("close", [])
-                # entry_price is never reused — spy_quick_results doesn't
-                # store it and the allocators need a current price — so a
-                # ticker missing today's price data falls through to the
-                # normal LLM path instead of reusing with a stale/zero price.
+                # entry_price is taken from the cached same-day bulk price
+                # bars. The cache TTL is short (~15 min), so this stays
+                # within an execution-tolerable window; a ticker missing
+                # from the cached bars cannot be reused at all and falls
+                # through to the normal LLM path.
                 if len(closes) >= 5:
                     return {
                         "ticker": t,
