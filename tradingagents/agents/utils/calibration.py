@@ -58,6 +58,7 @@ def compute_calibration(entries: list[dict], config: dict | None = None) -> dict
     n_absolute = 0
     n_unrated = 0
     n_censored = 0
+    n_not_relevant = 0
     # Benchmark resolution per unique ticker (cached — the log repeats tickers).
     absolute_cache: dict[str, bool] = {}
 
@@ -79,6 +80,14 @@ def compute_calibration(entries: list[dict], config: dict | None = None) -> dict
         reflection = e.get("reflection") or ""
         m = _CLASS_RE.search(reflection)
         cls = m.group(1) if m else None
+
+        # Canned "NOT-RELEVANT" reflections are bookkeeping metadata from the
+        # sweep filter, not real theses, so they must not enter scoring or the
+        # class distributions.
+        if cls == "NOT-RELEVANT":
+            n_not_relevant += 1
+            continue
+
         if cls:
             classes[cls] = classes.get(cls, 0) + 1
         if cls == "CENSORED":
@@ -138,6 +147,7 @@ def compute_calibration(entries: list[dict], config: dict | None = None) -> dict
         "n_absolute": n_absolute,
         "n_unrated": n_unrated,
         "n_censored": n_censored + n_stale_pending,
+        "n_not_relevant": n_not_relevant,
         "band": band,
         "holding": holding,
     }
