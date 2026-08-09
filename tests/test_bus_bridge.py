@@ -505,3 +505,21 @@ class TestBusEndpointOutage:
                 # We just verify we can keep receiving without exception
                 frame = ws.receive_json()
                 assert frame["type"] in ("bus_message", "ping", "bus_status")
+
+
+@pytest.mark.unit
+class TestBusPollInterval:
+    def test_default_is_five_seconds(self, monkeypatch):
+        monkeypatch.delenv("BUS_POLL_INTERVAL", raising=False)
+        from web.main import _bus_poll_interval
+        assert _bus_poll_interval() == 5.0
+
+    def test_env_override_still_wins(self, monkeypatch):
+        monkeypatch.setenv("BUS_POLL_INTERVAL", "0.05")
+        from web.main import _bus_poll_interval
+        assert _bus_poll_interval() == 0.05
+
+    def test_unparseable_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("BUS_POLL_INTERVAL", "not-a-number")
+        from web.main import _bus_poll_interval
+        assert _bus_poll_interval() == 5.0

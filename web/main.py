@@ -735,13 +735,15 @@ async def analyze(ws: WebSocket) -> None:
 
 # ---------- bus WebSocket bridge (/api/bus) ----------
 
-# Poll cadence for the bus bridge. Override in tests via BUS_POLL_INTERVAL env
-# var (e.g. "0.05") to avoid slow test suites.
+# Poll cadence for the bus bridge. The server wakes once per interval for every
+# live /api/bus WebSocket, so this unset default is the per-connection idle
+# cost of an open dashboard tab. 5 s is the new floor; BUS_POLL_INTERVAL still
+# overrides it. In tests set BUS_POLL_INTERVAL="0.05" to keep suites fast.
 def _bus_poll_interval() -> float:
     try:
-        return float(os.environ.get("BUS_POLL_INTERVAL", "1.0"))
+        return float(os.environ.get("BUS_POLL_INTERVAL", "5.0"))
     except (TypeError, ValueError):
-        return 1.0
+        return 5.0
 
 
 def _pick_latest_analysis_channel(channels: list[dict]) -> str | None:
@@ -801,7 +803,7 @@ async def bus_ws(ws: WebSocket) -> None:
       2. list_channels() → newest analysis-* by numeric suffix
       3. Poll until one appears (still serving pings)
 
-    Live poll sends bus_message frames every BUS_POLL_INTERVAL seconds.
+    Live poll sends bus_message frames every BUS_POLL_INTERVAL seconds (default 5s).
     Client may send {"channel": "analysis-N"} text frames to switch channel.
     Bus failures send bus_status ok:false once per outage; recovery sends
     bus_status ok:true.  Bus failures never close the socket.
