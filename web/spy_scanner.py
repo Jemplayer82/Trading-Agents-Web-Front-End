@@ -301,9 +301,10 @@ def _fetch_price_data_map(
     (price_data_map.get(...) and price_data.get("close"/"volume") inside
     _quick_scan_one), so we deliberately do not copy it.
 
-    A fetch covering fewer than 80% of the requested tickers (including a
-    totally empty or failed fetch) is never cached; the partial map is still
-    returned so the current scan degrades gracefully on whatever data it got.
+    A fetch covering fewer than 80% of the requested tickers with usable
+    data (>=5 non-NaN closes per ticker, the same bar _quick_scan_one
+    applies) is never cached; the partial map is still returned so the
+    current scan degrades gracefully on whatever data it got.
     """
     key = _price_data_key(tickers)
     cached = _PRICE_DATA_CACHE.get(trade_date, key)
@@ -335,7 +336,15 @@ def _fetch_price_data_map(
             if tickers:
                 price_data_map[tickers[0]] = {"close": closes, "volume": volumes}
 
-    if price_data_map and len(price_data_map) >= _PRICE_DATA_MIN_COMPLETENESS * len(tickers):
+    # A ticker counts toward the cache-completeness ratio only when it has
+    # enough non-NaN closes to satisfy _quick_scan_one's own usability bar
+    # (len(closes) >= 5). Counting mere dict-key presence would let an
+    # all-NaN ticker inflate the ratio and poison the cache.
+    usable_count = sum(
+        1 for data in price_data_map.values()
+        if len(data.get("close", [])) >= 5
+    )
+    if price_data_map and usable_count >= _PRICE_DATA_MIN_COMPLETENESS * len(tickers):
         _PRICE_DATA_CACHE.put(trade_date, key, price_data_map)
 
     return price_data_map
@@ -371,10 +380,10 @@ def run_quick_scan(
     The bulk price download is cached in-process for the same trading day:
     key = (trade_date, sha256 of the sorted ticker set), TTL ~15 minutes.
     Prior-day entries are evicted on the first write for a new date, and
-    fetches covering fewer than 80% of the requested tickers (including a
-    totally empty or failed fetch) are never cached so a transient yfinance
-    outage or partial rate-limited download does not poison every same-day
-    scan for the full TTL.
+    fetches covering fewer than 80% of the requested tickers with usable
+    data (>=5 non-NaN closes per ticker) are never cached so a transient
+    yfinance outage or partial rate-limited download does not poison every
+    same-day scan for the full TTL.
     """
     log.info("[spy %s] quick scan: fetching price data for %d tickers", scan_id, len(tickers))
     quick_fingerprint = _quick_scan_fingerprint(config)

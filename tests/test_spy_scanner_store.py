@@ -107,10 +107,25 @@ class TestQuickScanPriceDataCache:
 
     @staticmethod
     def _frame(tickers, n=5):
+        # The cache gate now counts a ticker as usable only when it has
+        # >=5 non-NaN closes, so ensure generated frames always clear that bar.
+        n = max(n, 5)
         data = {}
         for i, t in enumerate(tickers):
             data[("Close", t)] = [float(100 + i * 10 + j) for j in range(n)]
             data[("Volume", t)] = [1000] * n
+        return pd.DataFrame(data)
+
+    @staticmethod
+    def _all_nan_frame(real_tickers, nan_tickers, n=5):
+        n = max(n, 5)
+        data = {}
+        for i, t in enumerate(real_tickers):
+            data[("Close", t)] = [float(100 + i * 10 + j) for j in range(n)]
+            data[("Volume", t)] = [1000] * n
+        for t in nan_tickers:
+            data[("Close", t)] = [float("nan")] * n
+            data[("Volume", t)] = [float("nan")] * n
         return pd.DataFrame(data)
 
     def test_same_day_same_tickers_downloads_once(self, monkeypatch):
@@ -315,3 +330,34 @@ class TestQuickScanPriceDataCache:
         assert m1 is m2
         assert spy_scanner._PRICE_DATA_CACHE.stats()["size"] == 1
         assert sorted(m1.keys()) == ["T1", "T2", "T3", "T4"]
+
+    def test_all_nan_ticker_does_not_count_as_usable(self, monkeypatch):
+        """A ticker whose Close/Volume columns are all NaN still gets a dict
+        entry with empty lists, but it must not count as usable toward the
+        80% cache-completeness gate.
+        """
+        calls = {"count": 0}
+
+        def _download(tickers, *a, **kw):
+            calls["count"] += 1
+            return self._all_nan_frame(["AAA"], ["BBB", "CCC"])
+
+        monkeypatch.setattr(spy_scanner.yf, "download", _download)
+
+        tickers = ["AAA", "BBB", "CCC"]
+        m1 = spy_scanner._fetch_price_data_map(1, tickers, "2026-08-08")
+        m2 = spy_scanner._fetch_price_data_map(2, tickers, "2026-08-08")
+
+        # dict-key coverage would be 3/3 = 100%, but usable coverage is
+        # 1/3 = 33%, so the cache write is skipped.
+        assert calls["count"] == 2
+        assert spy_scanner._PRICE_DATA_CACHE.stats()["size"] == 0
+
+        # The function still returns the all-NaN entries to the caller.
+        assert sorted(m1.keys()) == ["AAA", "BBB", "CCC"]
+        assert len(m1["AAA"]["close"]) >= 5
+        assert m1["BBB"]["close"] == []
+        assert m1["BBB"]["volume"] == []
+        assert m1["CCC"]["close"] == []
+        assert m1["CCC"]["volume"] == []
+        assert m1 == m2
