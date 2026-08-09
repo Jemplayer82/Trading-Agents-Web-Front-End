@@ -9,7 +9,6 @@ import pytest
 
 from tests.jsvm import run_js
 
-
 pytestmark = pytest.mark.unit
 
 

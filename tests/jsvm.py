@@ -16,7 +16,6 @@ from typing import Any
 
 import pytest
 
-
 # Repo root is two levels above tests/jsvm.py
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _STATIC_DIR = _REPO_ROOT / "web" / "static"
