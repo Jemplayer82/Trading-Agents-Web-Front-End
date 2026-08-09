@@ -82,7 +82,7 @@ class GatedLLM(Runnable):
         return getattr(object.__getattribute__(self, "_inner"), name)
 
     def __repr__(self) -> str:
-        return f"GatedLLM({self._inner!r})"
+        return f"GatedLLM({type(self._inner).__name__})"
 
 
 def wrap_llm(llm: Any, gate: GateLike | None) -> Any:
