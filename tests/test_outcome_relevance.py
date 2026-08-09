@@ -86,6 +86,18 @@ class TestSweepRelevantTickers:
         assert "AAPL" in result
         assert "MSFT" not in result
 
+    def test_equity_holdings_skipped_when_not_enabled(self, tmp_db, monkeypatch):
+        monkeypatch.setenv("FEATURES", "")
+        acct = db.create_paper_account(name="Test Equity", kind="equity")
+        sid = db.create_spy_scan("2026-08-03", paper_account_id=acct, kind="equity")
+        db.complete_spy_scan(sid, "report", [
+            {"ticker": "AAPL", "action": "BUY"},
+        ])
+        result = scheduler._sweep_relevant_tickers()
+        assert result is not None
+        assert "SPY" in result
+        assert "AAPL" not in result
+
     def test_includes_open_options_underlyings(self, tmp_db, monkeypatch):
         monkeypatch.setenv("FEATURES", "schwab,sp500,options")
         acct = db.create_paper_account(name="Test Options", kind="options")
@@ -125,7 +137,7 @@ class TestSweepRelevantTickers:
         assert result is None
 
     def test_whole_body_failure_fails_open_to_none(self, tmp_db, monkeypatch):
-        """An exception outside the per-source try/except blocks must hit the outer catch.
+        """An exception outside the per-source try/except branches must hit the outer catch.
 
         Patching _ALWAYS_RELEVANT to a non-iterable makes ``out.update(_ALWAYS_RELEVANT)``
         raise after all inner sources have succeeded, so the only handler that can catch it
@@ -170,3 +182,33 @@ class TestSweepWiring:
         call_kwargs = mock_resolve.call_args.kwargs
         assert call_kwargs.get("relevant_tickers") == {"SPY", "NVDA"}
         assert "max_reflections" in call_kwargs
+
+    def test_sweep_runs_ungated_when_relevance_fails_open(self, tmp_db, monkeypatch):
+        monkeypatch.setattr(scheduler, "_sweep_relevant_tickers", lambda: None)
+        mock_resolve = mock.MagicMock(return_value={
+            "resolved": 0,
+            "noise": 0,
+            "censored": 0,
+            "immature": 0,
+            "budget_deferred": 0,
+            "errors": 0,
+            "llm_reflections": 0,
+            "irrelevant": 0,
+        })
+        monkeypatch.setattr(
+            "tradingagents.graph.outcome_resolution.resolve_all_pending",
+            mock_resolve,
+        )
+        monkeypatch.setattr(
+            "tradingagents.agents.utils.memory.TradingMemoryLog",
+            mock.MagicMock(),
+        )
+        monkeypatch.setattr(
+            "tradingagents.llm_clients.create_llm_client",
+            mock.MagicMock(),
+        )
+
+        scheduler.job_outcome_sweep()
+
+        assert mock_resolve.called
+        assert mock_resolve.call_args.kwargs.get("relevant_tickers") is None
