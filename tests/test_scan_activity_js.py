@@ -99,13 +99,14 @@ def test_renders_spy_progress():
     assert len(result["fetches"]) == 1
 
 
-def test_waiting_spy_scan_still_renders():
+def test_waiting_options_scan_does_not_render_spy_banner():
     payload = {
         "running": None,
         "queued": [],
         "waiting": [
             {
                 "scan_type": "spy",
+                "kind": "options",
                 "id": 5,
                 "status": "running_wait_market",
                 "quick_count": 500,
@@ -116,8 +117,8 @@ def test_waiting_spy_scan_still_renders():
         ],
     }
     result = _run_poll(payload)
-    assert result["hidden"] is False
-    assert "Quick 500/500" in result["html"]
+    assert result["hidden"] is True
+    assert result["html"] == ""
 
 
 def test_options_run_does_not_render_spy_banner():

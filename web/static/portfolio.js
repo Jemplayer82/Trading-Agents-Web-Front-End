@@ -660,11 +660,14 @@ async function pollScanActivity() {
     // The `waiting` fallback is needed because `running_wait_market` is
     // excluded from `_is_any_scan_running`'s busy set by default, so a parked
     // spy scan lands in `waiting`, not `running`. Without this fallback the
-    // wait-state banner would silently disappear.
+    // wait-state banner would silently disappear. The same `kind !== "options"`
+    // guard is applied to the fallback, since real wait-state rows come from
+    // the options engine and must not be mislabeled as an S&P 500 scan.
     const spy =
       (run && run.scan_type === "spy" && run.kind !== "options"
         && String(run.status || "").startsWith("running")) ? run
-      : waiting.find((w) => w.scan_type === "spy" && String(w.status || "").startsWith("running"));
+      : waiting.find((w) => w.scan_type === "spy" && w.kind !== "options"
+        && String(w.status || "").startsWith("running"));
     if (spy) blocks.push(scanActivitySpy(spy));
   } catch (e) { /* portfolio app unreachable / not authed — skip */ }
 
