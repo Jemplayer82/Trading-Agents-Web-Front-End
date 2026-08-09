@@ -26,6 +26,7 @@
   let reconnectAttempt = 0;
   let reconnectTimer = null;
   let lastBusStatusOk = null;  // null = unknown, true/false from bus_status frames
+  let hiddenPaused = false;    // true while the socket is intentionally closed for a hidden tab
   const DOM_CAP = 300;
 
   let feed  = null;
@@ -182,6 +183,35 @@
     }, delay);
   }
 
+  // ===== Tab visibility =====
+  // A backgrounded dashboard tab still holds a live WebSocket. The server pushes a
+  // bus_status/keepalive frame for every live socket once per BUS_POLL_INTERVAL,
+  // so a hidden tab costs the server a poll loop for nothing. Intentionally close
+  // the socket while hidden and reconnect when visible again. This path must not
+  // be confused with a genuine dropped connection: it must not schedule reconnects
+  // while hidden and must not inflate the reconnect backoff.
+  function pauseForHidden() {
+    hiddenPaused = true;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    if (ws) {
+      try { ws.close(); } catch (e) {}
+    }
+    setDot("amber", "paused — tab hidden");
+  }
+
+  function resumeFromHidden() {
+    hiddenPaused = false;
+    reconnectAttempt = 0;
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    connect();
+  }
+
   // ===== WebSocket connection =====
   function connect() {
     if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
@@ -201,20 +231,35 @@
       return;
     }
 
+    // Stale-socket guard: a socket closed by the hide path can deliver its `close`
+    // event after a later `connect()` has installed a replacement (the closing
+    // socket's readyState is CLOSING, not CONNECTING/OPEN, so connect()'s own guard
+    // does not stop it). Without this check that late event sets `ws = null` on the
+    // live socket, orphaning it and leaving the module thinking it is disconnected.
+    const sock = ws;
+
     ws.addEventListener("open", function () {
+      if (ws !== sock) return;
       reconnectAttempt = 0;
       // Dot will go green when we receive a bus_status ok:true
       setDot("amber", "connected, awaiting bus status…");
     });
 
     ws.addEventListener("message", function (ev) {
+      if (ws !== sock) return;
       let frame;
       try { frame = JSON.parse(ev.data); } catch (e) { return; }
       handleFrame(frame);
     });
 
     ws.addEventListener("close", function (ev) {
+      if (ws !== sock) return;
       ws = null;
+      if (hiddenPaused || document.hidden) {
+        hiddenPaused = false;
+        setDot("amber", "paused — tab hidden");
+        return;
+      }
       if (ev.code === 4401) {
         setDot("amber", "not authenticated, retrying in 10s…");
       } else {
@@ -228,6 +273,7 @@
     });
 
     ws.addEventListener("error", function () {
+      if (ws !== sock) return;
       // close will fire after error; dot update happens there
     });
   }
@@ -279,6 +325,10 @@
       try { ws.send(JSON.stringify({ channel: channel })); } catch (e) {}
     }
     // If not open, desiredChannel is set and will be used on next connect
+  });
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) { pauseForHidden(); } else { resumeFromHidden(); }
   });
 
   // ===== Boot =====
