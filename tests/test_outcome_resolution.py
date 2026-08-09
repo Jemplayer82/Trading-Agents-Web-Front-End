@@ -652,8 +652,8 @@ class TestSweepFetchBudget:
         reflector.reflect_on_final_decision.return_value = "CLASS: CONFIRMED-THESIS\nCALL: ok"
 
         price_map = {
-            "NVDA": self._wide_frame(100, 115),
-            "AAPL": self._wide_frame(200, 230),
+            "NVDA": self._wide_frame(100, 300),
+            "AAPL": self._wide_frame(300, 100),
             "SPY": self._wide_frame(400, 401),
         }
         created_symbols = []
@@ -675,6 +675,9 @@ class TestSweepFetchBudget:
         assert set(created_symbols) == {"NVDA", "AAPL", "SPY"}
         assert len(created_symbols) == 3
         assert summary["resolved"] == 5
+        assert summary["noise"] == 0
+        assert summary["llm_reflections"] == 5
+        assert reflector.reflect_on_final_decision.call_count == 5
         assert summary["immature"] == 0
         assert summary["errors"] == 0
         assert len(log.get_pending_entries()) == 0
@@ -692,7 +695,7 @@ class TestSweepFetchBudget:
 
         def tracking_make(sym):
             m = MagicMock()
-            m.history.return_value = self._wide_frame(50000, 55000)
+            m.history.return_value = self._wide_frame(50000, 150000)
             created_symbols.append(sym)
             return m
 
@@ -706,6 +709,9 @@ class TestSweepFetchBudget:
 
         assert set(created_symbols) == {"BTC-USD"}
         assert summary["resolved"] == 2
+        assert summary["noise"] == 0
+        assert summary["llm_reflections"] == 2
+        assert reflector.reflect_on_final_decision.call_count == 2
         assert summary["immature"] == 0
         assert summary["errors"] == 0
         assert len(log.get_pending_entries()) == 0
