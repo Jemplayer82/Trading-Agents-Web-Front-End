@@ -409,7 +409,7 @@ def resolve_all_pending(
                 allow_partial = age_days > censor_after
             except Exception:
                 summary["errors"] += 1
-                logger.exception("Sweep failed for %s on %s -- continuing", tkr, entry.get("date"))
+                logger.exception("Sweep failed for %s on %s — continuing", tkr, entry.get("date"))
                 continue
 
             # Age guard: fetch_returns requires len(post) - 1 >= holding_days,
@@ -498,7 +498,7 @@ def resolve_all_pending(
             summary["resolved"] += 1
         except Exception:
             summary["errors"] += 1
-            logger.exception("Sweep failed for %s on %s -- continuing", tkr, entry.get("date"))
+            logger.exception("Sweep failed for %s on %s — continuing", tkr, entry.get("date"))
 
     logger.info("Sweep fetched %d symbol histories for %d entries", history.download_count, len(survivors))
 
