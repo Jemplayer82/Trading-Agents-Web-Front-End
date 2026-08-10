@@ -9,15 +9,16 @@ it sends from this process directly, which is why _apply_db_config() must
 pull SMTP/notifier settings from the shared DB first.
 
 Schedule (all times SCHEDULER_TIMEZONE, default America/New_York):
-    22:00 Mon-Fri        portfolio scan      POST /api/portfolio-scan
+    settings-driven      portfolio scan      POST /api/portfolio-scan (default 22:00 Mon-Fri, kept current by schedule_reconciler)
     23:30 Mon-Fri        outcome sweep       (in-process — resolves pending memory-log entries)
     05:00 daily          morning newsletter  (in-process)
     hourly               Schwab token health GET /api/auth/schwab/status
-    Sat 00:00            S&P 500 scan        POST /api/spy-scan
+    per-account          S&P 500 scan        POST /api/spy-scan (one job per equity account)
     Mon-Fri 09:00-16:00  SPY price refresh   POST /api/spy-scans/latest/refresh-prices
-    Mon-Fri 07:30        options scan        POST /api/options-scan (all options accounts)
+    per-account          options scan        POST /api/options-scan (one job per options account)
     Mon-Fri 10:00-16:00  options mark        POST /api/options-positions/refresh (+16:45 close pass)
     Mon-Fri 20:00        options settlement  POST /api/options-positions/settle
+    every 60s            schedule_reconciler  syncs per-account scan jobs + nightly scan time
 
 Each job also has a --run-*-now CLI flag for one-shot manual runs (handy for
 testing inside the container without waiting for cron).
@@ -779,7 +780,7 @@ def _cutoff_iso(minutes: int) -> str:
 def job_reap_stuck_runs() -> None:
     """Fail + alert runs whose worker died silently (status stuck in 'running').
 
-    A crash/OOM never runs the in-process `except` that would mark a run failed, so
+    A crash/OOM never ran the in-process `except` that would mark a run failed, so
     these rows would otherwise sit 'running' forever — invisible to the user and
     showing as phantom progress on the Analysis tab. We detect them by a stalled
     liveness stamp (scans) or age (analyses), close them out, and notify once each.
@@ -832,18 +833,21 @@ def job_reap_stuck_runs() -> None:
 def register_jobs(sched: BlockingScheduler) -> None:
     """Register cron jobs, gated by feature tier (see web/features.py).
 
-    reap_stuck_runs and outcome_sweep always register — they apply at every
-    tier (reap_stuck_runs gates its own scan-kind-specific sweeps
-    internally; outcome_sweep resolves memory-log entries for every ticker
-    regardless of which brokerage/scanner features are on).
+    reap_stuck_runs, outcome_sweep, and schedule_reconciler always register.
+    The reconciler syncs per-account scan times and the nightly-scan time,
+    so cron registrations that used to be global (spy_scan, options_scan) are
+    now created per account at runtime.
     """
     if features.enabled("schwab"):
+        _h, _m = nightly_scan_time()
         sched.add_job(
             job_nightly_scan,
             # Mon-Fri only: holdings don't move over the closed-market weekend, so a
             # Sat/Sun scan would burn a full multi-agent LLM pass on stale Friday-close
             # data. Mirrors the spy_price_refresh weekday restriction below.
-            CronTrigger(day_of_week="mon-fri", hour=22, minute=0, timezone=TIMEZONE),
+            # Time comes from the SCHEDULE_NIGHTLY_SCAN_TIME setting (default 22:00)
+            # and is kept current by the schedule_reconciler.
+            CronTrigger(day_of_week="mon-fri", hour=_h, minute=_m, timezone=TIMEZONE),
             id="nightly_scan",
             replace_existing=True,
         )
@@ -861,12 +865,6 @@ def register_jobs(sched: BlockingScheduler) -> None:
         )
     if features.enabled("sp500"):
         sched.add_job(
-            job_spy_scan,
-            CronTrigger(day_of_week="sat", hour=0, minute=0, timezone=TIMEZONE),
-            id="spy_scan",
-            replace_existing=True,
-        )
-        sched.add_job(
             job_spy_price_refresh,
             CronTrigger(day_of_week="mon-fri", hour="9-16", minute=0, timezone=TIMEZONE),
             id="spy_price_refresh",
@@ -879,6 +877,13 @@ def register_jobs(sched: BlockingScheduler) -> None:
         replace_existing=True,
     )
     sched.add_job(
+        job_reconcile_schedules,
+        IntervalTrigger(seconds=60),
+        args=[sched],
+        id=RECONCILE_JOB_ID,
+        replace_existing=True,
+    )
+    sched.add_job(
         job_outcome_sweep,
         # Mon-Fri 23:30 ET: after US close (day-0 bars final) and after the
         # 22:00 nightly scan has queued, so the two don't contend.
@@ -887,15 +892,6 @@ def register_jobs(sched: BlockingScheduler) -> None:
         replace_existing=True,
     )
     if features.enabled("options"):
-        sched.add_job(
-            job_options_scan,
-            # 07:30 ET: quick scan + deep dives (top DEEP_TOP + SPY) run pre-market;
-            # the build's own market-open gate holds allocation until 09:35 so
-            # entries fill at live mids.
-            CronTrigger(day_of_week="mon-fri", hour=7, minute=30, timezone=TIMEZONE),
-            id="options_scan",
-            replace_existing=True,
-        )
         sched.add_job(
             job_options_refresh,
             CronTrigger(day_of_week="mon-fri", hour="10-16", minute=0, timezone=TIMEZONE),
@@ -986,19 +982,24 @@ def main() -> None:
     # Sweep once at startup too — a crash that happened while the scheduler was
     # down should be caught and alerted immediately, not up to 20 min later.
     job_reap_stuck_runs()
+    # Sync per-account schedules immediately so the first scan window isn't
+    # delayed by up to the reconciler's 60s cadence.
+    job_reconcile_schedules(sched)
     log.info("Scheduler starting (tz=%s)", TIMEZONE)
     if features.enabled("schwab"):
-        log.info(" - nightly_scan       cron 22:00 Mon-Fri %s", TIMEZONE)
+        nh, nm = nightly_scan_time()
+        log.info(" - nightly_scan       cron %02d:%02d Mon-Fri %s (settings-driven)", nh, nm, TIMEZONE)
         log.info(" - morning_newsletter cron 05:00 %s", TIMEZONE)
         log.info(" - token_health       every 1h")
     if features.enabled("sp500"):
-        log.info(" - spy_scan           cron Sat 00:00 %s", TIMEZONE)
+        log.info(" - spy_scan           per-account cron configured in dashboard (reconciled by schedule_reconciler)")
         log.info(" - spy_price_refresh  cron hourly Mon-Fri 09:00-16:00 %s", TIMEZONE)
     log.info(" - reap_stuck_runs    every 20m (stall>%dm scans / %dm analyses)",
              STUCK_SCAN_STALL_MIN, STUCK_ANALYSIS_MIN)
+    log.info(" - schedule_reconciler every 60s (syncs per-account scan jobs + nightly scan time)")
     log.info(" - outcome_sweep      cron 23:30 Mon-Fri %s", TIMEZONE)
     if features.enabled("options"):
-        log.info(" - options_scan       cron 07:30 Mon-Fri %s", TIMEZONE)
+        log.info(" - options_scan       per-account cron configured in dashboard (reconciled by schedule_reconciler)")
         log.info(" - options_refresh    cron hourly Mon-Fri 10:00-16:00 + 16:45 %s", TIMEZONE)
         log.info(" - options_settle     cron 20:00 Mon-Fri %s", TIMEZONE)
         log.info(" - options_grade      cron 20:15 Mon-Fri %s", TIMEZONE)
