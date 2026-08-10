@@ -32,9 +32,6 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_OPTIONS_LESSONS_MIN_CLOSED":    "options_lessons_min_closed",
     "TRADINGAGENTS_OPTIONS_REFLECT_MIN_NEW_CLOSED": "options_reflect_min_new_closed",
     "TRADINGAGENTS_OPTIONS_INTRADAY_STOP":         "options_intraday_stop",
-    "TRADINGAGENTS_OPTIONS_TRAILING_STOP":         "options_trailing_stop",
-    "TRADINGAGENTS_OPTIONS_TRAIL_ARM_PCT":         "options_trail_arm_pct",
-    "TRADINGAGENTS_OPTIONS_TRAIL_GIVE_BACK":       "options_trail_give_back",
 }
 
 
@@ -149,17 +146,20 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Nightly batch reflection fires only when at least this many positions
     # closed since the last lessons row (lessons regenerate on new data only).
     "options_reflect_min_new_closed": 5,
-    # Hourly refresh closes positions that breach the -60% stop between daily
-    # allocations, filled at the stop level when the mark crossed it this
-    # interval (standing-stop emulation) or at the observed quote on a gap.
+    # Hourly refresh closes positions that breach the account's configured
+    # stop between daily allocations, filled at the stop level when the mark
+    # crossed it this interval (standing-stop emulation) or at the observed
+    # quote on a gap. Master emergency off-switch for intraday stop
+    # enforcement across all accounts.
     "options_intraday_stop": True,
-    # Trailing stop: once the peak mark reaches entry*(1+arm_pct), the stop
-    # ratchets to peak*(1-give_back) — winners ride for days but can't
-    # round-trip a big gain back to the -60% floor. Peak is ratcheted by
-    # every mark (peak_premium column, seeded at entry).
-    "options_trailing_stop": True,
-    "options_trail_arm_pct": 0.50,
-    "options_trail_give_back": 0.30,
+    # Trailing (and every other) stop behavior is now a PER-ACCOUNT policy
+    # stored on `paper_accounts` (stop_type / stop_value / stop_limit_offset)
+    # and evaluated by web/account_policy.py, not a global knob — there is no
+    # single fixed trailing arm/give-back for the whole deployment anymore.
+    # The three global trailing-stop keys that used to live here were removed
+    # for exactly this reason: dead config that looks live is a footgun
+    # (someone flips a knob expecting it to do something, and nothing reads
+    # it). See CHANGELOG.md for the retired key names.
     # Most recent closes included in the single nightly reflection call.
     "options_reflect_batch_max": 20,
     # Hard cap on the lessons block injected into the allocator prompt.

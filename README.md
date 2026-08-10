@@ -166,7 +166,7 @@ Each agent owns a narrow slice of the decision and hands its findings to the nex
 
 ![S&P 500 scanner with $100k paper portfolio](assets/screenshot-spy-scanner.jpg)
 
-*Scans all ~500 tickers, deep-dives the top 50 by conviction, and builds a $100k paper portfolio with live performance tracking. Runs automatically every Saturday.*
+*Scans all ~500 tickers, deep-dives the top 50 by conviction, and builds a $100k paper portfolio with live performance tracking. Each paper account runs on its own configurable Saturday scan time set in the account modal.*
 <!-- TIER:3 END -->
 
 ---
@@ -277,7 +277,7 @@ When the MCP server is enabled, account positions and market data come directly 
 
 Run and review scans of your real Schwab holdings:
 
-- **Run Scan Now** — kick off an on-demand scan with its own **aggressiveness** + **decision bias** (the nightly cron at 22:00 ET runs with defaults)
+- **Run Scan Now** — kick off an on-demand scan with its own **aggressiveness** + **decision bias** (the nightly cron time is configurable in the Run Scan Now box (default 22:00 ET) and runs with defaults)
 - Aggregated portfolio briefing
 - Per-ticker analysis cards with signals and rationales
 - Links to full detailed analyses
@@ -292,7 +292,7 @@ Weekly automated scan of all ~500 S&P 500 tickers, run in three phases:
 - **Phase 2 (Deep)** — Top 50 by conviction via the full multi-agent graph
 - **Phase 3 (Allocate)** — Build a $100k portfolio with position sizing
 
-The scan re-runs automatically every Saturday, and the AI agent rebalances the paper portfolio — adding, trimming, or exiting positions as it sees fit. Results include an interactive allocation table with entry prices and performance tracking.
+The scan re-runs automatically at each account's configured time, and the AI agent rebalances the paper portfolio — adding, trimming, or exiting positions as it sees fit. Results include an interactive allocation table with entry prices and performance tracking.
 <!-- TIER:3 END -->
 
 <!-- TIER:4 BEGIN -->
@@ -300,10 +300,10 @@ The scan re-runs automatically every Saturday, and the AI agent rebalances the p
 
 Daily options paper trader — long single-leg calls and puts on S&P 500 movers, 100% simulated with $100k per options paper account. Every weekday:
 
-- **07:30 ET** — momentum/volume pre-screen ranks the **whole S&P 500**; the top **150 + SPY** get the quick LLM scan; the top **50 directional names + SPY** (BUY *and* SELL — big losers become put candidates; SPY is deep-dived every run) get the full multi-agent deep dive
+- **Per-account build time (default 07:30 ET)** — momentum/volume pre-screen ranks the **whole S&P 500**; the top **150 + SPY** get the quick LLM scan; the top **50 directional names + SPY** (BUY *and* SELL — big losers become put candidates; SPY is deep-dived every run) get the full multi-agent deep dive
 - **09:35 ET gate** — allocation waits for the market open so entries fill at live quotes
 - **Contract selection** — deterministic, pre-LLM: ~21 DTE (10–45 window), ~0.45 delta via Schwab chains (near-ATM fallback on yfinance), liquidity gates against zero-bid / crossed / wide / illiquid quotes
-- **LLM allocator** decides open / hold / close daily under **hard guardrails**: force-close at DTE ≤ 3 or premium −60% (stop-loss), per-position and total-premium caps by aggressiveness, max 15 open positions, deterministic fallback if the LLM fails
+- **LLM allocator** decides open / hold / close daily under **hard guardrails**: force-close at DTE ≤ 3 unconditionally, while the stop is now the account's configured policy (none / stop / stop-limit / trailing % / trailing $), backfilled to a 60% stop for existing options accounts, per-position and total-premium caps by aggressiveness, max 15 open positions, deterministic fallback if the LLM fails
 - **Hourly marks** (10:00–16:00 + 16:45 ET) enforce stops intraday like standing orders, booked at the minute the level was crossed: the fixed **−60% stop** caps every loss, and a **trailing stop** locks gains — once a position peaks at **+50%**, the stop ratchets to **30% below the peak**, so winners ride for days while healthy but a big win can never round-trip back to the floor. Stale/carried marks never trigger. A **20:00 ET expiry settlement** sweep models OCC auto-exercise (ITM ≥ $0.01 settles at intrinsic vs the last close on/before expiry)
 - **20:15 ET learning pass** — deep-dive directional calls are graded nightly against the underlying's forward alpha (the shared memory log), and every closed position gets a directional-vs-decay P&L attribution; once enough closes accumulate, a nightly batch reflection distills "watch for …" lessons that are injected into the next allocator run as context (hard risk limits are never relaxed by lessons)
 

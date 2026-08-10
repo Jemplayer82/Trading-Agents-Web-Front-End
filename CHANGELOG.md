@@ -8,6 +8,36 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-account scan scheduling.** Each paper account now carries its own
+  `schedule_time` (`paper_accounts.schedule_time`, `HH:MM` 24-hour in the
+  scheduler's timezone). The fixed `spy_scan`/`options_scan` cron jobs are
+  retired in favor of one scheduled job per account, and a 60-second
+  reconciler in `web/scheduler.py` picks up schedule edits and applies them
+  live — no scheduler restart needed. Equity accounts' nightly cron time is
+  now configurable via the new `SCHEDULE_NIGHTLY_SCAN_TIME` setting
+  (Settings → Automation Schedule, default `22:00` ET); it still runs with
+  defaults if left unset.
+
+- **Per-account paper stop-loss policies.** A new shared stdlib-only module,
+  `web/account_policy.py`, defines five stop types a paper account can be
+  configured with — `none`, `stop`, `stop_limit`, `trailing_pct`,
+  `trailing_dollar` — plus the shared crossed-vs-gap-through fill convention
+  and the stop-limit arm/resting-fill state machine, so options and equity
+  enforce stops through the exact same decision logic instead of two
+  independently-drifting implementations. Enforced on both the options
+  intraday-stop path (`web/options_allocator.py`) and the equity
+  `refresh_portfolio_prices` path. Migration backfills existing **options**
+  accounts to `stop` / 60 (matching the old fixed −60% floor) and existing
+  **equity** accounts to `none` (equity had no stop enforcement before this).
+  ⚠️ **Behavior change:** the old layered fixed −60% + arm/give-back options
+  trailing model is retired outright — an account that relied on that
+  trailing protection does **not** carry it forward automatically and must
+  explicitly select `trailing_pct` or `trailing_dollar` as its `stop_type` to
+  keep trailing-stop behavior. This remains simulation-only: no
+  order-placement code exists anywhere in the stack, for either feature.
+
 ## [2.0.0] — 2026-08-09
 
 Major version: this release is a full efficiency and reliability overhaul of
