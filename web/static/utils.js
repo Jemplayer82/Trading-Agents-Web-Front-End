@@ -15,7 +15,7 @@
 //      historically why the modules used divergent aliases like `$$p` / `$$spy`.)
 //
 // Shared globals defined here: $, escapeHtml, renderMarkdown, fmtTs, apiFetch,
-// progressBar, setupTabs (the whole dashboard's tab strip — every tier needs it,
+// stopFieldVisibility, progressBar, setupTabs (the whole dashboard's tab strip — every tier needs it,
 // so it lives here rather than in any one tab's file).
 //
 // Escape-at-render discipline (project-wide): every interpolation of server- or
@@ -81,6 +81,26 @@ async function apiFetch(url, options) {
   const resp = await fetch(url, options);
   if (!resp.ok) throw new Error("HTTP " + resp.status);
   return resp.json();
+}
+
+/**
+ * Show/hide the stop-policy inputs of an account form whose field ids share
+ * `prefix` ("new-acct" or "opt-new"): the value input is needed by every
+ * non-"none" type, the limit-offset input only by "stop_limit". Also relabels
+ * the value input for percent vs dollar types.
+ */
+function stopFieldVisibility(prefix) {
+  const type = (document.getElementById(prefix + "-stop-type") || {}).value || "none";
+  const valueWrap = document.getElementById(prefix + "-stop-value-wrap");
+  const offsetWrap = document.getElementById(prefix + "-stop-offset-wrap");
+  const valueLabel = document.getElementById(prefix + "-stop-value-label");
+  if (valueWrap) { valueWrap.hidden = (type === "none"); valueWrap.style.display = (type === "none") ? "none" : ""; }
+  if (offsetWrap) { offsetWrap.hidden = (type !== "stop_limit"); offsetWrap.style.display = (type !== "stop_limit") ? "none" : ""; }
+  if (valueLabel) {
+    valueLabel.textContent = type === "trailing_dollar" ? "Trail amount ($)"
+      : type === "trailing_pct" ? "Trail below peak (%)"
+      : "Stop below entry (%)";
+  }
 }
 
 /**

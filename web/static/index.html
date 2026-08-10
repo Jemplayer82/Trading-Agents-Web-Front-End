@@ -279,7 +279,7 @@
       <div class="panel">
         <div class="panel-title">[ Run Scan Now ]</div>
         <div id="schwab-mcp-status" class="dim" style="margin-bottom: 10px;">Checking Schwab…</div>
-        <p class="dim" style="margin: 0 0 10px;">Pulls your real Schwab holdings (via the Schwab MCP) and runs each through the agents. Idempotent for today; the nightly cron also fires at 22:00 ET.</p>
+        <p class="dim" id="pf-nightly-caption" style="margin: 0 0 10px;">Pulls your real Schwab holdings (via the Schwab MCP) and runs each through the agents. Idempotent for today; the nightly cron also fires at 22:00 ET.</p>
         <div class="form-grid" style="grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
           <label>Aggressiveness
             <div class="slider-row">
@@ -294,6 +294,7 @@
               <button type="button" data-val="bullish"  class="bias-btn">Bullish</button>
             </div>
           </label>
+          <label>Nightly scan time (ET)<input type="time" id="pf-nightly-time" style="margin-top:4px;"><span id="pf-nightly-status" class="dim" style="font-size:11px;"></span></label>
         </div>
         <div class="actions" style="justify-content: flex-start;">
           <button id="btn-scan-now" type="button" class="primary">Run scan now</button>
@@ -381,8 +382,12 @@
                 <button type="button" data-val="bullish" class="bias-btn">Bullish</button>
               </div>
             </label>
+            <label>Scan time (ET)<input type="time" id="new-acct-schedule" style="margin-top:4px;"></label>
+            <label>Stop policy<select id="new-acct-stop-type" style="margin-top:4px;background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:5px 8px;font-family:inherit;font-size:13px;border-radius:3px;"><option value="none">None</option><option value="stop">Stop</option><option value="stop_limit">Stop-limit</option><option value="trailing_pct">Trailing %</option><option value="trailing_dollar">Trailing $</option></select></label>
+            <label id="new-acct-stop-value-wrap" hidden><span id="new-acct-stop-value-label">Stop below entry (%)</span><input type="number" id="new-acct-stop-value" min="0.01" step="0.01" style="margin-top:4px;"></label>
+            <label id="new-acct-stop-offset-wrap" hidden>Limit offset below trigger (%)<input type="number" id="new-acct-stop-offset" min="0.01" step="0.01" style="margin-top:4px;"></label>
           </div>
-          <p class="dim" style="font-size:11px;margin:8px 0 0;">Aggressiveness sets position sizing + debate depth; bias nudges the stance. Independent knobs.</p>
+          <p class="dim" style="font-size:11px;margin:8px 0 0;">Aggressiveness sets position sizing + debate depth; bias nudges the stance. Independent knobs. A blank scan time means the account only runs when you click Run, and the stop policy is a SIMULATED stop enforced at the next hourly price refresh -- this app never places a real brokerage order.</p>
           <div style="margin-top:12px;display:flex;justify-content:flex-end;gap:8px;">
             <button type="button" id="btn-create-account" class="primary">Create Account</button>
           </div>
@@ -466,8 +471,12 @@
                 <button type="button" data-val="bullish" class="bias-btn">Bullish</button>
               </div>
             </label>
+            <label>Scan time (ET)<input type="time" id="opt-new-schedule" style="margin-top:4px;"></label>
+            <label>Stop policy<select id="opt-new-stop-type" style="margin-top:4px;background:#060a0f;color:var(--text);border:1px solid var(--panel-border);padding:5px 8px;font-family:inherit;font-size:13px;border-radius:3px;"><option value="none">None</option><option value="stop">Stop</option><option value="stop_limit">Stop-limit</option><option value="trailing_pct">Trailing %</option><option value="trailing_dollar">Trailing $</option></select></label>
+            <label id="opt-new-stop-value-wrap" hidden><span id="opt-new-stop-value-label">Stop below entry (%)</span><input type="number" id="opt-new-stop-value" min="0.01" step="0.01" style="margin-top:4px;"></label>
+            <label id="opt-new-stop-offset-wrap" hidden>Limit offset below trigger (%)<input type="number" id="opt-new-stop-offset" min="0.01" step="0.01" style="margin-top:4px;"></label>
           </div>
-          <p class="dim" style="font-size:11px;margin:8px 0 0;">Aggressiveness sets the premium budget (5–12% per position, 15–50% total at risk). Bias nudges calls vs puts.</p>
+          <p class="dim" style="font-size:11px;margin:8px 0 0;">Aggressiveness sets the premium budget (5–12% per position, 15–50% total at risk). Bias nudges calls vs puts. A blank scan time means the account only runs when you click Run. Stop policy is a SIMULATED stop enforced at the next hourly price refresh -- this app never places a real brokerage order. The options build's own market-open gate still holds allocation until 09:35 ET, so a scan time before the open just queues the build.</p>
           <div style="margin-top:12px;display:flex;justify-content:flex-end;gap:8px;">
             <button type="button" id="btn-create-opt-account" class="primary">Create Account</button>
           </div>
