@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from web import db, market_cache, options_engine
+from web.account_policy import StopPolicy
 
 pytestmark = pytest.mark.unit
 
@@ -482,6 +483,10 @@ def _open_marked(account_id, entry=10.0, prev_mark=None, **over):
     return pid
 
 
+def _policies(account_id, policy):
+    return {account_id: policy}
+
+
 def test_intraday_stop_fills_at_stop_level_when_crossed(account_id, monkeypatch):
     """Prev mark above the stop, fresh quote below it -> the level was crossed
     this interval, so the fill is AT the stop (standing-stop emulation), not at
@@ -489,7 +494,9 @@ def test_intraday_stop_fills_at_stop_level_when_crossed(account_id, monkeypatch)
     monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {s: 230.0 for s in syms})
     pid = _open_marked(account_id, entry=10.0, prev_mark=5.0)  # stop = 4.00
     pos = db.get_options_position(pid)
-    stopped = options_engine._apply_intraday_stops([pos], {pid: (3.0, "schwab")})
+    stopped = options_engine._apply_intraday_stops(
+        [pos], {pid: (3.0, "schwab")}, _policies(account_id, StopPolicy("stop", 60.0))
+    )
     assert stopped == 1
     row = db.get_options_position(pid)
     assert row["status"] == "closed"
@@ -507,7 +514,9 @@ def test_intraday_stop_gap_fills_at_observed_quote(account_id, monkeypatch):
     monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
     pid = _open_marked(account_id, entry=10.0, prev_mark=3.9)  # already < 4.00 stop
     pos = db.get_options_position(pid)
-    stopped = options_engine._apply_intraday_stops([pos], {pid: (2.5, "yfinance")})
+    stopped = options_engine._apply_intraday_stops(
+        [pos], {pid: (2.5, "yfinance")}, _policies(account_id, StopPolicy("stop", 60.0))
+    )
     assert stopped == 1
     row = db.get_options_position(pid)
     assert row["exit_premium"] == pytest.approx(2.5)
@@ -521,7 +530,9 @@ def test_intraday_stop_ignores_unpriced_and_healthy(account_id, monkeypatch):
     pid_stale = _open_marked(account_id, entry=10.0, prev_mark=3.0)   # below stop but stale
     pid_ok = _open_marked(account_id, entry=10.0, prev_mark=9.0)      # healthy
     rows = [db.get_options_position(pid_stale), db.get_options_position(pid_ok)]
-    stopped = options_engine._apply_intraday_stops(rows, {pid_ok: (8.5, "schwab")})
+    stopped = options_engine._apply_intraday_stops(
+        rows, {pid_ok: (8.5, "schwab")}, _policies(account_id, StopPolicy("stop", 60.0))
+    )
     assert stopped == 0
     assert db.get_options_position(pid_stale)["status"] == "open"
     assert db.get_options_position(pid_ok)["status"] == "open"
@@ -533,7 +544,9 @@ def test_intraday_stop_kill_switch(account_id, monkeypatch):
     monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
     pid = _open_marked(account_id, entry=10.0, prev_mark=5.0)
     pos = db.get_options_position(pid)
-    assert options_engine._apply_intraday_stops([pos], {pid: (3.0, "schwab")}) == 0
+    assert options_engine._apply_intraday_stops(
+        [pos], {pid: (3.0, "schwab")}, _policies(account_id, StopPolicy("stop", 60.0))
+    ) == 0
     assert db.get_options_position(pid)["status"] == "open"
 
 
@@ -543,7 +556,9 @@ def test_intraday_stop_credits_ledger_at_fill(account_id, monkeypatch):
     before = db.options_cash_balance(account_id)
     pid = _open_marked(account_id, entry=10.0, prev_mark=5.0)  # debit 10*100*2 = 2000
     pos = db.get_options_position(pid)
-    options_engine._apply_intraday_stops([pos], {pid: (3.0, "schwab")})
+    options_engine._apply_intraday_stops(
+        [pos], {pid: (3.0, "schwab")}, _policies(account_id, StopPolicy("stop", 60.0))
+    )
     after = db.options_cash_balance(account_id)
     # net: -2000 open + 4.00*100*2 = 800 close
     assert after - before == pytest.approx(-2000 + 800)
@@ -622,7 +637,9 @@ def test_stop_books_backtracked_time_and_spot(account_id, monkeypatch):
     monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
     pid = _open_marked(account_id, entry=10.0, prev_mark=5.0)
     pos = db.get_options_position(pid)
-    assert options_engine._apply_intraday_stops([pos], {pid: (3.0, "schwab")}) == 1
+    assert options_engine._apply_intraday_stops(
+        [pos], {pid: (3.0, "schwab")}, _policies(account_id, StopPolicy("stop", 60.0))
+    ) == 1
     row = db.get_options_position(pid)
     assert row["closed_at"] == "2026-07-29T14:32:00Z"
     assert row["exit_underlying"] == pytest.approx(95.0)
@@ -644,7 +661,6 @@ def test_peak_premium_seeded_and_ratchets(account_id):
 
 def test_effective_stop_unarmed_is_base():
     from web import options_allocator as oa
-    from web.account_policy import StopPolicy
     outcome = oa.effective_stop_level(
         {"entry_premium": 10.0, "peak_premium": 14.9, "current_premium": 3.5},
         StopPolicy("stop", 60.0),
@@ -655,7 +671,6 @@ def test_effective_stop_unarmed_is_base():
 
 def test_effective_stop_armed_locks_gains():
     from web import options_allocator as oa
-    from web.account_policy import StopPolicy
     outcome = oa.effective_stop_level(
         {"entry_premium": 10.0, "peak_premium": 20.0},
         StopPolicy("trailing_pct", 30.0),
@@ -666,7 +681,6 @@ def test_effective_stop_armed_locks_gains():
 
 def test_effective_stop_kill_switch():
     from web import options_allocator as oa
-    from web.account_policy import StopPolicy
     outcome = oa.effective_stop_level(
         {"entry_premium": 10.0, "peak_premium": 30.0},
         StopPolicy("none"),
@@ -684,7 +698,10 @@ def test_intraday_trail_closes_winner_at_trail_level(account_id, monkeypatch):
     pid = _open_marked(account_id, entry=10.0, prev_mark=20.0)  # peak ratchets to 20
     pos = db.get_options_position(pid)
     # fresh quote 13.5 < trail 14.0 but far above base 4.0
-    assert options_engine._apply_intraday_stops([pos], {pid: (13.5, "schwab")}) == 1
+    stopped = options_engine._apply_intraday_stops(
+        [pos], {pid: (13.5, "schwab")}, _policies(account_id, StopPolicy("trailing_pct", 30.0))
+    )
+    assert stopped == 1
     row = db.get_options_position(pid)
     assert row["exit_reason"] == "trail_stop"
     assert row["exit_premium"] == pytest.approx(14.0)
@@ -693,7 +710,6 @@ def test_intraday_trail_closes_winner_at_trail_level(account_id, monkeypatch):
 
 def test_forced_closes_trail():
     from web import options_allocator as oa
-    from web.account_policy import StopPolicy
     pos = {"id": 1, "occ_symbol": "X", "underlying": "AAPL", "entry_premium": 10.0,
            "peak_premium": 20.0, "current_premium": 13.0, "contracts": 2,
            "expiration_date": "2099-01-15", "cost_basis": 2000.0}
@@ -707,7 +723,6 @@ def test_prompt_shows_days_held_and_ride_guidance(monkeypatch):
     from unittest.mock import MagicMock
 
     from web import options_allocator as oa
-    from web.account_policy import StopPolicy
     llm = MagicMock()
     llm.invoke.return_value = MagicMock(content="[]")
     monkeypatch.setattr(oa, "llm_for", lambda *a, **k: llm)
@@ -722,6 +737,174 @@ def test_prompt_shows_days_held_and_ride_guidance(monkeypatch):
     assert "WINNERS RIDE" in system and "trailing stop" in system.lower()
     assert "30" in system
     assert "held " in user and "d left" in user  # days-held now in every open line
+
+
+# ── Per-account stop policy + stop-limit resting semantics ───────────────────
+
+def test_intraday_none_policy_never_stops(account_id, monkeypatch):
+    monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
+    pid = _open_marked(account_id, entry=10.0, prev_mark=1.0)  # down 90%
+    pos = db.get_options_position(pid)
+    stopped = options_engine._apply_intraday_stops(
+        [pos], {pid: (1.0, "schwab")}, _policies(account_id, StopPolicy("none"))
+    )
+    assert stopped == 0
+    assert db.get_options_position(pid)["status"] == "open"
+
+
+def test_intraday_trailing_dollar_fills_at_level(account_id, monkeypatch):
+    monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
+    pid = _open_marked(account_id, entry=10.0, prev_mark=20.0)  # peak ratchets to 20
+    pos = db.get_options_position(pid)
+    stopped = options_engine._apply_intraday_stops(
+        [pos], {pid: (17.5, "schwab")}, _policies(account_id, StopPolicy("trailing_dollar", 2.0))
+    )
+    assert stopped == 1
+    row = db.get_options_position(pid)
+    assert row["status"] == "closed"
+    assert row["exit_reason"] == "trail_stop"
+    assert row["exit_premium"] == pytest.approx(18.0)
+
+
+def test_intraday_stop_limit_gapped_arms_resting(account_id, monkeypatch):
+    monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
+    pid = _open_marked(account_id, entry=10.0, prev_mark=5.0)
+    pos = db.get_options_position(pid)
+    # entry=10 -> level 4.0, limit 3.6; fresh quote 3.0 gaps through the limit.
+    stopped = options_engine._apply_intraday_stops(
+        [pos], {pid: (3.0, "schwab")}, _policies(account_id, StopPolicy("stop_limit", 60.0, 10.0))
+    )
+    assert stopped == 0
+    row = db.get_options_position(pid)
+    assert row["status"] == "open"
+    assert row["stop_triggered_at"] is not None
+
+
+def test_intraday_stop_limit_resting_fills_on_later_refresh(account_id, monkeypatch):
+    monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
+    pid = _open_marked(account_id, entry=10.0, prev_mark=5.0)
+    # First pass gaps through the limit and arms the stop-limit.
+    options_engine._apply_intraday_stops(
+        [db.get_options_position(pid)], {pid: (3.0, "schwab")},
+        _policies(account_id, StopPolicy("stop_limit", 60.0, 10.0)),
+    )
+    armed = db.get_options_position(pid)
+    assert armed["stop_triggered_at"] is not None
+    # A real refresh would have marked current_premium to the observed gap price.
+    db.mark_options_position(pid, 3.0, 3.0 * 100 * 2, "schwab")
+    pos = db.get_options_position(pid)
+    # Second pass sees 3.7, back at or above the 3.60 limit -> fill at the limit.
+    stopped = options_engine._apply_intraday_stops(
+        [pos], {pid: (3.7, "schwab")}, _policies(account_id, StopPolicy("stop_limit", 60.0, 10.0))
+    )
+    assert stopped == 1
+    row = db.get_options_position(pid)
+    assert row["status"] == "closed"
+    assert row["exit_reason"] == "stop_limit"
+    assert row["exit_premium"] == pytest.approx(3.6)
+
+
+def test_intraday_stop_limit_resting_stays_open_below_limit(account_id, monkeypatch):
+    monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
+    pid = _open_marked(account_id, entry=10.0, prev_mark=5.0)
+    options_engine._apply_intraday_stops(
+        [db.get_options_position(pid)], {pid: (3.0, "schwab")},
+        _policies(account_id, StopPolicy("stop_limit", 60.0, 10.0)),
+    )
+    db.mark_options_position(pid, 3.0, 3.0 * 100 * 2, "schwab")
+    pos = db.get_options_position(pid)
+    before = pos["stop_triggered_at"]
+    assert before is not None
+    # Quote still below the 3.60 limit, so the resting order must not fill.
+    stopped = options_engine._apply_intraday_stops(
+        [pos], {pid: (3.5, "schwab")}, _policies(account_id, StopPolicy("stop_limit", 60.0, 10.0))
+    )
+    assert stopped == 0
+    row = db.get_options_position(pid)
+    assert row["status"] == "open"
+    assert row["stop_triggered_at"] == before
+
+
+def test_intraday_stop_limit_crosses_fills_immediately(account_id, monkeypatch):
+    monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
+    pid = _open_marked(account_id, entry=10.0, prev_mark=5.0)
+    pos = db.get_options_position(pid)
+    # 3.7 is below the 4.00 trigger but still >= the 3.60 limit, so it fills
+    # immediately at the trigger level without ever arming.
+    stopped = options_engine._apply_intraday_stops(
+        [pos], {pid: (3.7, "schwab")}, _policies(account_id, StopPolicy("stop_limit", 60.0, 10.0))
+    )
+    assert stopped == 1
+    row = db.get_options_position(pid)
+    assert row["status"] == "closed"
+    assert row["exit_reason"] == "stop_limit"
+    assert row["exit_premium"] == pytest.approx(4.0)
+    assert row["stop_triggered_at"] is None
+
+
+def test_intraday_stops_use_per_account_policy_in_one_batch(account_id, monkeypatch):
+    monkeypatch.setattr(options_engine, "_underlying_prices", lambda syms: {})
+
+    # Create a second options account with a trailing-pct policy.
+    aid2 = db.create_paper_account(
+        "Batch account 2", starting_capital=100_000.0, kind="options",
+        stop_type="trailing_pct", stop_value=30,
+    )
+    db.append_options_cash(aid2, "deposit", 100_000.0, note="initial deposit")
+
+    pid1 = _open_marked(account_id, entry=10.0, prev_mark=5.0)
+    pid2 = _open_marked(
+        aid2, entry=10.0, prev_mark=20.0,
+        occ_symbol="MSFT  260821C00420000", underlying="MSFT", strike=420.0,
+    )
+    price_map = {
+        "AAPL  260821C00230000": 3.0,
+        "MSFT  260821C00420000": 13.5,
+    }
+
+    # Force Schwab pricing so both positions land in priced.
+    monkeypatch.setattr(options_engine.schwab_mcp, "market_data_enabled", lambda: True)
+
+    def fake_get_quotes(symbols):
+        return {s: {"price": price_map.get(s, 1.0)} for s in symbols}
+
+    monkeypatch.setattr(options_engine.schwab_mcp, "get_quotes", fake_get_quotes)
+    monkeypatch.setattr(options_engine.schwab_mcp, "option_quote_price", lambda q: q.get("price"))
+
+    # Count batched policy lookups and prove the policies dict came from one list.
+    calls = {"list_options": 0}
+    real_list = db.list_paper_accounts
+
+    def counting_list(*args, **kwargs):
+        if kwargs.get("kind") == "options":
+            calls["list_options"] += 1
+        return real_list(*args, **kwargs)
+
+    monkeypatch.setattr(db, "list_paper_accounts", counting_list)
+
+    real_apply = options_engine._apply_intraday_stops
+    captured: dict = {}
+
+    def wrapping_apply(positions, priced, policies):
+        captured["policy_lookup_calls"] = calls["list_options"]
+        return real_apply(positions, priced, policies)
+
+    monkeypatch.setattr(options_engine, "_apply_intraday_stops", wrapping_apply)
+
+    # The real scheduler calls refresh_positions(paper_account_id=None).
+    summary = options_engine.refresh_positions(paper_account_id=None)
+
+    assert captured["policy_lookup_calls"] <= 1
+    assert summary["stopped"] == 2
+
+    row1 = db.get_options_position(pid1)
+    row2 = db.get_options_position(pid2)
+    assert row1["status"] == "closed"
+    assert row1["exit_reason"] == "stop_loss"
+    assert row1["exit_premium"] == pytest.approx(4.0)
+    assert row2["status"] == "closed"
+    assert row2["exit_reason"] == "trail_stop"
+    assert row2["exit_premium"] == pytest.approx(14.0)
 
 
 # ── Same-day movers pre-screen cache ─────────────────────────────────────────

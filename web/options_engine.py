@@ -163,8 +163,8 @@ def _allocation_slot(scan_id: int) -> Iterator[None]:
 
     The timeout value defaults to 3600 seconds and may be overridden at
     module load by the ``OPTIONS_ALLOC_TIMEOUT_SECONDS`` environment
-    variable. Unparsable, empty, zero, or negative values fall back to
-    the default so the slot can never silently wait forever.
+    variable. Unparsable, empty, zero, or negative values fall back to the
+    default so the slot can never silently wait forever.
 
     If the timeout fires before this waiter ever acquires the lock, the
     raised RuntimeError makes clear the scan never entered the allocation
@@ -490,7 +490,9 @@ def refresh_positions(paper_account_id: int | None = None) -> dict[str, Any]:
             db.mark_options_position(p["id"], price, price * 100 * int(p["contracts"]), source)
             marked += 1
 
-    stopped = _apply_intraday_stops(positions, priced)
+    policies = {int(a["id"]): account_policy.StopPolicy.from_account(a)
+                for a in db.list_paper_accounts(kind="options")}
+    stopped = _apply_intraday_stops(positions, priced, policies)
 
     # Roll fresh equity onto each affected account's latest completed scan row.
     accounts = ([db.get_paper_account(paper_account_id)] if paper_account_id
@@ -572,13 +574,16 @@ def _backtrack_stop_crossing(
 def _apply_intraday_stops(
     positions: list[dict[str, Any]],
     priced: dict[int, tuple[float, str]],
+    policies: dict[int, account_policy.StopPolicy],
 ) -> int:
     """Emulate a standing stop order between daily allocations.
 
-    The -60% stop used to be enforced only once a day, at the 09:35 allocation,
-    filled at THAT moment's price — a position could crash through the stop at
-    10:30 and ride a full day past it. Now every hourly refresh checks freshly
-    quoted positions and closes breaches immediately.
+    The level now comes from each account's configured stop policy
+    (StopPolicy). Previously a flat -60% stop was enforced only once a day,
+    at the 09:35 allocation, filled at THAT moment's price — a position
+    could crash through the stop at 10:30 and ride a full day past it. Now
+    every hourly refresh checks freshly quoted positions and closes breaches
+    immediately.
 
     Fill convention (standard backtest rule):
       - previous mark ABOVE the stop, new quote at/below it -> the price
@@ -587,6 +592,11 @@ def _apply_intraday_stops(
       - first observation already below the stop (overnight gap / never
         marked) -> fill at the observed quote, because a real stop order gaps
         through too. No pretending we caught a level the market never traded.
+
+    Stop-limit adds an arm/resting-fill state: a trigger that gaps through
+    the limit becomes a resting stop-limit order; it fills on a later
+    refresh if the fresh quote is back at or above the limit price, and
+    remains armed (no fill) while the quote stays below the limit.
 
     Only fresh quotes (schwab/yfinance) can trigger — a carried or intrinsic
     mark is a guess, and a guess must never realize a loss. Positions the
@@ -598,16 +608,18 @@ def _apply_intraday_stops(
 
     if not DEFAULT_CONFIG.get("options_intraday_stop", True):
         return 0
+
     stopped = 0
     spot_cache: dict[str, float | None] = {}
-    # NOTE (step 7 compatibility shim, pending the fuller step 8 rework): builds
-    # each position's policy from its own account and delegates to the shared
-    # account_policy.evaluate() core via effective_stop_level, replacing the old
-    # flat -60%/DEFAULT_CONFIG trailing model. `mark` is the fresh quote and
-    # `prev_mark` the pre-refresh premium, matching effective_stop_level's
-    # documented convention for this caller.
-    policy_cache: dict[int, account_policy.StopPolicy] = {}
-    for p in positions:
+
+    # Resting stop-limit fills must be evaluated before any newly-triggering
+    # position in the same pass, so an armed position that can now fill does
+    # so before anything else runs.
+    ordered = [p for p in positions if p.get("stop_triggered_at")] + [
+        p for p in positions if not p.get("stop_triggered_at")
+    ]
+
+    for p in ordered:
         got = priced.get(p["id"])
         if not got:
             continue
@@ -615,19 +627,27 @@ def _apply_intraday_stops(
         entry = float(p.get("entry_premium") or 0)
         if entry <= 0:
             continue
-        acct_id = p.get("paper_account_id")
-        if acct_id not in policy_cache:
-            policy_cache[acct_id] = account_policy.StopPolicy.from_account(
-                db.get_paper_account(acct_id) if acct_id is not None else None
-            )
-        policy = policy_cache[acct_id]
-        prev_mark = p.get("current_premium")  # pre-refresh mark (row loaded before marking)
+
+        policy = policies.get(int(p.get("paper_account_id") or 0), account_policy.NONE)
+        prev_mark = p.get("current_premium")
         outcome = options_allocator.effective_stop_level(
-            dict(p, current_premium=price), policy,
+            dict(p, current_premium=price),
+            policy,
             prev_mark=float(prev_mark) if prev_mark is not None else None,
         )
+
+        if outcome.action == "arm":
+            db.arm_options_stop_limit(int(p["id"]))
+            log.info(
+                "[options] stop-limit triggered for %s (level $%.2f, limit $%.2f) "
+                "but gapped below limit; now resting",
+                p["occ_symbol"], outcome.level, outcome.limit_price,
+            )
+            continue
+
         if outcome.action != "fill":
             continue
+
         stop_level = outcome.level
         stop_reason = outcome.exit_reason
         fill = outcome.fill_price
@@ -805,6 +825,8 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
     account_id = int(account_id)
     aggressiveness = int(scan.get("aggressiveness") or account.get("aggressiveness") or 5)
     bias = scan.get("bias") or account.get("bias") or "neutral"
+    stop_policy = account_policy.StopPolicy.from_account(account)
+    log.info("[options %s] stop policy: %s", scan_id, account_policy.describe_policy(stop_policy))
 
     prefs = db.get_preferences() or {}
     selected_analysts = prefs.get("analysts") or ["market", "social", "news", "fundamentals"]
@@ -913,14 +935,11 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
             log.exception("[options %s] lessons context failed — allocating without it", scan_id)
 
         with _phase("Options allocation failed"):
-            # NOTE (step 7 compatibility shim, pending the fuller step 8 rework):
-            # options_allocator.run() now requires the account's stop policy.
-            policy = account_policy.StopPolicy.from_account(db.get_paper_account(account_id))
             alloc = options_allocator.run(
                 candidates, open_positions, trade_date, config,
                 equity=eq["equity"], cash=eq["cash"], realized_pnl=realized,
                 aggressiveness=aggressiveness, bias=bias, fresh_signals=fresh_signals,
-                lessons_context=lessons_context, policy=policy,
+                lessons_context=lessons_context, policy=stop_policy,
             )
 
         # Learning loop, write side: today's chain data carries the underlying spot
