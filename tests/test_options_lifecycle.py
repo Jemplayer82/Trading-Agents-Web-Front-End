@@ -793,7 +793,7 @@ def test_intraday_stop_limit_resting_fills_on_later_refresh(account_id, monkeypa
     # A real refresh would have marked current_premium to the observed gap price.
     db.mark_options_position(pid, 3.0, 3.0 * 100 * 2, "schwab")
     pos = db.get_options_position(pid)
-    # Second pass sees 3.7, back at or above the 3.60 limit -> fill at the limit.
+    # Second pass sees 3.7, back at or above the 3.60 limit -> fill at the better of limit and market.
     stopped = options_engine._apply_intraday_stops(
         [pos], {pid: (3.7, "schwab")}, _policies(account_id, StopPolicy("stop_limit", 60.0, 10.0))
     )
@@ -801,7 +801,7 @@ def test_intraday_stop_limit_resting_fills_on_later_refresh(account_id, monkeypa
     row = db.get_options_position(pid)
     assert row["status"] == "closed"
     assert row["exit_reason"] == "stop_limit"
-    assert row["exit_premium"] == pytest.approx(3.6)
+    assert row["exit_premium"] == pytest.approx(3.7)
 
 
 def test_intraday_stop_limit_resting_stays_open_below_limit(account_id, monkeypatch):

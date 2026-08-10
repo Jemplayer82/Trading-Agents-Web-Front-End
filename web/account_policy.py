@@ -189,7 +189,8 @@ def evaluate(
     if policy.stop_type == "stop_limit":
         if armed:
             if mark_f >= limit_price:
-                return StopOutcome("fill", level, limit_price, round(limit_price, 4), reason, False)
+                fill_price = round(max(limit_price, mark_f), 4)
+                return StopOutcome("fill", level, limit_price, fill_price, reason, False)
             return StopOutcome("hold", level, limit_price, None, None, False)
 
         if mark_f > level:

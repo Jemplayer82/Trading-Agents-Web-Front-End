@@ -306,13 +306,13 @@ def test_stop_limit_variants(tmp_db, monkeypatch):
     assert r1["cash"] == 9000.0
     assert r1["deployed"] == 1000.0
 
-    # (b) next refresh at 78 (armed) fills at the 76 limit
+    # (b) next refresh at 78 (armed) fills at the better of limit and market
     _refresh(scan_id, {"TICK": 78.0}, monkeypatch)
     row = _load_portfolio(scan_id)[0]
     assert row["action"] == "EXITED"
     assert row["exit_reason"] == "stop_limit"
-    assert row["exit_price"] == 76.0
-    assert row["exit_proceeds"] == 760.0
+    assert row["exit_price"] == 78.0
+    assert row["exit_proceeds"] == 780.0
     assert "pending_stop_limit" not in row
     assert "stop_limit_price" not in row
 

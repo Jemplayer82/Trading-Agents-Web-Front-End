@@ -128,7 +128,7 @@ def test_forced_closes_stop_limit_filled_when_mark_at_limit():
                stop_triggered_at="2026-07-17T10:00:00Z")
     forced = forced_closes([pos], StopPolicy("stop_limit", 60.0))
     assert [(p["id"], reason) for p, reason, fill in forced] == [(1, "stop_limit")]
-    assert forced[0][2] == pytest.approx(4.0)
+    assert forced[0][2] == pytest.approx(4.5)
 
 
 def test_forced_closes_stop_limit_not_filled_below_limit():

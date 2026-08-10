@@ -162,7 +162,7 @@ def test_evaluate_stop_limit():
     assert armed == ap.StopOutcome("arm", 4.0, 3.6, None, "stop_limit", False)
 
     armed_fill = ap.evaluate(policy, entry=10, peak=10, mark=3.7, armed=True)
-    assert armed_fill == ap.StopOutcome("fill", 4.0, 3.6, 3.6, "stop_limit", False)
+    assert armed_fill == ap.StopOutcome("fill", 4.0, 3.6, 3.7, "stop_limit", False)
 
     armed_hold = ap.evaluate(policy, entry=10, peak=10, mark=3.5, armed=True)
     assert armed_hold == ap.StopOutcome("hold", 4.0, 3.6, None, None, False)
