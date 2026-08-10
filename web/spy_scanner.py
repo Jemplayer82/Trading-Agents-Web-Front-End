@@ -67,7 +67,7 @@ from tradingagents.dataflows.config import set_config
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.orchestrator import SwitchboardOrchestrator
 
-from . import db, market_cache
+from . import db, market_cache, account_policy
 from .llm_helpers import DynamicGate, _GateMonitor, _total_budget, llm_for
 
 log = logging.getLogger(__name__)
@@ -1310,9 +1310,13 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
     # week's value for a rebalance). Anything not deployed is held as cash.
     basis = float(scan.get("starting_value") or 100_000)
 
+    account = db.get_paper_account(int(scan["paper_account_id"])) if scan.get("paper_account_id") else None
+    policy = account_policy.StopPolicy.from_account(account)
+
     positions_value = 0.0
     deployed = 0.0
     signal_flips: list[str] = []
+    stopped_now: list[str] = []
     for a in portfolio:
         # Skip closed positions — they hold no capital.
         if a.get("action") == "EXITED":
@@ -1331,9 +1335,41 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
         if cost is None:
             cost = round(shares * ep, 2)
             a["cost_basis"] = cost
-        deployed += cost
 
-        cp = current_prices.get(t) or ep
+        fresh = current_prices.get(t)
+        prev = a.get("current_price")
+        cp = float(fresh) if fresh else float(prev or ep)
+
+        peak_before = float(a.get("peak_price") or ep)
+        outcome = account_policy.evaluate(
+            policy, entry=ep, peak=peak_before, mark=cp,
+            prev_mark=(float(prev) if prev is not None else None),
+            armed=bool(a.get("pending_stop_limit")),
+        ) if fresh else None
+        a["peak_price"] = round(max(peak_before, ep, cp), 2)
+
+        if outcome is not None and outcome.action == "fill":
+            a["action"] = "EXITED"
+            a["exit_reason"] = outcome.exit_reason
+            a["exit_price"] = round(outcome.fill_price, 2)
+            a["exit_proceeds"] = round(shares * outcome.fill_price, 2)
+            a["current_price"] = a["exit_price"]
+            a["current_value"] = 0.0
+            a.pop("pending_stop_limit", None)
+            a.pop("stop_limit_price", None)
+            stopped_now.append(
+                "- {}: {} at ${:.2f} (entry ${:.2f}, {:.1f}%)".format(
+                    t, outcome.exit_reason, a["exit_price"], ep,
+                    round((a["exit_price"] - ep) / ep * 100, 1) if ep else 0.0,
+                )
+            )
+            continue
+
+        if outcome is not None and outcome.action == "arm":
+            a["pending_stop_limit"] = True
+            a["stop_limit_price"] = round(outcome.limit_price, 2)
+
+        deployed += cost
         a["current_price"] = round(cp, 2)
         a["current_value"] = round(shares * cp, 2)
         positions_value += a["current_value"]
@@ -1343,12 +1379,45 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
             if quick["signal"].upper() != a["signal"].upper():
                 signal_flips.append("{}: was {} at entry, now {}".format(t, a["signal"], quick["signal"]))
 
-    cash = max(0.0, basis - deployed)
+    # Realized P&L from stop-outs. This cash line derives from scratch on every
+    # call, so an exited row's cost is already back inside `basis - deployed`,
+    # adding (proceeds - cost) converts that implicit full refund into the real
+    # outcome and makes the gain/loss survive every subsequent refresh. Only rows
+    # carrying exit_proceeds count, so rows the weekly rebalance EXITED (which have
+    # none) behave exactly as they do today.
+    realized = sum(float(r["exit_proceeds"]) - float(r.get("cost_basis") or 0)
+                   for r in portfolio if r.get("exit_proceeds") is not None)
+    cash = max(0.0, basis - deployed + realized)
+
     current_value = positions_value + cash
     return_pct = ((current_value - basis) / basis) * 100 if basis else 0.0
-    rebalance_notes = (
+
+    _STOP_REASONS = {"stop_loss", "trail_stop", "stop_limit"}
+    stopped_lines = [
+        "- {}: {} at ${:.2f} (entry ${:.2f}, {:.1f}%)".format(
+            r["ticker"],
+            r["exit_reason"],
+            float(r["exit_price"]),
+            float(r.get("entry_price") or 0),
+            round((float(r["exit_price"]) - float(r.get("entry_price") or 0))
+                  / float(r.get("entry_price") or 1) * 100, 1)
+            if float(r.get("entry_price") or 0) else 0.0,
+        )
+        for r in portfolio
+        if r.get("exit_reason") in _STOP_REASONS
+    ]
+    stopped_section = "Stopped out:\n" + "\n".join(stopped_lines) if stopped_lines else ""
+    flips_section = (
         "Signal flips detected:\n" + "\n".join("- " + f for f in signal_flips)
     ) if signal_flips else ""
+    if stopped_section and flips_section:
+        rebalance_notes = stopped_section + "\n\n" + flips_section
+    elif stopped_section:
+        rebalance_notes = stopped_section
+    elif flips_section:
+        rebalance_notes = flips_section
+    else:
+        rebalance_notes = ""
 
     # Persist the mutated portfolio so per-position current_price/current_value
     # are saved alongside the scan-level value.
@@ -1365,4 +1434,6 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
         "deployed": round(deployed, 2),
         "return_pct": round(return_pct, 2),
         "rebalance_notes": rebalance_notes,
+        "stopped": len(stopped_now),
+        "realized": round(realized, 2),
     }
