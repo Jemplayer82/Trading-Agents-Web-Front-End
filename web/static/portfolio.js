@@ -711,6 +711,52 @@ function scanActivitySpy(scan) {
   );
 }
 
+const NIGHTLY_TIME_KEY = "SCHEDULE_NIGHTLY_SCAN_TIME";
+const NIGHTLY_TIME_DEFAULT = "22:00";
+
+// Read the nightly-scan time from the settings API and reflect it in the box.
+// Non-secret settings come back verbatim in `masked`, so no new route is needed.
+async function loadNightlyScanTime() {
+  try {
+    const data = await apiFetch("/api/settings");
+    const entry = data.registry.find((s) => s.key === NIGHTLY_TIME_KEY);
+    if (!entry) return;
+    const value = (entry.has_value && entry.masked) || NIGHTLY_TIME_DEFAULT;
+    const timeEl = $("pf-nightly-time");
+    const captionEl = $("pf-nightly-caption");
+    if (timeEl) timeEl.value = value;
+    if (captionEl) {
+      captionEl.textContent = "Pulls your real Schwab holdings (via the Schwab MCP) and runs each through the agents. Idempotent for today; the nightly cron also fires at " + value + " ET (Mon-Fri).";
+    }
+  } catch (e) {
+    console.error("loadNightlyScanTime failed:", e);
+  }
+}
+
+// Persist a new nightly-scan time. The scheduler's reconciler picks it up
+// within ~60s — no container restart.
+async function saveNightlyScanTime() {
+  const value = $("pf-nightly-time").value;
+  const status = $("pf-nightly-status");
+  if (!value || !/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) {
+    if (status) status.textContent = "enter HH:MM";
+    return;
+  }
+  try {
+    await apiFetch("/api/settings/" + NIGHTLY_TIME_KEY, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ value }) });
+    if (status) status.textContent = "saved — takes effect within a minute";
+    const captionEl = $("pf-nightly-caption");
+    if (captionEl) {
+      captionEl.textContent = "Pulls your real Schwab holdings (via the Schwab MCP) and runs each through the agents. Idempotent for today; the nightly cron also fires at " + value + " ET (Mon-Fri).";
+    }
+  } catch (e) {
+    if (status) {
+      status.textContent = "save failed: " + e;
+      status.style.color = "var(--accent-red)";
+    }
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   _setupPortfolioStabs();
   $("btn-scan-now")?.addEventListener("click", runScanNow);
@@ -732,6 +778,13 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
+  // Nightly scan time
+  loadNightlyScanTime();
+  const nightlyTime = $("pf-nightly-time");
+  if (nightlyTime) {
+    nightlyTime.addEventListener("change", saveNightlyScanTime);
+  }
+
   applySchwabVisibility();
   setupScanActivity();
   loadAnalyzeQueue();
@@ -739,6 +792,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
 document.addEventListener("tab-shown", (ev) => {
   if (ev.detail === "portfolio") {
+    loadNightlyScanTime();
     loadPortfolioQueue();
     loadPortfolioHistory();
     loadSchwabStatusLine();
