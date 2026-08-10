@@ -1437,3 +1437,46 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
         "stopped": len(stopped_now),
         "realized": round(realized, 2),
     }
+
+
+def refresh_all_portfolio_prices(kind: str = "equity") -> dict[str, Any]:
+    """Mark every completed equity scan's paper portfolio to market.
+
+    Historically the hourly price-refresh cron hit ``db.latest_spy_scan()``,
+    which selects exactly one row (the globally highest ``id``) across all
+    paper accounts. That meant only the account owning the most recent scan
+    ever had its stop policy evaluated; every other equity account's
+    positions could fall through their stops silently. This function mirrors
+    the options side's fan-out in ``options_engine.refresh_positions`` by
+    finding the newest completed scan PER paper_account_id (including the
+    NULL / unassigned bucket) and refreshing each one independently.
+    """
+    with db.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, paper_account_id
+            FROM spy_scans
+            WHERE id IN (
+                SELECT MAX(id)
+                FROM spy_scans
+                WHERE kind = ? AND status = 'completed'
+                GROUP BY paper_account_id
+            )
+            ORDER BY paper_account_id
+            """,
+            (kind,),
+        ).fetchall()
+
+    scans: dict[str, Any] = {}
+    for row in rows:
+        scan_id = int(row["id"])
+        key = "unassigned" if row["paper_account_id"] is None else str(row["paper_account_id"])
+        try:
+            scans[key] = refresh_portfolio_prices(scan_id)
+        except Exception as exc:
+            log.exception(
+                "[spy %s] refresh_all_portfolio_prices failed for account %s", scan_id, key
+            )
+            scans[key] = {"error": str(exc)}
+
+    return {"scans": scans}

@@ -277,10 +277,10 @@ def cancel_spy_scan(scan_id: int) -> dict[str, Any]:
 # (returning 422) if the parameterised route is declared first.
 @router.post("/api/spy-scans/latest/refresh-prices")
 def refresh_spy_prices_latest() -> dict[str, Any]:
-    scan = db.latest_spy_scan()
-    if not scan:
+    result = spy_scanner.refresh_all_portfolio_prices(kind="equity")
+    if not result.get("scans"):
         raise HTTPException(status_code=404, detail="no scans found")
-    return spy_scanner.refresh_portfolio_prices(int(scan["id"]))
+    return result
 
 
 @router.post("/api/spy-scans/{scan_id}/refresh-prices")

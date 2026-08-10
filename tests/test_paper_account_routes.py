@@ -254,3 +254,32 @@ def test_put_stop_limit_without_offset_rejected(client):
     row = db.get_paper_account(acct["id"])
     assert row["stop_type"] == "stop"
     assert row["stop_value"] == 60.0
+
+
+def test_latest_refresh_prices_fans_out_across_accounts(client):
+    acct1 = _create_account(client, name="fan-out-1")
+    acct2 = _create_account(client, name="fan-out-2")
+
+    scan1 = db.create_spy_scan("2026-08-10", paper_account_id=acct1["id"])
+    db.update_spy_scan_prices(
+        scan1, current_value=0.0, rebalance_notes="", portfolio_json=[]
+    )
+    scan2 = db.create_spy_scan("2026-08-10", paper_account_id=acct2["id"])
+    db.update_spy_scan_prices(
+        scan2, current_value=0.0, rebalance_notes="", portfolio_json=[]
+    )
+
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE spy_scans SET status = 'completed' WHERE id IN (?, ?)",
+            (scan1, scan2),
+        )
+
+    resp = client.post("/api/spy-scans/latest/refresh-prices")
+    assert resp.status_code == 200
+    assert len(resp.json()["scans"]) == 2
+
+
+def test_latest_refresh_prices_404_when_no_scans(client):
+    resp = client.post("/api/spy-scans/latest/refresh-prices")
+    assert resp.status_code == 404

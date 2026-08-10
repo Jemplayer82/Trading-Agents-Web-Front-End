@@ -37,6 +37,10 @@ def _seed_scan(scan_id, starting_value, portfolio):
             "UPDATE spy_scans SET starting_value = ? WHERE id = ?",
             (starting_value, scan_id),
         )
+        conn.execute(
+            "UPDATE spy_scans SET status = 'completed' WHERE id = ?",
+            (scan_id,),
+        )
     db.update_spy_scan_prices(
         scan_id, current_value=0.0, rebalance_notes="", portfolio_json=portfolio
     )
@@ -57,6 +61,18 @@ def _refresh(scan_id, prices, monkeypatch):
 
 def _load_portfolio(scan_id):
     return db.get_spy_scan(scan_id)["portfolio_json"]
+
+
+def _mock_schwab_prices(monkeypatch, prices):
+    monkeypatch.setattr(spy_scanner.schwab_mcp, "market_data_enabled", lambda: True)
+    monkeypatch.setattr(
+        spy_scanner.schwab_mcp,
+        "get_quotes",
+        lambda ts: {t: {"last": prices[t]} for t in ts if t in prices},
+    )
+    monkeypatch.setattr(
+        spy_scanner.schwab_mcp, "quote_price", lambda q: q.get("last")
+    )
 
 
 def test_policy_none_and_null_account_no_stop(tmp_db, monkeypatch):
@@ -476,3 +492,81 @@ def test_rebalance_notes_stopped_persists_and_flips_unchanged(tmp_db, monkeypatc
     r3 = _refresh(scan_id2, {"FLIP": 100.0}, monkeypatch)
     expected = "Signal flips detected:\n- FLIP: was BUY at entry, now SELL"
     assert r3["rebalance_notes"] == expected
+
+
+def test_refresh_all_stops_every_account_not_just_the_newest_scan(tmp_db, monkeypatch):
+    # Account A: created first -> lower scan id, but still must get its stop evaluated.
+    aid_a = _account("acct-a-stop", stop_type="stop", stop_value=20)
+    scan_a = db.create_spy_scan("2026-08-10", paper_account_id=aid_a)
+    portfolio_a = [
+        {
+            "ticker": "TICK-A",
+            "action": "BUY",
+            "entry_price": 100.0,
+            "shares": 10,
+            "cost_basis": 1000.0,
+            "dollar_amount": 1000.0,
+            "signal": "BUY",
+            "current_price": 95.0,
+        }
+    ]
+    _seed_scan(scan_a, 10000, portfolio_a)
+
+    # Account B: created second -> higher scan id; the old db.latest_spy_scan()
+    # would have selected only this one.
+    aid_b = _account("acct-b-none", stop_type="none")
+    scan_b = db.create_spy_scan("2026-08-10", paper_account_id=aid_b)
+    portfolio_b = [
+        {
+            "ticker": "TICK-B",
+            "action": "BUY",
+            "entry_price": 100.0,
+            "shares": 10,
+            "cost_basis": 1000.0,
+            "dollar_amount": 1000.0,
+            "signal": "BUY",
+            "current_price": 95.0,
+        }
+    ]
+    _seed_scan(scan_b, 10000, portfolio_b)
+
+    _mock_schwab_prices(monkeypatch, {"TICK-A": 70.0, "TICK-B": 70.0})
+
+    result = spy_scanner.refresh_all_portfolio_prices(kind="equity")
+
+    row_a = _load_portfolio(scan_a)[0]
+    row_b = _load_portfolio(scan_b)[0]
+
+    # Account A's stop fired even though it is NOT the globally-latest scan.
+    assert row_a["action"] == "EXITED"
+    assert row_a["exit_reason"] == "stop_loss"
+
+    # Account B has no stop but was still marked to market.
+    assert row_b["action"] == "BUY"
+    assert row_b["current_price"] == 70.0
+
+    assert set(result["scans"].keys()) == {str(aid_a), str(aid_b)}
+
+
+def test_refresh_all_includes_no_account_scan(tmp_db, monkeypatch):
+    scan_id = db.create_spy_scan("2026-08-10")
+    portfolio = [
+        {
+            "ticker": "NOACCT",
+            "action": "BUY",
+            "entry_price": 100.0,
+            "shares": 10,
+            "cost_basis": 1000.0,
+            "dollar_amount": 1000.0,
+            "signal": "BUY",
+            "current_price": 95.0,
+        }
+    ]
+    _seed_scan(scan_id, 10000, portfolio)
+
+    _mock_schwab_prices(monkeypatch, {"NOACCT": 90.0})
+
+    result = spy_scanner.refresh_all_portfolio_prices(kind="equity")
+
+    assert "unassigned" in result["scans"]
+    assert _load_portfolio(scan_id)[0]["current_price"] == 90.0
