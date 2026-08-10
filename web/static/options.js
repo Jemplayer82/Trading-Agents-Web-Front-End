@@ -79,6 +79,17 @@ function updateOptAccountMeta() {
   meta.textContent = `$${(acct.starting_capital || 100000).toLocaleString()} · Aggressiveness ${acct.aggressiveness}/10 · ${biasLabel}`;
 }
 
+function optStopSummary(a) {
+  const t = a.stop_type || "none";
+  if (t === "none") return "no stop";
+  const v = a.stop_value;
+  if (t === "stop") return `stop ${v}%`;
+  if (t === "stop_limit") return `stop ${v}% / limit ${a.stop_limit_offset ?? 0}%`;
+  if (t === "trailing_pct") return `trail ${v}%`;
+  if (t === "trailing_dollar") return `trail $${v}`;
+  return t;
+}
+
 function renderOptAccountsModal() {
   const list = $("opt-accounts-list");
   if (!list) return;
@@ -88,13 +99,14 @@ function renderOptAccountsModal() {
   }
   list.innerHTML = optAccounts.map((a) => {
     const biasLabel = { bullish: "Bullish", neutral: "Neutral", bearish: "Bearish" }[a.bias] || a.bias;
+    const schedule = a.schedule_time ? escapeHtml(a.schedule_time) : "manual";
     return (
       "<div style=\"display:flex;align-items:center;gap:10px;padding:8px;border:1px solid var(--panel-border);border-radius:3px;margin-bottom:6px;\">" +
         "<div style=\"flex:1;\">" +
           "<strong>" + escapeHtml(a.name) + "</strong>" +
           "<span class=\"dim\" style=\"font-size:11px;margin-left:8px;\">" +
             "$" + (a.starting_capital || 100000).toLocaleString() + " · " +
-            "Agg " + a.aggressiveness + "/10 · " + biasLabel +
+            "Agg " + a.aggressiveness + "/10 · " + biasLabel + " · " + schedule + " · " + optStopSummary(a) +
           "</span>" +
         "</div>" +
         "<button type=\"button\" class=\"ghost\" style=\"font-size:11px;padding:3px 8px;\" " +
@@ -127,11 +139,16 @@ function populateOptAccountForm(acct) {
   document.querySelectorAll("#opt-new-bias .bias-btn").forEach((x) => {
     x.classList.toggle("active", x.dataset.val === bias);
   });
+  if ($("opt-new-schedule")) $("opt-new-schedule").value = acct.schedule_time || "";
+  if ($("opt-new-stop-type")) $("opt-new-stop-type").value = acct.stop_type || "none";
+  if ($("opt-new-stop-value")) $("opt-new-stop-value").value = acct.stop_value == null ? "" : acct.stop_value;
+  if ($("opt-new-stop-offset")) $("opt-new-stop-offset").value = acct.stop_limit_offset == null ? "" : acct.stop_limit_offset;
+  stopFieldVisibility("opt-new");
 }
 
 function resetOptAccountForm() {
   editingOptAccountId = null;
-  populateOptAccountForm({ name: "", starting_capital: 100000, aggressiveness: 5, bias: "neutral" });
+  populateOptAccountForm({ name: "", starting_capital: 100000, aggressiveness: 5, bias: "neutral", schedule_time: "07:30", stop_type: "none", stop_value: null, stop_limit_offset: null });
   const btn = $("btn-create-opt-account");
   if (btn) btn.textContent = "Create Account";
 }
@@ -154,7 +171,32 @@ async function saveOptAccount() {
   const agg = parseInt(($("opt-new-agg") || {}).value || "5", 10);
   const activeBiasBtn = document.querySelector("#opt-new-bias .bias-btn.active");
   const bias = activeBiasBtn?.dataset?.val || "neutral";
-  const body = JSON.stringify({ name, starting_capital: capital, aggressiveness: agg, bias, kind: "options" });
+
+  const sched = ($("opt-new-schedule") || {}).value || "";
+  const stopType = ($("opt-new-stop-type") || {}).value || "none";
+  const stopValue = ($("opt-new-stop-value") || {}).value || "";
+  const stopOffset = ($("opt-new-stop-offset") || {}).value || "";
+
+  if (stopType !== "none") {
+    const sv = parseFloat(stopValue);
+    if (isNaN(sv) || sv <= 0) { alert("Enter a positive stop value."); return; }
+  }
+  if (stopType === "stop_limit") {
+    const so = parseFloat(stopOffset);
+    if (isNaN(so) || so <= 0) { alert("Enter a positive limit offset."); return; }
+  }
+
+  const body = JSON.stringify({
+    name,
+    starting_capital: capital,
+    aggressiveness: agg,
+    bias,
+    kind: "options",
+    schedule_time: sched,
+    stop_type: stopType,
+    stop_value: stopType === "none" ? null : parseFloat(stopValue),
+    stop_limit_offset: stopType === "stop_limit" ? parseFloat(stopOffset) : null,
+  });
   try {
     if (editingOptAccountId) {
       await apiFetch("/api/paper-accounts/" + editingOptAccountId, {
@@ -921,6 +963,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (modal) modal.addEventListener("click", (e) => { if (e.target === modal) closeManageOptAccounts(); });
   const createBtn = $("btn-create-opt-account");
   if (createBtn) createBtn.addEventListener("click", saveOptAccount);
+  document.getElementById("opt-new-stop-type")?.addEventListener("change", () => stopFieldVisibility("opt-new"));
 
   const aggSlider = $("opt-new-agg");
   if (aggSlider) {

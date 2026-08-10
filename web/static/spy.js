@@ -90,6 +90,17 @@ function updateAccountMeta() {
   meta.textContent = `$${(acct.starting_capital || 100000).toLocaleString()} · Aggressiveness ${acct.aggressiveness}/10 · ${biasLabel}`;
 }
 
+function stopSummary(a) {
+  const t = a.stop_type || "none";
+  if (t === "none") return "no stop";
+  const v = a.stop_value;
+  if (t === "stop") return `stop ${v}%`;
+  if (t === "stop_limit") return `stop ${v}% / limit ${a.stop_limit_offset ?? 0}%`;
+  if (t === "trailing_pct") return `trail ${v}%`;
+  if (t === "trailing_dollar") return `trail $${v}`;
+  return t;
+}
+
 function renderAccountsModal() {
   const list = $("paper-accounts-list");
   if (!list) return;
@@ -99,13 +110,14 @@ function renderAccountsModal() {
   }
   list.innerHTML = paperAccounts.map((a) => {
     const biasLabel = { bullish: "Bullish", neutral: "Neutral", bearish: "Bearish" }[a.bias] || a.bias;
+    const schedule = a.schedule_time ? escapeHtml(a.schedule_time) : "manual";
     return (
       "<div style=\"display:flex;align-items:center;gap:10px;padding:8px;border:1px solid var(--panel-border);border-radius:3px;margin-bottom:6px;\">" +
         "<div style=\"flex:1;\">" +
           "<strong>" + escapeHtml(a.name) + "</strong>" +
           "<span class=\"dim\" style=\"font-size:11px;margin-left:8px;\">" +
             "$" + (a.starting_capital || 100000).toLocaleString() + " · " +
-            "Agg " + a.aggressiveness + "/10 · " + biasLabel +
+            "Agg " + a.aggressiveness + "/10 · " + biasLabel + " · " + schedule + " · " + stopSummary(a) +
           "</span>" +
         "</div>" +
         "<button type=\"button\" class=\"ghost\" style=\"font-size:11px;padding:3px 8px;\" " +
@@ -139,12 +151,17 @@ function populateAccountForm(acct) {
   document.querySelectorAll("#new-acct-bias .bias-btn").forEach((x) => {
     x.classList.toggle("active", x.dataset.val === bias);
   });
+  if ($("new-acct-schedule")) $("new-acct-schedule").value = acct.schedule_time || "";
+  if ($("new-acct-stop-type")) $("new-acct-stop-type").value = acct.stop_type || "none";
+  if ($("new-acct-stop-value")) $("new-acct-stop-value").value = acct.stop_value == null ? "" : acct.stop_value;
+  if ($("new-acct-stop-offset")) $("new-acct-stop-offset").value = acct.stop_limit_offset == null ? "" : acct.stop_limit_offset;
+  stopFieldVisibility("new-acct");
 }
 
 // Clear the form back to "create" defaults.
 function resetAccountForm() {
   editingAccountId = null;
-  populateAccountForm({ name: "", starting_capital: 100000, aggressiveness: 5, bias: "neutral" });
+  populateAccountForm({ name: "", starting_capital: 100000, aggressiveness: 5, bias: "neutral", schedule_time: "00:00", stop_type: "none", stop_value: null, stop_limit_offset: null });
   const btn = $("btn-create-account");
   if (btn) btn.textContent = "Create Account";
 }
@@ -169,7 +186,31 @@ async function savePaperAccount() {
   const agg = parseInt(($("new-acct-agg") || {}).value || "5", 10);
   const activeBiasBtn = document.querySelector("#new-acct-bias .bias-btn.active");
   const bias = activeBiasBtn?.dataset?.val || "neutral";
-  const body = JSON.stringify({ name, starting_capital: capital, aggressiveness: agg, bias });
+
+  const sched = ($("new-acct-schedule") || {}).value || "";
+  const stopType = ($("new-acct-stop-type") || {}).value || "none";
+  const stopValue = ($("new-acct-stop-value") || {}).value || "";
+  const stopOffset = ($("new-acct-stop-offset") || {}).value || "";
+
+  if (stopType !== "none") {
+    const sv = parseFloat(stopValue);
+    if (isNaN(sv) || sv <= 0) { alert("Enter a positive stop value."); return; }
+  }
+  if (stopType === "stop_limit") {
+    const so = parseFloat(stopOffset);
+    if (isNaN(so) || so <= 0) { alert("Enter a positive limit offset."); return; }
+  }
+
+  const body = JSON.stringify({
+    name,
+    starting_capital: capital,
+    aggressiveness: agg,
+    bias,
+    schedule_time: sched,
+    stop_type: stopType,
+    stop_value: stopType === "none" ? null : parseFloat(stopValue),
+    stop_limit_offset: stopType === "stop_limit" ? parseFloat(stopOffset) : null,
+  });
 
   try {
     if (editingAccountId) {
@@ -840,6 +881,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // New account form inside modal
   const createBtn = $("btn-create-account");
   if (createBtn) createBtn.addEventListener("click", savePaperAccount);
+  document.getElementById("new-acct-stop-type")?.addEventListener("change", () => stopFieldVisibility("new-acct"));
 
   // New account aggressiveness slider live label
   const newAggSlider = $("new-acct-agg");
