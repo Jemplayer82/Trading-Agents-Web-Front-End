@@ -123,6 +123,11 @@ SETTINGS_REGISTRY: list[dict[str, Any]] = [
     # Notifications
     {"key": "FRED_NOTIFY_URL", "label": "Notify Webhook URL", "group": "Notifications", "secret": True, "placeholder": "WhatsApp/webhook URL (leave blank to disable)"},  # pragma: allowlist secret
     # TIER:2 BEGIN
+    # Automation schedule — time-of-day for the nightly Schwab portfolio scan
+    # (Mon-Fri, SCHEDULER_TIMEZONE). Read at reconcile time by web/scheduler.py,
+    # so a change takes effect within ~60s with no container restart. Per-paper-
+    # account scan times live on paper_accounts.schedule_time instead.
+    {"key": "SCHEDULE_NIGHTLY_SCAN_TIME", "label": "Nightly portfolio scan time (ET, HH:MM)", "group": "Automation Schedule", "secret": False, "type": "text", "placeholder": "22:00 — 24-hour HH:MM, Mon-Fri; blank uses 22:00"},  # pragma: allowlist secret
     # Brokerage (Schwab) — data-source switch
     {"key": "SCHWAB_ENABLED", "label": "Data source — Schwab MCP (on) vs free built-in tools (off)", "group": "Brokerage (Schwab)", "secret": False, "type": "toggle", "on_label": "On — Schwab", "off_label": "Off — free / yfinance", "placeholder": "on = Schwab holdings + market data; off hides holdings and uses free yfinance"},
     # Brokerage (Schwab OAuth app credentials)
