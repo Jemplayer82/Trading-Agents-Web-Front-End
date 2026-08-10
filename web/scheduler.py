@@ -38,6 +38,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from . import alerts, db, features
+from . import account_policy
 from . import credentials as creds
 from ._logging import configure_logging
 
@@ -69,11 +70,44 @@ _schwab_last_connected: bool | None = None
 _schwab_down_since: datetime | None = None
 _schwab_last_alert_at: datetime | None = None
 
+NIGHTLY_SCAN_TIME_SETTING = "SCHEDULE_NIGHTLY_SCAN_TIME"
+DEFAULT_NIGHTLY_SCAN_TIME = (22, 0)
+RECONCILE_JOB_ID = "schedule_reconciler"
+_ACCOUNT_JOB_PREFIXES = ("spy_scan_acct_", "options_scan_acct_")
+
 
 def _internal_headers() -> dict[str, str]:
     """Auth bypass header so cron calls pass the api/portfolio login gate."""
     tok = os.environ.get("INTERNAL_API_TOKEN")
     return {"X-Internal-Token": tok} if tok else {}
+
+
+def nightly_scan_time() -> tuple[int, int]:
+    """Fire time for job_nightly_scan: DB setting, then env, then 22:00.
+
+    Read at CALL time (not import time) so the reconciler picks up a change the
+    user saved in the dashboard without a container restart. Never raises.
+    """
+    stored_value = None
+    try:
+        stored_value = db.get_app_setting(NIGHTLY_SCAN_TIME_SETTING)
+    except Exception:
+        log.exception("[schedule] DB nightly scan time read failed; falling back to env/default")
+    if stored_value is not None and stored_value.strip():
+        parsed = account_policy.parse_hhmm(stored_value)
+        if parsed is not None:
+            return parsed
+        log.warning(
+            "[schedule] stored nightly scan time %r is malformed; using default %s:%02d",
+            stored_value,
+            *DEFAULT_NIGHTLY_SCAN_TIME,
+        )
+        return DEFAULT_NIGHTLY_SCAN_TIME
+    env_value = os.environ.get(NIGHTLY_SCAN_TIME_SETTING)
+    parsed = account_policy.parse_hhmm(env_value)
+    if parsed is not None:
+        return parsed
+    return DEFAULT_NIGHTLY_SCAN_TIME
 
 
 def _apply_db_config() -> None:
@@ -247,6 +281,32 @@ def job_spy_scan() -> None:
         )
 
 
+def job_spy_scan_account(account_id: int) -> None:
+    """Weekly S&P 500 scan for ONE paper account."""
+    log.info("[spy_scan_acct_%d] firing account scan at %s", account_id, PORTFOLIO_URL)
+    try:
+        r = httpx.post(
+            f"{PORTFOLIO_URL}/api/spy-scan",
+            json={"account_id": account_id},
+            timeout=60,
+            headers=_internal_headers(),
+        )
+        log.info("[spy_scan_acct_%d] response %s: %s", account_id, r.status_code, r.text[:400])
+        if r.status_code >= 400:
+            alerts.notify(
+                f"⚠️ Weekly S&P 500 scan rejected for account {account_id} ({r.status_code}).",
+                r.text[:_ALERT_DETAIL_MAX],
+                link=DASHBOARD_URL,
+            )
+    except Exception as exc:
+        log.exception("[spy_scan_acct_%d] failed: %s", account_id, exc)
+        alerts.notify(
+            f"⚠️ Weekly S&P 500 scan failed to start for account {account_id}.",
+            str(exc),
+            link=DASHBOARD_URL,
+        )
+
+
 def job_spy_price_refresh() -> None:
     """Mark the latest SPY paper portfolio to market (also records signal flips)."""
     log.info("[spy_price_refresh] refreshing latest SPY scan prices")
@@ -273,6 +333,35 @@ def job_options_scan() -> None:
             log.info("[options_scan] response %s: %s", r.status_code, r.text[:400])
     except Exception as exc:
         log.exception("[options_scan] failed: %s", exc)
+
+
+def job_options_scan_account(account_id: int) -> None:
+    """Daily options build for ONE options paper account."""
+    log.info("[options_scan_acct_%d] firing options scan at %s", account_id, PORTFOLIO_URL)
+    try:
+        r = httpx.post(
+            f"{PORTFOLIO_URL}/api/options-scan",
+            json={"account_id": account_id},
+            timeout=60,
+            headers=_internal_headers(),
+        )
+        if r.status_code == 409:
+            log.info("[options_scan_acct_%d] skipped: %s", account_id, r.text[:200])
+        else:
+            log.info("[options_scan_acct_%d] response %s: %s", account_id, r.status_code, r.text[:400])
+            if r.status_code >= 400:
+                alerts.notify(
+                    f"⚠️ Daily options scan rejected for account {account_id} ({r.status_code}).",
+                    r.text[:_ALERT_DETAIL_MAX],
+                    link=DASHBOARD_URL,
+                )
+    except Exception as exc:
+        log.exception("[options_scan_acct_%d] failed: %s", account_id, exc)
+        alerts.notify(
+            f"⚠️ Daily options scan failed to start for account {account_id}.",
+            str(exc),
+            link=DASHBOARD_URL,
+        )
 
 
 def job_options_refresh() -> None:
@@ -359,6 +448,128 @@ def job_options_grade() -> None:
             log.info("[options_grade] no options accounts — nothing to grade")
     except Exception:
         log.exception("[options_grade] crashed")
+
+
+_ACCOUNT_JOBS = {
+    # kind -> (job-id template, job function, FIXED day-of-week)
+    "equity":  ("spy_scan_acct_{}",     job_spy_scan_account,     "sat"),
+    "options": ("options_scan_acct_{}", job_options_scan_account, "mon-fri"),
+}
+
+
+def job_reconcile_schedules(sched) -> None:
+    """Sync APScheduler with per-account schedule_time + the nightly-scan setting.
+
+    Runs every 60s so a schedule edited in the dashboard takes effect without a
+    container restart. Must never raise: a malformed stored time is logged and
+    that account skipped, and a DB failure aborts this pass only.
+    """
+    try:
+        try:
+            accounts = db.list_paper_accounts()
+        except Exception:
+            log.exception("[schedule] failed to list paper accounts; aborting reconcile pass")
+            return
+
+        wanted: dict[str, tuple] = {}
+        for acct in accounts:
+            aid = acct.get("id")
+            kind = acct.get("kind")
+            schedule_time = acct.get("schedule_time")
+            if kind not in _ACCOUNT_JOBS:
+                continue
+            if not schedule_time:
+                continue
+            if kind == "options" and not features.enabled("options"):
+                continue
+            if kind == "equity" and not features.enabled("sp500"):
+                continue
+            parsed = account_policy.parse_hhmm(schedule_time)
+            if parsed is None:
+                if str(schedule_time).strip():
+                    log.warning(
+                        "[schedule] account %s has malformed schedule_time %r — skipped",
+                        aid,
+                        schedule_time,
+                    )
+                continue
+            hour, minute = parsed
+            template, func, dow = _ACCOUNT_JOBS[kind]
+            job_id = template.format(aid)
+            wanted[job_id] = (func, hour, minute, dow, aid)
+
+        for job_id, (func, hour, minute, dow, aid) in wanted.items():
+            try:
+                trigger = CronTrigger(day_of_week=dow, hour=hour, minute=minute, timezone=TIMEZONE)
+                existing = sched.get_job(job_id)
+                if existing is None or str(existing.trigger) != str(trigger):
+                    if existing is not None:
+                        # add_job(replace_existing=True) only replaces jobs already
+                        # in a jobstore. On a scheduler that hasn't started yet,
+                        # add_job() just appends to an in-memory pending-jobs list
+                        # without deduping by id, so replace_existing silently
+                        # no-ops there and get_job() keeps returning the stale
+                        # trigger. Removing first makes the update unconditional.
+                        try:
+                            sched.remove_job(job_id)
+                        except Exception:
+                            log.exception("[schedule] failed to remove stale trigger for %s before re-add", job_id)
+                    sched.add_job(func, trigger, args=[aid], id=job_id, replace_existing=True)
+                    log.info(
+                        "[schedule] added/updated job %s (%s %02d:%02d %s)",
+                        job_id,
+                        dow,
+                        hour,
+                        minute,
+                        TIMEZONE,
+                    )
+            except Exception:
+                log.exception("[schedule] failed to add job %s", job_id)
+
+        try:
+            for existing in sched.get_jobs():
+                job_id = existing.id
+                if job_id.startswith(_ACCOUNT_JOB_PREFIXES) and job_id not in wanted:
+                    try:
+                        sched.remove_job(job_id)
+                        log.info("[schedule] removed stale job %s", job_id)
+                    except Exception:
+                        log.exception("[schedule] failed to remove job %s", job_id)
+        except Exception:
+            log.exception("[schedule] failed to enumerate jobs during stale removal")
+
+        if features.enabled("schwab"):
+            try:
+                existing = sched.get_job("nightly_scan")
+                if existing is not None:
+                    hour, minute = nightly_scan_time()
+                    trigger = CronTrigger(
+                        day_of_week="mon-fri", hour=hour, minute=minute, timezone=TIMEZONE
+                    )
+                    if str(existing.trigger) != str(trigger):
+                        # Same pending-jobs caveat as the per-account loop above:
+                        # remove before re-add so the update takes effect even on
+                        # a not-yet-started scheduler.
+                        try:
+                            sched.remove_job("nightly_scan")
+                        except Exception:
+                            log.exception("[schedule] failed to remove stale nightly_scan trigger before re-add")
+                        sched.add_job(
+                            job_nightly_scan,
+                            trigger,
+                            id="nightly_scan",
+                            replace_existing=True,
+                        )
+                        log.info(
+                            "[schedule] updated nightly_scan to %02d:%02d %s",
+                            hour,
+                            minute,
+                            TIMEZONE,
+                        )
+            except Exception:
+                log.exception("[schedule] failed to reconcile nightly_scan")
+    except Exception:
+        log.exception("[schedule] reconcile pass crashed")
 
 
 # Tickers that are always worth an LLM reflection regardless of holdings.
