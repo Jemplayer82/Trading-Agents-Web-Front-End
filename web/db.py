@@ -14,7 +14,7 @@ Tables:
   users                - dashboard login accounts (username + pbkdf2 hash)
   sessions             - active login sessions (cookie token -> username)
   login_attempts       - failed dashboard logins (brute-force throttling)
-  analyses             - one row per single-ticker analysis
+  analyses               - one row per single-ticker analysis
   portfolio_scans      - one row per nightly portfolio sweep (Schwab)
   portfolio_tickers    - join row connecting a scan to the analyses it generated
   spy_scans            - one row per weekly S&P 500 scanner run
@@ -51,6 +51,17 @@ _HOME = Path(os.path.expanduser("~")) / ".tradingagents"
 # `tradingagents_data` volume in production. Override (e.g. in tests) via
 # the TRADINGAGENTS_WEB_DB env var.
 DB_PATH = Path(os.environ.get("TRADINGAGENTS_WEB_DB", str(_HOME / "web.db")))
+
+
+class _Unset:
+    """Sentinel: 'caller did not supply this field'. Distinct from None, which
+    means 'explicitly set this column to NULL'."""
+    __slots__ = ()
+    def __repr__(self) -> str:  # pragma: no cover - debug aid
+        return "UNSET"
+
+
+UNSET: Any = _Unset()
 
 
 SCHEMA = """
@@ -225,6 +236,9 @@ CREATE TABLE IF NOT EXISTS ticker_info (
 
 -- Named paper trading accounts for S&P 500 scans (kind 'equity') and the
 -- daily options paper trader (kind 'options').
+-- schedule_time is "HH:MM" 24-hour in the scheduler's timezone, NULL meaning
+-- manual-only; the stop_* columns are the per-account simulated stop policy
+-- (see web/account_policy.py).
 CREATE TABLE IF NOT EXISTS paper_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
@@ -232,7 +246,11 @@ CREATE TABLE IF NOT EXISTS paper_accounts (
     aggressiveness INTEGER NOT NULL DEFAULT 5,
     bias TEXT NOT NULL DEFAULT 'neutral',
     created_at TEXT NOT NULL,
-    kind TEXT NOT NULL DEFAULT 'equity'
+    kind TEXT NOT NULL DEFAULT 'equity',
+    schedule_time TEXT,
+    stop_type TEXT NOT NULL DEFAULT 'none',
+    stop_value REAL,
+    stop_limit_offset REAL
 );
 
 -- One row per paper option contract position over its whole life. Unlike the
@@ -277,7 +295,8 @@ CREATE TABLE IF NOT EXISTS options_positions (
     stale_count INTEGER DEFAULT 0,
     data_source TEXT,
     exit_underlying REAL,
-    exit_underlying_source TEXT
+    exit_underlying_source TEXT,
+    stop_triggered_at TEXT  -- set when a stop-limit trigger fired but the mark gapped below the limit price, so a resting fill is still pending
 );
 
 CREATE INDEX IF NOT EXISTS idx_options_positions_acct
@@ -360,21 +379,46 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
     # are safe to copy (see web/spy_scanner.py _quick_scan_fingerprint).
     ("spy_scans", "quick_fingerprint", "TEXT"),
     ("spy_scans", "deep_reused_count", "INTEGER DEFAULT 0"),
+    # Per-account scheduled scan time and simulated stop policy.
+    ("paper_accounts", "schedule_time", "TEXT"),
+    ("paper_accounts", "stop_type", "TEXT NOT NULL DEFAULT 'none'"),
+    ("paper_accounts", "stop_value", "REAL"),
+    ("paper_accounts", "stop_limit_offset", "REAL"),
+    # Stop-limit arm timestamp: trigger fired but the mark gapped through the
+    # limit price, so a resting fill is still pending.
+    ("options_positions", "stop_triggered_at", "TEXT"),
 ]
 
 
-def _run_column_migrations(conn: sqlite3.Connection) -> None:
+# Backfills that run exactly once — on the boot where the column is added.
+# Keyed on the ALTER firing, NOT on a NULL check: a NULL check would re-fill a
+# schedule the user deliberately cleared, every boot, forever.
+_POST_MIGRATION_BACKFILLS: list[tuple[tuple[str, str], str]] = [
+    (("paper_accounts", "schedule_time"),
+     "UPDATE paper_accounts SET schedule_time = CASE WHEN kind = 'options' THEN '07:30' ELSE '00:00' END"),
+    (("paper_accounts", "stop_type"),
+     "UPDATE paper_accounts SET stop_type = 'stop' WHERE kind = 'options'"),
+    (("paper_accounts", "stop_value"),
+     "UPDATE paper_accounts SET stop_value = 60 WHERE kind = 'options'"),
+]
+
+
+def _run_column_migrations(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    applied: set[tuple[str, str]] = set()
     for table, column, decl in _COLUMN_MIGRATIONS:
         cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
         if column not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            applied.add((table, column))
+    return applied
 
 
 def init_db() -> None:
     """Create-or-upgrade the database. Runs on every container boot; idempotent.
 
-    Order matters: base schema first, then additive column migrations, then a
-    one-time re-encrypt of any plaintext secret rows (no-op without a key).
+    Order matters: base schema first, then additive column migrations, then any
+    one-time backfills keyed on those migrations, then a one-time re-encrypt of
+    any plaintext secret rows (no-op without a key).
     """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     # Surface a malformed TOKEN_ENCRYPTION_KEY immediately, before any request
@@ -382,7 +426,10 @@ def init_db() -> None:
     secret_box.validate_key()
     with connect() as conn:
         conn.executescript(SCHEMA)
-        _run_column_migrations(conn)
+        applied = _run_column_migrations(conn)
+        for (table, column), sql in _POST_MIGRATION_BACKFILLS:
+            if (table, column) in applied:
+                conn.execute(sql)
         _encrypt_existing_secrets(conn)
     # The DB holds API keys, OAuth secrets and password hashes — keep it readable
     # only by the owning service account, not world/group (umask can leave it 644).
@@ -534,7 +581,8 @@ def set_app_setting(key: str, value: str) -> None:
 def get_app_setting(key: str) -> str | None:
     with connect() as conn:
         row = conn.execute(
-            "SELECT value FROM app_settings WHERE key = ?", (key,)
+            "SELECT value FROM app_settings WHERE key = ?",
+            (key,)
         ).fetchone()
     return secret_box.decrypt_secret(row["value"]) if row else None
 
@@ -1497,6 +1545,12 @@ def set_ticker_info(ticker: str, name: str | None, website: str | None) -> None:
 
 
 # ---------- paper trading accounts ----------
+_PAPER_ACCOUNT_COLUMNS = (
+    "id", "name", "starting_capital", "aggressiveness", "bias", "created_at",
+    "kind", "schedule_time", "stop_type", "stop_value", "stop_limit_offset",
+)
+_PAPER_ACCOUNT_SELECT = ", ".join(_PAPER_ACCOUNT_COLUMNS)
+
 
 def create_paper_account(
     name: str,
@@ -1504,13 +1558,22 @@ def create_paper_account(
     aggressiveness: int = 5,
     bias: str = "neutral",
     kind: str = "equity",
+    schedule_time: str | None = None,
+    stop_type: str = "none",
+    stop_value: float | None = None,
+    stop_limit_offset: float | None = None,
 ) -> int:
-    """Create a named paper account. Raises sqlite3.IntegrityError if name exists."""
+    """Create a named paper account. Raises sqlite3.IntegrityError if name exists.
+
+    No validation or defaulting here — the routes own policy validation.
+    """
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO paper_accounts (name, starting_capital, aggressiveness, bias, created_at, kind) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO paper_accounts (name, starting_capital, aggressiveness, bias, created_at, kind, schedule_time, stop_type, stop_value, stop_limit_offset) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (name, starting_capital, aggressiveness, bias,
-             datetime.utcnow().isoformat(timespec="seconds") + "Z", kind),
+             datetime.utcnow().isoformat(timespec="seconds") + "Z", kind,
+             schedule_time, stop_type, stop_value, stop_limit_offset),
         )
         return int(cur.lastrowid)
 
@@ -1519,14 +1582,12 @@ def list_paper_accounts(kind: str | None = None) -> list[dict[str, Any]]:
     with connect() as conn:
         if kind is not None:
             rows = conn.execute(
-                "SELECT id, name, starting_capital, aggressiveness, bias, created_at, kind "
-                "FROM paper_accounts WHERE kind = ? ORDER BY id",
+                f"SELECT {_PAPER_ACCOUNT_SELECT} FROM paper_accounts WHERE kind = ? ORDER BY id",
                 (kind,),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT id, name, starting_capital, aggressiveness, bias, created_at, kind "
-                "FROM paper_accounts ORDER BY id"
+                f"SELECT {_PAPER_ACCOUNT_SELECT} FROM paper_accounts ORDER BY id"
             ).fetchall()
     return [dict(r) for r in rows]
 
@@ -1534,8 +1595,7 @@ def list_paper_accounts(kind: str | None = None) -> list[dict[str, Any]]:
 def get_paper_account(account_id: int) -> dict[str, Any] | None:
     with connect() as conn:
         row = conn.execute(
-            "SELECT id, name, starting_capital, aggressiveness, bias, created_at, kind "
-            "FROM paper_accounts WHERE id = ?",
+            f"SELECT {_PAPER_ACCOUNT_SELECT} FROM paper_accounts WHERE id = ?",
             (account_id,),
         ).fetchone()
     return dict(row) if row else None
@@ -1543,20 +1603,36 @@ def get_paper_account(account_id: int) -> dict[str, Any] | None:
 
 def update_paper_account(
     account_id: int,
-    name: str | None = None,
-    starting_capital: float | None = None,
-    aggressiveness: int | None = None,
-    bias: str | None = None,
+    name: str | Any = UNSET,
+    starting_capital: float | Any = UNSET,
+    aggressiveness: int | Any = UNSET,
+    bias: str | Any = UNSET,
+    schedule_time: str | None | Any = UNSET,
+    stop_type: str | Any = UNSET,
+    stop_value: float | None | Any = UNSET,
+    stop_limit_offset: float | None | Any = UNSET,
 ) -> bool:
+    """Update one or more paper_account columns. Pass None to NULL a column;
+    omit the argument (or pass UNSET) to leave it untouched. Returns True if
+    the row existed, False otherwise. With no fields to change, returns True.
+    """
     sets, vals = [], []
-    if name is not None:
+    if name is not UNSET:
         sets.append("name = ?"); vals.append(name)
-    if starting_capital is not None:
+    if starting_capital is not UNSET:
         sets.append("starting_capital = ?"); vals.append(starting_capital)
-    if aggressiveness is not None:
+    if aggressiveness is not UNSET:
         sets.append("aggressiveness = ?"); vals.append(aggressiveness)
-    if bias is not None:
+    if bias is not UNSET:
         sets.append("bias = ?"); vals.append(bias)
+    if schedule_time is not UNSET:
+        sets.append("schedule_time = ?"); vals.append(schedule_time)
+    if stop_type is not UNSET:
+        sets.append("stop_type = ?"); vals.append(stop_type)
+    if stop_value is not UNSET:
+        sets.append("stop_value = ?"); vals.append(stop_value)
+    if stop_limit_offset is not UNSET:
+        sets.append("stop_limit_offset = ?"); vals.append(stop_limit_offset)
     if not sets:
         return True
     vals.append(account_id)
@@ -1855,6 +1931,22 @@ def mark_options_position(
             (round(float(premium), 4), round(float(value), 2), round(float(premium), 4),
              now, price_source, position_id),
         )
+
+
+def arm_options_stop_limit(position_id: int, when: str | None = None) -> bool:
+    """Mark a stop-limit trigger that could not fill yet.
+
+    The next refresh fills it at the limit price. Idempotent: only the FIRST
+    arming timestamp is kept.
+    """
+    stamp = when or (datetime.utcnow().isoformat(timespec="seconds") + "Z")
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE options_positions SET stop_triggered_at = ? "
+            "WHERE id = ? AND status = 'open' AND stop_triggered_at IS NULL",
+            (stamp, position_id),
+        )
+    return cur.rowcount > 0
 
 
 def bump_options_position_stale(position_id: int) -> int:
