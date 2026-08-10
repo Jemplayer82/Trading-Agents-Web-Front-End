@@ -67,7 +67,7 @@ from tradingagents.dataflows.config import set_config
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.orchestrator import SwitchboardOrchestrator
 
-from . import db, market_cache, account_policy
+from . import account_policy, db, market_cache
 from .llm_helpers import DynamicGate, _GateMonitor, _total_budget, llm_for
 
 log = logging.getLogger(__name__)

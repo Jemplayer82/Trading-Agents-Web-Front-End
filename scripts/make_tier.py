@@ -71,6 +71,7 @@ TIER_ONLY_FILES: dict[int, list[str]] = {
         "tests/test_options_recommend.py",
         "tests/test_options_scan_health.py",
         "tests/test_options_market_wait.py",
+        "tests/test_opt_account_form_js.py",
     ],
     3: [
         "web/spy_tickers.py",
@@ -109,7 +110,6 @@ TIER_ONLY_FILES: dict[int, list[str]] = {
         "tests/test_portfolio_schedule_js.py",
         "tests/test_clear_history_portfolio.py",
         "tests/test_scan_queue.py",
-        "tests/test_opt_account_form_js.py",
     ],
 }
 
@@ -268,7 +268,9 @@ def lint() -> int:
     for path in ROOT.rglob("*"):
         if not path.is_file() or path in marked_set:
             continue
-        if any(part in (".git", ".venv", "__pycache__", "node_modules") for part in path.parts):
+        if any(part in (".git", ".venv", "__pycache__", "node_modules", ".pipeline") for part in path.parts):
+            continue
+        if any(part.endswith(".egg-info") for part in path.parts):
             continue
         try:
             text = path.read_text(encoding="utf-8")

@@ -303,7 +303,7 @@ def run(
     )
     if forced:
         user += _FORCED_HEADER
-        for p, reason, fill in forced:
+        for p, reason, _fill in forced:
             user += f"{_display(p)} | x{p.get('contracts')} | {reason} | P&L {_pnl_pct(p):+.0f}%\n"
     user += _OPEN_HEADER.format(n=len(remaining))
     if not remaining:

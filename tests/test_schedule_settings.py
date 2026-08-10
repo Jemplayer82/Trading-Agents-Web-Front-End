@@ -1,4 +1,5 @@
 import pytest
+
 from web import credentials, db
 
 _KEYS = {s["key"] for s in credentials.SETTINGS_REGISTRY}

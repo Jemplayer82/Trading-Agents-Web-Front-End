@@ -36,7 +36,16 @@ import yfinance as yf
 
 from tradingagents.dataflows import schwab_mcp
 
-from . import account_policy, db, market_cache, options_allocator, options_data, options_learning, scan_queue, spy_scanner
+from . import (
+    account_policy,
+    db,
+    market_cache,
+    options_allocator,
+    options_data,
+    options_learning,
+    scan_queue,
+    spy_scanner,
+)
 from .runner import build_config
 from .spy_tickers import get_sp500_tickers
 

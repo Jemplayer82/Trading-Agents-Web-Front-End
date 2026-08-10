@@ -141,7 +141,7 @@ def test_reconcile_updates_existing_job(tmp_db):
 
 def test_reconcile_twice_no_duplicate(tmp_db, monkeypatch):
     sched = BackgroundScheduler(timezone=scheduler.TIMEZONE)
-    aid = _create_account("equity", "09:30")
+    _create_account("equity", "09:30")
     scheduler.job_reconcile_schedules(sched)
     assert len(sched.get_jobs()) == 1
 

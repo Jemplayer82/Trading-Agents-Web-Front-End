@@ -13,8 +13,9 @@ This module imports only the Python stdlib and nothing from `web/`.
 """
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 __all__ = [
     "STOP_TYPES",

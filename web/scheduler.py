@@ -38,8 +38,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from . import alerts, db, features
-from . import account_policy
+from . import account_policy, alerts, db, features
 from . import credentials as creds
 from ._logging import configure_logging
 
