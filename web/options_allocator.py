@@ -4,8 +4,9 @@ Turns vetted contract candidates + currently open positions into a decision
 set: NEW (buy contracts), HOLD, CLOSE. One quick-LLM call, wrapped in hard code
 guardrails on both sides:
 
-  pre-LLM  — force-CLOSE any open position at DTE <= DTE_FLOOR or with premium
-             down >= STOP_LOSS_PCT (the LLM never gets to argue with these);
+  pre-LLM  — force-CLOSE any open position at DTE <= DTE_FLOOR or that has
+             violated the account's configured stop policy (the LLM never
+             gets to argue with these);
   post-LLM — per-position and total-premium caps scaled by aggressiveness,
              MAX_OPEN_POSITIONS, affordability (never spend past cash), and a
              deterministic conviction-ranked fallback if the call or its JSON
@@ -30,14 +31,13 @@ from typing import Any
 
 from tradingagents.default_config import DEFAULT_CONFIG
 
-from . import options_data
+from . import account_policy, options_data
 from .llm_helpers import llm_for
 
 log = logging.getLogger(__name__)
 
 # ── Hard guardrails ──────────────────────────────────────────────────────────
 DTE_FLOOR = 3          # force-close at or below this many days to expiry
-STOP_LOSS_PCT = 0.60   # force-close when premium is down >= 60% from entry
 MAX_OPEN_POSITIONS = 15
 
 # aggressiveness tier -> (max % of equity per position, max % of equity deployed)
@@ -78,10 +78,8 @@ Hard limits (enforced in code — exceeding them just gets clamped):
 Judgment guidance:
 - Close losers whose thesis is broken; let winners run while the signal holds.
 - WINNERS RIDE: do not take profit in the first day or two just because a
-  position is green — a trailing stop already protects gains mechanically
-  (arms at +{trail_arm:.0f}%, then gives back {trail_give:.0f}% from the peak
-  before force-closing). Close a winner early only on a thesis break, a signal
-  flip, or DTE burning down toward the floor.
+  position is green. {stop_policy_text} Close a winner early only on a thesis
+  break, a signal flip, or DTE burning down toward the floor.
 - A position whose underlying flipped signal (e.g. long calls, now SELL) is a strong close.
 - Prefer fewer, higher-conviction positions over many small ones.
 
@@ -144,42 +142,47 @@ def _mark(pos: dict[str, Any]) -> float:
     return 0.0
 
 
-def effective_stop_level(pos: dict[str, Any]) -> tuple[float, str]:
-    """The stop that currently protects this position: (level, exit_reason).
+def effective_stop_level(
+    pos: dict[str, Any],
+    policy: account_policy.StopPolicy,
+    *,
+    prev_mark: float | None = None,
+) -> account_policy.StopOutcome:
+    """Apply the account's stop policy to one open position.
 
-    Base: entry * (1 - STOP_LOSS_PCT) — caps the loss on every position.
-    Trailing: once the peak mark has ARMED (peak >= entry * (1 + arm_pct)),
-    the stop ratchets up to peak * (1 - give_back), LOCKING gains — "let it
-    ride" means winners hold for days while healthy, not that a +80% win is
-    allowed to round-trip back to -60%. The trail only ever raises the level
-    (max with base); peak_premium is ratcheted by every mark and never falls.
+    The ONE place an options stop level is computed. Callers: forced_closes
+    (the daily allocator backstop — no interval notion, so prev_mark is None)
+    and options_engine._apply_intraday_stops (the hourly refresh, which passes
+    the pre-refresh mark so a level crossed this interval fills AT the level).
+    `armed` comes from the position's stop_triggered_at column (stop-limit
+    resting fill).
     """
-    entry = float(pos.get("entry_premium") or 0)
-    if entry <= 0:
-        return 0.0, "stop_loss"
-    base = entry * (1 - STOP_LOSS_PCT)
-    cfg = DEFAULT_CONFIG
-    if cfg.get("options_trailing_stop", True):
-        peak = max(float(pos.get("peak_premium") or 0), entry)
-        arm = float(cfg.get("options_trail_arm_pct", 0.50))
-        give = float(cfg.get("options_trail_give_back", 0.30))
-        if peak >= entry * (1 + arm):
-            trail = peak * (1 - give)
-            if trail > base:
-                return round(trail, 4), "trail_stop"
-    return round(base, 4), "stop_loss"
+    return account_policy.evaluate(
+        policy,
+        entry=float(pos.get("entry_premium") or 0),
+        peak=float(pos.get("peak_premium") or 0),
+        mark=_mark(pos),
+        prev_mark=prev_mark,
+        armed=bool(pos.get("stop_triggered_at")),
+    )
 
 
-def forced_closes(open_positions: list[dict[str, Any]]) -> list[tuple[dict[str, Any], str]]:
-    """(position, exit_reason) pairs the risk rules close regardless of the LLM."""
-    out: list[tuple[dict[str, Any], str]] = []
+def forced_closes(
+    open_positions: list[dict[str, Any]],
+    policy: account_policy.StopPolicy,
+) -> list[tuple[dict[str, Any], str, float]]:
+    """(position, exit_reason, exit_premium) triples the risk rules close regardless of the LLM."""
+    out: list[tuple[dict[str, Any], str, float]] = []
     for pos in open_positions:
+        # DTE floor is unconditional — never gated by stop_type.
         if _dte(pos.get("expiration_date") or "") <= DTE_FLOOR:
-            out.append((pos, "dte_floor"))
+            out.append((pos, "dte_floor", _mark(pos)))
             continue
-        level, reason = effective_stop_level(pos)
-        if level > 0 and _mark(pos) <= level:
-            out.append((pos, reason))
+        outcome = effective_stop_level(pos, policy)
+        # 'arm' outcomes are owned by the hourly refresh; the daily backstop
+        # must never fill a stop-limit below its limit price.
+        if outcome.action == "fill":
+            out.append((pos, outcome.exit_reason, outcome.fill_price))
     return out
 
 
@@ -247,6 +250,8 @@ def run(
     bias: str = "neutral",
     fresh_signals: dict[str, dict[str, Any]] | None = None,
     lessons_context: str = "",
+    *,
+    policy: account_policy.StopPolicy,
 ) -> dict[str, Any]:
     """Decide closes/holds/opens for one options account.
 
@@ -269,34 +274,36 @@ def run(
     total_cap = total_pct * equity
 
     # ── Pre-LLM hard guardrails ──────────────────────────────────────────────
-    forced = forced_closes(open_positions)
-    forced_ids = {id(p) for p, _ in forced}
+    forced = forced_closes(open_positions, policy)
+    forced_ids = {id(p) for p, _r, _f in forced}
     remaining = [p for p in open_positions if id(p) not in forced_ids]
 
     closes: list[dict[str, Any]] = [
         {"position_id": p["id"], "occ_symbol": p["occ_symbol"],
          "ticker": p.get("underlying"), "exit_reason": reason,
-         "exit_premium": _mark(p),
+         "exit_premium": fill,
          "rationale": ("DTE floor" if reason == "dte_floor"
-                       else "Trailing stop: locked gains after giving back from peak"
+                       else "Trailing stop: gave back too much from the peak premium"
                        if reason == "trail_stop"
+                       else "Stop-limit: triggered and filled at or above the limit"
+                       if reason == "stop_limit"
                        else f"Stop-loss: premium down {-_pnl_pct(p):.0f}% from entry")}
-        for p, reason in forced
+        for p, reason, fill in forced
     ]
 
     # Cash freed by forced closes is spendable today (closes apply before opens).
-    est_cash = cash + sum(_mark(p) * 100 * int(p.get("contracts") or 0) for p, _ in forced)
+    est_cash = cash + sum(fill * 100 * int(p.get("contracts") or 0) for p, _r, fill in forced)
     held_cost = sum(float(p.get("cost_basis") or 0) for p in remaining)
 
     # ── Build the prompt ─────────────────────────────────────────────────────
     user = _USER_HEADER.format(
         trade_date=trade_date, equity=equity, cash=cash,
-        at_risk=held_cost + sum(float(p.get("cost_basis") or 0) for p, _ in forced),
+        at_risk=held_cost + sum(float(p.get("cost_basis") or 0) for p, _r, _f in forced),
         realized=realized_pnl,
     )
     if forced:
         user += _FORCED_HEADER
-        for p, reason in forced:
+        for p, reason, fill in forced:
             user += f"{_display(p)} | x{p.get('contracts')} | {reason} | P&L {_pnl_pct(p):+.0f}%\n"
     user += _OPEN_HEADER.format(n=len(remaining))
     if not remaining:
@@ -328,8 +335,7 @@ def run(
         per_cap=per_cap, per_pct=per_pct * 100,
         total_cap=total_cap, total_pct=total_pct * 100,
         max_positions=MAX_OPEN_POSITIONS,
-        trail_arm=float(DEFAULT_CONFIG.get("options_trail_arm_pct", 0.50)) * 100,
-        trail_give=float(DEFAULT_CONFIG.get("options_trail_give_back", 0.30)) * 100,
+        stop_policy_text=account_policy.describe_policy(policy),
     )
 
     # ── LLM call (deterministic fallback on any failure) ─────────────────────

@@ -8,11 +8,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from web import options_allocator
+from web.account_policy import StopPolicy
 from web.options_allocator import forced_closes, position_caps, run
 
 pytestmark = pytest.mark.unit
 
 TODAY = date(2026, 7, 17)
+POLICY_STOP60 = StopPolicy("stop", 60.0)
 
 
 @pytest.fixture(autouse=True)
@@ -66,8 +68,8 @@ def _mock_llm(monkeypatch, payload):
 
 def test_forced_close_dte_floor():
     positions = [_pos(1, "AAPL  X", dte=2), _pos(2, "MSFT  X", dte=30)]
-    forced = forced_closes(positions)
-    assert [(p["id"], reason) for p, reason in forced] == [(1, "dte_floor")]
+    forced = forced_closes(positions, POLICY_STOP60)
+    assert [(p["id"], reason) for p, reason, fill in forced] == [(1, "dte_floor")]
 
 
 def test_forced_close_stop_loss():
@@ -75,8 +77,8 @@ def test_forced_close_stop_loss():
         _pos(1, "AAPL  X", entry=4.0, mark=1.55),  # -61% -> stopped
         _pos(2, "MSFT  X", entry=4.0, mark=1.70),  # -57% -> survives
     ]
-    forced = forced_closes(positions)
-    assert [(p["id"], reason) for p, reason in forced] == [(1, "stop_loss")]
+    forced = forced_closes(positions, POLICY_STOP60)
+    assert [(p["id"], reason) for p, reason, fill in forced] == [(1, "stop_loss")]
 
 
 def test_forced_close_stop_loss_at_zero_mark():
@@ -87,8 +89,8 @@ def test_forced_close_stop_loss_at_zero_mark():
     comparison could never fire on the worst possible position.
     """
     positions = [_pos(1, "AAPL  X", entry=4.0, mark=0.0)]
-    forced = forced_closes(positions)
-    assert [(p["id"], reason) for p, reason in forced] == [(1, "stop_loss")]
+    forced = forced_closes(positions, POLICY_STOP60)
+    assert [(p["id"], reason) for p, reason, fill in forced] == [(1, "stop_loss")]
 
 
 def test_forced_closes_precede_llm(monkeypatch):
@@ -98,9 +100,54 @@ def test_forced_closes_precede_llm(monkeypatch):
     _mock_llm(monkeypatch, [
         {"occ_symbol": stopped["occ_symbol"], "action": "HOLD", "rationale": "diamond hands"},
     ])
-    result = run([], [stopped], "2026-07-17", {}, equity=100_000, cash=99_000)
+    result = run([], [stopped], "2026-07-17", {}, equity=100_000, cash=99_000,
+                 policy=POLICY_STOP60)
     assert [c["exit_reason"] for c in result["closes"]] == ["stop_loss"]
     assert result["holds"] == []
+
+
+def test_forced_closes_trailing_pct():
+    """Trailing pct: 25% drawdown from peak closes; 15% drawdown survives."""
+    peak = 20.0
+    closes = [
+        _pos(1, "AAPL  X", entry=10.0, mark=15.0, peak_premium=peak, dte=30),  # 25% off peak
+        _pos(2, "MSFT  X", entry=10.0, mark=17.0, peak_premium=peak, dte=30),  # 15% off peak
+    ]
+    forced = forced_closes(closes, StopPolicy("trailing_pct", 20.0))
+    assert [(p["id"], reason) for p, reason, fill in forced] == [(1, "trail_stop")]
+
+
+def test_forced_closes_trailing_dollar():
+    pos = _pos(1, "AAPL  X", entry=10.0, mark=17.9, peak_premium=20.0, dte=30)
+    forced = forced_closes([pos], StopPolicy("trailing_dollar", 2.0))
+    assert [(p["id"], reason) for p, reason, fill in forced] == [(1, "trail_stop")]
+
+
+def test_forced_closes_stop_limit_filled_when_mark_at_limit():
+    pos = _pos(1, "AAPL  X", entry=10.0, mark=4.5, peak=10.0, dte=30,
+               stop_triggered_at="2026-07-17T10:00:00Z")
+    forced = forced_closes([pos], StopPolicy("stop_limit", 60.0))
+    assert [(p["id"], reason) for p, reason, fill in forced] == [(1, "stop_limit")]
+    assert forced[0][2] == pytest.approx(4.0)
+
+
+def test_forced_closes_stop_limit_not_filled_below_limit():
+    """A stop-limit resting fill must never be chased below its limit price."""
+    pos = _pos(1, "AAPL  X", entry=10.0, mark=3.9, peak=10.0, dte=30,
+               stop_triggered_at="2026-07-17T10:00:00Z")
+    forced = forced_closes([pos], StopPolicy("stop_limit", 60.0))
+    assert forced == []
+
+
+def test_forced_closes_dte_floor_overrides_none_policy():
+    """DTE floor closes even when stops are disabled; a deep loss under 'none'
+    is NOT force-closed."""
+    positions = [
+        _pos(1, "AAPL  X", entry=10.0, mark=3.0, peak=10.0, dte=3),
+        _pos(2, "MSFT  X", entry=10.0, mark=3.0, peak=10.0, dte=30),
+    ]
+    forced = forced_closes(positions, StopPolicy("none"))
+    assert [(p["id"], reason) for p, reason, fill in forced] == [(1, "dte_floor")]
 
 
 def test_position_caps_tiers():
@@ -123,7 +170,8 @@ def test_llm_decisions_parsed_and_clamped(monkeypatch):
         {"occ_symbol": "HALLU 260821C00001000", "action": "NEW", "contracts": 5},
     ])
     result = run([cand], [held, ignored], "2026-07-17", {},
-                 equity=100_000, cash=60_000, aggressiveness=5)
+                 equity=100_000, cash=60_000, aggressiveness=5,
+                 policy=POLICY_STOP60)
     assert [c["exit_reason"] for c in result["closes"]] == ["llm_close"]
     # Ignored open position defaults to HOLD.
     assert [h["position_id"] for h in result["holds"]] == [2]
@@ -137,7 +185,8 @@ def test_allocator_uses_quick_model(monkeypatch):
     llm = _mock_llm(monkeypatch, [
         {"occ_symbol": cand["occ_symbol"], "action": "NEW", "contracts": 1, "rationale": "x"},
     ])
-    run([cand], [], "2026-07-17", {}, equity=100_000, cash=100_000)
+    run([cand], [], "2026-07-17", {}, equity=100_000, cash=100_000,
+        policy=POLICY_STOP60)
     assert llm.call_kwargs.get("deep") is False
 
 
@@ -152,7 +201,8 @@ def test_total_premium_cap_across_opens(monkeypatch):
         {"occ_symbol": c["occ_symbol"], "action": "NEW", "contracts": 10} for c in cands
     ])
     result = run(cands, [held], "2026-07-17", {},
-                 equity=100_000, cash=91_000, aggressiveness=5)
+                 equity=100_000, cash=91_000, aggressiveness=5,
+                 policy=POLICY_STOP60)
     costs = {o["contract"]["ticker"]: o["cost"] for o in result["opens"]}
     assert costs["AAA"] == pytest.approx(8_000)   # per-position cap
     assert costs["BBB"] == pytest.approx(8_000)
@@ -167,7 +217,8 @@ def test_max_open_positions(monkeypatch):
     _mock_llm(monkeypatch, [
         {"occ_symbol": c["occ_symbol"], "action": "NEW", "contracts": 1} for c in cands
     ])
-    result = run(cands, held, "2026-07-17", {}, equity=1_000_000, cash=900_000)
+    result = run(cands, held, "2026-07-17", {}, equity=1_000_000, cash=900_000,
+                 policy=POLICY_STOP60)
     # 14 holds + max 15 -> only one new position fits.
     assert len(result["opens"]) == 1
 
@@ -176,7 +227,8 @@ def test_llm_failure_uses_fallback(monkeypatch):
     held = _pos(1, "NVDA  260821C00190000", dte=30)
     cands = [_cand("AAA", mid=5.0, conviction=9), _cand("BBB", mid=5.0, conviction=6)]
     _mock_llm(monkeypatch, RuntimeError("LLM down"))
-    result = run(cands, [held], "2026-07-17", {}, equity=100_000, cash=99_000)
+    result = run(cands, [held], "2026-07-17", {}, equity=100_000, cash=99_000,
+                 policy=POLICY_STOP60)
     # Everything held, conviction-ranked equal-dollar opens under caps.
     assert [h["position_id"] for h in result["holds"]] == [1]
     assert [o["contract"]["ticker"] for o in result["opens"]] == ["AAA", "BBB"]
@@ -188,14 +240,16 @@ def test_llm_garbage_json_uses_fallback(monkeypatch):
     llm = MagicMock()
     llm.invoke.return_value = MagicMock(content="I think you should buy calls!")
     monkeypatch.setattr(options_allocator, "llm_for", lambda *a, **k: llm)
-    result = run([_cand("AAA")], [], "2026-07-17", {}, equity=100_000, cash=100_000)
+    result = run([_cand("AAA")], [], "2026-07-17", {}, equity=100_000, cash=100_000,
+                 policy=POLICY_STOP60)
     assert len(result["opens"]) == 1  # fallback still produced a decision set
     assert "report_md" in result
 
 
 def test_no_candidates_no_positions(monkeypatch):
     _mock_llm(monkeypatch, [])
-    result = run([], [], "2026-07-17", {}, equity=100_000, cash=100_000)
+    result = run([], [], "2026-07-17", {}, equity=100_000, cash=100_000,
+                 policy=POLICY_STOP60)
     assert result["closes"] == [] and result["holds"] == [] and result["opens"] == []
 
 
@@ -205,7 +259,7 @@ def test_lessons_context_reaches_system_prompt(monkeypatch):
     llm = _mock_llm(monkeypatch, [])
     block = "=== OPTIONS TRACK RECORD (this paper account, 12 closed) ===\n- watch for decay"
     run([_cand("NVDA")], [], "2026-07-17", {}, equity=100_000, cash=100_000,
-        lessons_context=block)
+        lessons_context=block, policy=POLICY_STOP60)
     system = llm.invoke.call_args[0][0][0]["content"]
     assert "OPTIONS TRACK RECORD" in system
     assert "watch for decay" in system
@@ -216,7 +270,8 @@ def test_empty_lessons_renders_the_pre_learning_prompt(monkeypatch):
     trace — the exact byte sequence the pre-learning template produced around
     it (neutral bias renders '' too, leaving one blank line) must survive."""
     llm = _mock_llm(monkeypatch, [])
-    run([_cand("NVDA")], [], "2026-07-17", {}, equity=100_000, cash=100_000)
+    run([_cand("NVDA")], [], "2026-07-17", {}, equity=100_000, cash=100_000,
+        policy=POLICY_STOP60)
     system = llm.invoke.call_args[0][0][0]["content"]
     # Pre-learning byte sequence across the placeholder site (neutral bias):
     assert "must earn its theta.\n\nYou will receive" in system
@@ -226,7 +281,8 @@ def test_empty_lessons_renders_the_pre_learning_prompt(monkeypatch):
     # And a non-empty block gets clean newline separation, not concatenation.
     llm2 = _mock_llm(monkeypatch, [])
     run([_cand("NVDA")], [], "2026-07-17", {}, equity=100_000, cash=100_000,
-        lessons_context="=== OPTIONS TRACK RECORD (this paper account, 12 closed) ===")
+        lessons_context="=== OPTIONS TRACK RECORD (this paper account, 12 closed) ===",
+        policy=POLICY_STOP60)
     system2 = llm2.invoke.call_args[0][0][0]["content"]
     assert "theta.\n\n=== OPTIONS TRACK RECORD" in system2
     assert "===\n\nYou will receive" in system2

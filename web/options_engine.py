@@ -36,7 +36,7 @@ import yfinance as yf
 
 from tradingagents.dataflows import schwab_mcp
 
-from . import db, market_cache, options_allocator, options_data, options_learning, scan_queue, spy_scanner
+from . import account_policy, db, market_cache, options_allocator, options_data, options_learning, scan_queue, spy_scanner
 from .runner import build_config
 from .spy_tickers import get_sp500_tickers
 
@@ -600,6 +600,13 @@ def _apply_intraday_stops(
         return 0
     stopped = 0
     spot_cache: dict[str, float | None] = {}
+    # NOTE (step 7 compatibility shim, pending the fuller step 8 rework): builds
+    # each position's policy from its own account and delegates to the shared
+    # account_policy.evaluate() core via effective_stop_level, replacing the old
+    # flat -60%/DEFAULT_CONFIG trailing model. `mark` is the fresh quote and
+    # `prev_mark` the pre-refresh premium, matching effective_stop_level's
+    # documented convention for this caller.
+    policy_cache: dict[int, account_policy.StopPolicy] = {}
     for p in positions:
         got = priced.get(p["id"])
         if not got:
@@ -608,14 +615,23 @@ def _apply_intraday_stops(
         entry = float(p.get("entry_premium") or 0)
         if entry <= 0:
             continue
-        # Base -60% stop OR the trailing stop once armed (locks gains) —
-        # whichever is higher. Same math the daily allocator backstop uses.
-        stop_level, stop_reason = options_allocator.effective_stop_level(p)
-        if stop_level <= 0 or price > stop_level:
-            continue
+        acct_id = p.get("paper_account_id")
+        if acct_id not in policy_cache:
+            policy_cache[acct_id] = account_policy.StopPolicy.from_account(
+                db.get_paper_account(acct_id) if acct_id is not None else None
+            )
+        policy = policy_cache[acct_id]
         prev_mark = p.get("current_premium")  # pre-refresh mark (row loaded before marking)
-        crossed_this_interval = prev_mark is not None and float(prev_mark) > stop_level
-        fill = stop_level if crossed_this_interval else price
+        outcome = options_allocator.effective_stop_level(
+            dict(p, current_premium=price), policy,
+            prev_mark=float(prev_mark) if prev_mark is not None else None,
+        )
+        if outcome.action != "fill":
+            continue
+        stop_level = outcome.level
+        stop_reason = outcome.exit_reason
+        fill = outcome.fill_price
+        crossed_this_interval = outcome.crossed
 
         # Book the sale at the minute the level was actually crossed, not at
         # the top of the hour the refresh happened to notice it.
@@ -897,11 +913,14 @@ def run_options_build(scan_id: int, trade_date: str) -> None:
             log.exception("[options %s] lessons context failed — allocating without it", scan_id)
 
         with _phase("Options allocation failed"):
+            # NOTE (step 7 compatibility shim, pending the fuller step 8 rework):
+            # options_allocator.run() now requires the account's stop policy.
+            policy = account_policy.StopPolicy.from_account(db.get_paper_account(account_id))
             alloc = options_allocator.run(
                 candidates, open_positions, trade_date, config,
                 equity=eq["equity"], cash=eq["cash"], realized_pnl=realized,
                 aggressiveness=aggressiveness, bias=bias, fresh_signals=fresh_signals,
-                lessons_context=lessons_context,
+                lessons_context=lessons_context, policy=policy,
             )
 
         # Learning loop, write side: today's chain data carries the underlying spot
