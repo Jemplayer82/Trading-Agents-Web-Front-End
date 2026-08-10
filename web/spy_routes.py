@@ -34,13 +34,38 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
 from tradingagents.dataflows import schwab_mcp
 
-from . import alerts, db, scan_queue, spy_allocator, spy_scanner
+from . import account_policy, alerts, db, scan_queue, spy_allocator, spy_scanner
 from .runner import build_config
 from .spy_tickers import get_sp500_tickers
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+# Default auto-run time for a NEW account of each kind, matching the fixed
+# crons the per-account schedules replace.
+_DEFAULT_SCHEDULE_TIME = {"equity": "00:00", "options": "07:30"}
+
+
+def _clean_schedule_time(raw: Any) -> str | None:
+    """Validate an 'HH:MM' 24-hour time; None/'' means manual-only (NULL)."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    if account_policy.parse_hhmm(s) is None:
+        raise HTTPException(status_code=400,
+                            detail="schedule_time must be HH:MM (24-hour), or null for manual-only")
+    return s
+
+
+def _clean_stop_policy(stop_type: Any, stop_value: Any, stop_limit_offset: Any) -> account_policy.StopPolicy:
+    try:
+        return account_policy.validate_policy(stop_type, stop_value, stop_limit_offset)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # ---------- Paper trading accounts ----------
@@ -62,6 +87,8 @@ def create_paper_account(body: dict[str, Any]) -> dict[str, Any]:
     bias = (body.get("bias") or "neutral").strip().lower()
     if bias not in ("bullish", "neutral", "bearish"):
         raise HTTPException(status_code=400, detail="bias must be bullish, neutral, or bearish")
+    schedule_time = _clean_schedule_time(body.get("schedule_time", _DEFAULT_SCHEDULE_TIME[kind]))
+    policy = _clean_stop_policy(body.get("stop_type"), body.get("stop_value"), body.get("stop_limit_offset"))
     try:
         account_id = db.create_paper_account(
             name=name,
@@ -69,6 +96,10 @@ def create_paper_account(body: dict[str, Any]) -> dict[str, Any]:
             aggressiveness=int(body.get("aggressiveness") or 5),
             bias=bias,
             kind=kind,
+            schedule_time=schedule_time,
+            stop_type=policy.stop_type,
+            stop_value=policy.stop_value,
+            stop_limit_offset=policy.stop_limit_offset,
         )
     except Exception as exc:
         if "UNIQUE" in str(exc):
@@ -84,13 +115,28 @@ def update_paper_account(account_id: int, body: dict[str, Any]) -> dict[str, Any
         raise HTTPException(status_code=404, detail="not found")
     if body.get("bias") and body["bias"] not in ("bullish", "neutral", "bearish"):
         raise HTTPException(status_code=400, detail="bias must be bullish, neutral, or bearish")
-    db.update_paper_account(
-        account_id=account_id,
-        name=body.get("name"),
-        starting_capital=float(body["starting_capital"]) if "starting_capital" in body else None,
-        aggressiveness=int(body["aggressiveness"]) if "aggressiveness" in body else None,
-        bias=body.get("bias"),
-    )
+    fields: dict[str, Any] = {}
+    if "name" in body:
+        fields["name"] = body["name"]
+    if "starting_capital" in body:
+        fields["starting_capital"] = float(body["starting_capital"])
+    if "aggressiveness" in body:
+        fields["aggressiveness"] = int(body["aggressiveness"])
+    if "bias" in body:
+        fields["bias"] = body["bias"]
+    if "schedule_time" in body:
+        fields["schedule_time"] = _clean_schedule_time(body["schedule_time"])
+    if "stop_type" in body or "stop_value" in body or "stop_limit_offset" in body:
+        current = db.get_paper_account(account_id) or {}
+        policy = _clean_stop_policy(
+            body["stop_type"] if "stop_type" in body else current.get("stop_type"),
+            body["stop_value"] if "stop_value" in body else current.get("stop_value"),
+            body["stop_limit_offset"] if "stop_limit_offset" in body else current.get("stop_limit_offset"),
+        )
+        fields["stop_type"] = policy.stop_type
+        fields["stop_value"] = policy.stop_value
+        fields["stop_limit_offset"] = policy.stop_limit_offset
+    db.update_paper_account(account_id=account_id, **fields)
     return {"account": db.get_paper_account(account_id)}
 
 
@@ -415,7 +461,7 @@ def _phase(label: str) -> Iterator[None]:
 
 
 def _run_spy_scan(scan_id: int, trade_date: str) -> None:
-    """S&P scan worker: quick screen -> deep dives -> allocator.
+    """S&P scan worker: quick scan -> deep dives -> allocator.
 
     If the previous completed scan left active positions, its last refreshed
     value becomes this week's starting capital and the allocator runs in

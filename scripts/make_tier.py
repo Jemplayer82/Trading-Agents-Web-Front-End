@@ -86,6 +86,7 @@ TIER_ONLY_FILES: dict[int, list[str]] = {
         "tests/test_deep_dive_gating.py",
         "tests/test_macro_brief_scan.py",
         "tests/test_spy_allocator.py",
+        "tests/test_paper_account_routes.py",
     ],
     2: [
         "web/schwab_routes.py",
