@@ -34,6 +34,16 @@ _FORBIDDEN = [
     ("web/tests", "tests live in tests/ at the repo root"),
     ("4-tab", "don't state a tab COUNT — it differs per tier and goes stale; list the tabs instead"),
     ("Messages Log", "the tool-calls panel was removed; it is Live Reasoning now"),
+    (
+        "30% below the peak",
+        "the arm-at-+50% / trail-30%-below-peak options model was retired; "
+        "stops are per-account policies on paper_accounts now",
+    ),
+    (
+        "options_trail_arm_pct",
+        "that global config key was deleted along with options_trailing_stop / "
+        "options_trail_give_back; stop behavior is per-account policy",
+    ),
 ]
 
 
