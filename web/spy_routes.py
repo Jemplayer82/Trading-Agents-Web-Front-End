@@ -494,7 +494,10 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
     if prev_scan:
         prev_portfolio_raw = prev_scan.get("portfolio_json") or []
         # Only use previous portfolio if it has active (non-exited) positions.
-        active_prev = [p for p in prev_portfolio_raw if p.get("action") != "EXITED" and p.get("dollar_amount", 0) > 0]
+        active_prev = [
+            p for p in spy_allocator.live_positions(prev_portfolio_raw)
+            if p.get("dollar_amount", 0) > 0
+        ]
         if active_prev:
             previous_portfolio = prev_portfolio_raw
             previous_scan_id = int(prev_scan["id"])

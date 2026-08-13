@@ -12,8 +12,9 @@ spy_scanner.refresh_portfolio_prices and /api/spy-account/compare):
     current_price, current_value    added later by refresh_portfolio_prices
 
 `action` is "NEW" | "HOLD" | "ADDED" | "TRIMMED" | "EXITED". EXITED rows are
-kept (shares=0) as a paper trail; downstream code filters action != "EXITED"
-to find live positions.
+kept (shares=0) as a paper trail; live_positions() below is now the single
+place that filters action != "EXITED" to find live positions, and downstream
+code should use it.
 
 Two modes: fresh (week 1, $100k) vs rebalance (week 2+, capital = the previous
 scan's refreshed value; kept positions retain their original entry_price so
@@ -31,6 +32,29 @@ from tradingagents.default_config import DEFAULT_CONFIG
 from .llm_helpers import llm_for
 
 log = logging.getLogger(__name__)
+
+STOP_EXIT_REASONS = frozenset({"stop_loss", "trail_stop", "stop_limit"})
+
+
+def live_positions(portfolio: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Return live (non-EXITED) rows from a portfolio snapshot, preserving order.
+
+    This is the canonical filter: every other module should call this helper
+    rather than inline ``p.get("action") != "EXITED"`` checks, so EXITED stop-
+    loss paper-trail rows are never accidentally treated as holdings.
+    """
+    return [p for p in (portfolio or []) if p.get("action") != "EXITED"]
+
+
+def stopped_positions(portfolio: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Return rows stamped with a stop-driven exit_reason.
+
+    Weekly-rebalance EXITED rows carry no exit_reason and are intentionally
+    excluded here; only mid-week stop exits (stop_loss, trail_stop,
+    stop_limit) are selected.
+    """
+    return [p for p in (portfolio or []) if p.get("exit_reason") in STOP_EXIT_REASONS]
+
 
 # ─── Fresh allocation (week 1 or first ever run) ──────────────────────────────
 
@@ -176,7 +200,8 @@ def _fallback_rebalance(
 ) -> list[dict[str, Any]]:
     """Equal-weight BUY candidates using available capital."""
     new_tickers = {c["ticker"] for c in candidates}
-    prev_map = {p["ticker"]: p for p in previous_portfolio}
+    live_prev = live_positions(previous_portfolio)
+    prev_map = {p["ticker"]: p for p in live_prev}
     result: list[dict[str, Any]] = []
 
     buys = [c for c in candidates if (c.get("signal") or "").upper() == "BUY"]
@@ -188,8 +213,8 @@ def _fallback_rebalance(
 
     active_tickers = {c["ticker"] for c in buys}
 
-    # Mark exits
-    for prev in previous_portfolio:
+    # Mark exits for live positions no longer active
+    for prev in live_prev:
         if prev["ticker"] not in new_tickers or prev["ticker"] not in active_tickers:
             result.append({
                 "ticker": prev["ticker"],
@@ -262,20 +287,21 @@ def run(
         )
         fallback_fn = lambda: _fallback_fresh(candidates)
     else:
-        prev_map = {p["ticker"]: p for p in (previous_portfolio or [])}
+        live_prev = live_positions(previous_portfolio)
+        prev_map = {p["ticker"]: p for p in live_prev}
         cand_map = {c["ticker"]: c for c in candidates}
 
         # Split candidates into held vs new
         held = [c for c in candidates if c["ticker"] in prev_map]
         new_cands = [c for c in candidates if c["ticker"] not in prev_map]
-        # Mark previous holdings not in new candidates as exits
-        exits = [p for p in (previous_portfolio or []) if p["ticker"] not in cand_map]
+        # Mark live previous holdings not in new candidates as exits
+        exits = [p for p in live_prev if p["ticker"] not in cand_map]
 
         user_msg = REBALANCE_USER_HEADER.format(
             trade_date=trade_date, capital=capital, n_held=len(held) + len(exits)
         )
         # Show current holdings with updated signals
-        for prev in (previous_portfolio or []):
+        for prev in live_prev:
             cand = cand_map.get(prev["ticker"])
             if cand:
                 sig = (cand.get("signal") or "—").upper()
@@ -327,7 +353,7 @@ def run(
 
     # ── Patch entry_price for HOLD/ADDED/TRIMMED from previous portfolio ──────
     if is_rebalance and previous_portfolio:
-        prev_map = {p["ticker"]: p for p in previous_portfolio}
+        prev_map = {p["ticker"]: p for p in live_positions(previous_portfolio)}
         for a in allocations:
             if a.get("action") in ("HOLD", "ADDED", "TRIMMED"):
                 prev = prev_map.get(a["ticker"])
