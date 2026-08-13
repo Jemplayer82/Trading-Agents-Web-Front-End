@@ -204,3 +204,22 @@ def test_blank_stop_value_blocks_submission():
         """
     )
     assert result == 0
+
+
+def test_stop_summary_all_types():
+    result = _run(
+        """
+        return {
+            none: stopSummary({ stop_type: 'none' }),
+            stop: stopSummary({ stop_type: 'stop', stop_value: 60 }),
+            stopLimit: stopSummary({ stop_type: 'stop_limit', stop_value: 60, stop_limit_offset: 5 }),
+            trailingPct: stopSummary({ stop_type: 'trailing_pct', stop_value: 10 }),
+            trailingDollar: stopSummary({ stop_type: 'trailing_dollar', stop_value: 2.5 }),
+        };
+        """
+    )
+    assert result["none"] == "no stop"
+    assert result["stop"] == "stop 60%"
+    assert result["stopLimit"] == "stop 60% / limit 5%"
+    assert result["trailingPct"] == "trail 10%"
+    assert result["trailingDollar"] == "trail $2.5"

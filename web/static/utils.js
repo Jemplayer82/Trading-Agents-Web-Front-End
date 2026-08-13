@@ -15,7 +15,7 @@
 //      historically why the modules used divergent aliases like `$$p` / `$$spy`.)
 //
 // Shared globals defined here: $, escapeHtml, renderMarkdown, fmtTs, apiFetch,
-// stopFieldVisibility, progressBar, setupTabs (the whole dashboard's tab strip — every tier needs it,
+// stopFieldVisibility, stopSummary, progressBar, setupTabs (the whole dashboard's tab strip — every tier needs it,
 // so it lives here rather than in any one tab's file).
 //
 // Escape-at-render discipline (project-wide): every interpolation of server- or
@@ -101,6 +101,22 @@ function stopFieldVisibility(prefix) {
       : type === "trailing_pct" ? "Trail below peak (%)"
       : "Stop below entry (%)";
   }
+}
+
+/**
+ * Human-readable summary of an account's stop policy, rendered in both the
+ * S&P 500 (equity) and Options paper-account lists. Returns strings that the
+ * account-list UI joins with " · ".
+ */
+function stopSummary(a) {
+  const t = a.stop_type || "none";
+  if (t === "none") return "no stop";
+  const v = a.stop_value;
+  if (t === "stop") return `stop ${v}%`;
+  if (t === "stop_limit") return `stop ${v}% / limit ${a.stop_limit_offset ?? 0}%`;
+  if (t === "trailing_pct") return `trail ${v}%`;
+  if (t === "trailing_dollar") return `trail $${v}`;
+  return t;
 }
 
 /**

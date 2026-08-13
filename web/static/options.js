@@ -79,17 +79,6 @@ function updateOptAccountMeta() {
   meta.textContent = `$${(acct.starting_capital || 100000).toLocaleString()} · Aggressiveness ${acct.aggressiveness}/10 · ${biasLabel}`;
 }
 
-function optStopSummary(a) {
-  const t = a.stop_type || "none";
-  if (t === "none") return "no stop";
-  const v = a.stop_value;
-  if (t === "stop") return `stop ${v}%`;
-  if (t === "stop_limit") return `stop ${v}% / limit ${a.stop_limit_offset ?? 0}%`;
-  if (t === "trailing_pct") return `trail ${v}%`;
-  if (t === "trailing_dollar") return `trail $${v}`;
-  return t;
-}
-
 function renderOptAccountsModal() {
   const list = $("opt-accounts-list");
   if (!list) return;
@@ -106,7 +95,7 @@ function renderOptAccountsModal() {
           "<strong>" + escapeHtml(a.name) + "</strong>" +
           "<span class=\"dim\" style=\"font-size:11px;margin-left:8px;\">" +
             "$" + (a.starting_capital || 100000).toLocaleString() + " · " +
-            "Agg " + a.aggressiveness + "/10 · " + biasLabel + " · " + schedule + " · " + optStopSummary(a) +
+            "Agg " + a.aggressiveness + "/10 · " + biasLabel + " · " + schedule + " · " + stopSummary(a) +
           "</span>" +
         "</div>" +
         "<button type=\"button\" class=\"ghost\" style=\"font-size:11px;padding:3px 8px;\" " +

@@ -229,3 +229,22 @@ def test_put_edit_includes_kind_and_correct_url():
     assert result["body"]["stop_type"] == "trailing_pct"
     assert result["body"]["stop_value"] == 10
     assert result["body"]["stop_limit_offset"] is None
+
+
+def test_stop_summary_resolves_from_utils():
+    result = _run(
+        """
+        return {
+            none: stopSummary({ stop_type: 'none' }),
+            stop: stopSummary({ stop_type: 'stop', stop_value: 60 }),
+            stopLimit: stopSummary({ stop_type: 'stop_limit', stop_value: 60, stop_limit_offset: 5 }),
+            trailingPct: stopSummary({ stop_type: 'trailing_pct', stop_value: 10 }),
+            trailingDollar: stopSummary({ stop_type: 'trailing_dollar', stop_value: 2.5 }),
+        };
+        """
+    )
+    assert result["none"] == "no stop"
+    assert result["stop"] == "stop 60%"
+    assert result["stopLimit"] == "stop 60% / limit 5%"
+    assert result["trailingPct"] == "trail 10%"
+    assert result["trailingDollar"] == "trail $2.5"
