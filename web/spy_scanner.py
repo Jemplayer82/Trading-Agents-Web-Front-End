@@ -1255,6 +1255,127 @@ def run_deep_dives(
     return enriched
 
 
+def apply_stops_and_value(
+    portfolio: list[dict[str, Any]], *, basis: float, policy, prices: dict[str, float]
+) -> dict[str, Any]:
+    """Mark a paper portfolio to market and enforce its stop policy.
+
+    Pure business logic: no network calls, no database access.  Mutates rows
+    in place and returns the aggregate cash/deployment figures needed by the
+    refresh shell.
+    """
+    positions_value = 0.0
+    deployed = 0.0
+    stopped = 0
+    for a in portfolio:
+        # Skip closed positions — they hold no capital.
+        if a.get("action") == "EXITED":
+            continue
+        t = a["ticker"]
+        ep = float(a.get("entry_price") or 0)
+        # Whole shares purchased at entry. Legacy scans (pre whole-share) have
+        # no `shares` field — derive it from the dollar target / entry price.
+        shares = a.get("shares")
+        if shares is None:
+            shares = int(float(a.get("dollar_amount") or 0) // ep) if ep > 0 else 0
+            a["shares"] = shares
+        if shares <= 0:
+            continue
+        cost = a.get("cost_basis")
+        if cost is None:
+            cost = round(shares * ep, 2)
+            a["cost_basis"] = cost
+
+        fresh = prices.get(t)
+        prev = a.get("current_price")
+        cp = float(fresh) if fresh else float(prev or ep)
+
+        peak_before = float(a.get("peak_price") or ep)
+        outcome = account_policy.evaluate(
+            policy, entry=ep, peak=peak_before, mark=cp,
+            prev_mark=(float(prev) if prev is not None else None),
+            armed=bool(a.get("pending_stop_limit")),
+        ) if fresh else None
+        a["peak_price"] = round(max(peak_before, ep, cp), 2)
+
+        if outcome is not None and outcome.action == "fill":
+            a["action"] = "EXITED"
+            a["exit_reason"] = outcome.exit_reason
+            a["exit_price"] = round(outcome.fill_price, 2)
+            a["exit_proceeds"] = round(shares * outcome.fill_price, 2)
+            a["current_price"] = a["exit_price"]
+            a["current_value"] = 0.0
+            a.pop("pending_stop_limit", None)
+            a.pop("stop_limit_price", None)
+            stopped += 1
+            continue
+
+        if outcome is not None and outcome.action == "arm":
+            a["pending_stop_limit"] = True
+            a["stop_limit_price"] = round(outcome.limit_price, 2)
+
+        deployed += cost
+        a["current_price"] = round(cp, 2)
+        a["current_value"] = round(shares * cp, 2)
+        positions_value += a["current_value"]
+
+    # Realized P&L from stop-outs. This cash line derives from scratch on every
+    # call, so an exited row's cost is already back inside `basis - deployed`,
+    # adding (proceeds - cost) converts that implicit full refund into the real
+    # outcome and makes the gain/loss survive every subsequent refresh. Only rows
+    # carrying exit_proceeds count, so rows the weekly rebalance EXITED (which have
+    # none) behave exactly as they do today.
+    realized = sum(
+        float(r["exit_proceeds"]) - float(r.get("cost_basis") or 0)
+        for r in portfolio
+        if r.get("exit_proceeds") is not None
+    )
+    cash = max(0.0, basis - deployed + realized)
+    return {
+        "positions_value": positions_value,
+        "deployed": deployed,
+        "cash": cash,
+        "realized": realized,
+        "stopped": stopped,
+    }
+
+
+def _format_rebalance_notes(
+    portfolio: list[dict[str, Any]], signal_flips: list[str]
+) -> str:
+    """Build the rebalance_notes string from stopped rows and signal flips."""
+    _STOP_REASONS = {"stop_loss", "trail_stop", "stop_limit"}
+    stopped_lines = []
+    for r in portfolio:
+        if r.get("exit_reason") in _STOP_REASONS:
+            t = r["ticker"]
+            exit_reason = r["exit_reason"]
+            exit_price = float(r["exit_price"])
+            ep = float(r.get("entry_price") or 0)
+            pct = (
+                round((exit_price - ep) / ep * 100, 1)
+                if ep
+                else 0.0
+            )
+            stopped_lines.append(
+                f"- {t}: {exit_reason} at ${exit_price:.2f} (entry ${ep:.2f}, {pct:.1f}%)"
+            )
+    stopped_section = (
+        "Stopped out:\n" + "\n".join(stopped_lines)
+        if stopped_lines
+        else ""
+    )
+    flips_section = (
+        "Signal flips detected:\n"
+        + "\n".join("- " + f for f in signal_flips)
+        if signal_flips
+        else ""
+    )
+    if stopped_section and flips_section:
+        return stopped_section + "\n\n" + flips_section
+    return stopped_section or flips_section
+
+
 def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
     """Mark the scan's paper portfolio to market and persist per-position P&L.
 
@@ -1313,111 +1434,34 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
     account = db.get_paper_account(int(scan["paper_account_id"])) if scan.get("paper_account_id") else None
     policy = account_policy.StopPolicy.from_account(account)
 
-    positions_value = 0.0
-    deployed = 0.0
+    market = apply_stops_and_value(
+        portfolio, basis=basis, policy=policy, prices=current_prices
+    )
+
     signal_flips: list[str] = []
-    stopped_now: list[str] = []
     for a in portfolio:
-        # Skip closed positions — they hold no capital.
         if a.get("action") == "EXITED":
             continue
+        if a.get("shares", 0) <= 0:
+            continue
         t = a["ticker"]
-        ep = float(a.get("entry_price") or 0)
-        # Whole shares purchased at entry. Legacy scans (pre whole-share) have
-        # no `shares` field — derive it from the dollar target / entry price.
-        shares = a.get("shares")
-        if shares is None:
-            shares = int(float(a.get("dollar_amount") or 0) // ep) if ep > 0 else 0
-            a["shares"] = shares
-        if shares <= 0:
-            continue
-        cost = a.get("cost_basis")
-        if cost is None:
-            cost = round(shares * ep, 2)
-            a["cost_basis"] = cost
-
-        fresh = current_prices.get(t)
-        prev = a.get("current_price")
-        cp = float(fresh) if fresh else float(prev or ep)
-
-        peak_before = float(a.get("peak_price") or ep)
-        outcome = account_policy.evaluate(
-            policy, entry=ep, peak=peak_before, mark=cp,
-            prev_mark=(float(prev) if prev is not None else None),
-            armed=bool(a.get("pending_stop_limit")),
-        ) if fresh else None
-        a["peak_price"] = round(max(peak_before, ep, cp), 2)
-
-        if outcome is not None and outcome.action == "fill":
-            a["action"] = "EXITED"
-            a["exit_reason"] = outcome.exit_reason
-            a["exit_price"] = round(outcome.fill_price, 2)
-            a["exit_proceeds"] = round(shares * outcome.fill_price, 2)
-            a["current_price"] = a["exit_price"]
-            a["current_value"] = 0.0
-            a.pop("pending_stop_limit", None)
-            a.pop("stop_limit_price", None)
-            stopped_now.append(
-                "- {}: {} at ${:.2f} (entry ${:.2f}, {:.1f}%)".format(
-                    t, outcome.exit_reason, a["exit_price"], ep,
-                    round((a["exit_price"] - ep) / ep * 100, 1) if ep else 0.0,
-                )
-            )
-            continue
-
-        if outcome is not None and outcome.action == "arm":
-            a["pending_stop_limit"] = True
-            a["stop_limit_price"] = round(outcome.limit_price, 2)
-
-        deployed += cost
-        a["current_price"] = round(cp, 2)
-        a["current_value"] = round(shares * cp, 2)
-        positions_value += a["current_value"]
-
         quick = db.get_spy_quick_result(scan_id, t)
         if quick and quick.get("signal") and a.get("signal"):
             if quick["signal"].upper() != a["signal"].upper():
-                signal_flips.append("{}: was {} at entry, now {}".format(t, a["signal"], quick["signal"]))
+                signal_flips.append(
+                    "{}: was {} at entry, now {}".format(t, a["signal"], quick["signal"])
+                )
 
-    # Realized P&L from stop-outs. This cash line derives from scratch on every
-    # call, so an exited row's cost is already back inside `basis - deployed`,
-    # adding (proceeds - cost) converts that implicit full refund into the real
-    # outcome and makes the gain/loss survive every subsequent refresh. Only rows
-    # carrying exit_proceeds count, so rows the weekly rebalance EXITED (which have
-    # none) behave exactly as they do today.
-    realized = sum(float(r["exit_proceeds"]) - float(r.get("cost_basis") or 0)
-                   for r in portfolio if r.get("exit_proceeds") is not None)
-    cash = max(0.0, basis - deployed + realized)
+    positions_value = market["positions_value"]
+    deployed = market["deployed"]
+    cash = market["cash"]
+    realized = market["realized"]
+    stopped = market["stopped"]
 
     current_value = positions_value + cash
     return_pct = ((current_value - basis) / basis) * 100 if basis else 0.0
 
-    _STOP_REASONS = {"stop_loss", "trail_stop", "stop_limit"}
-    stopped_lines = [
-        "- {}: {} at ${:.2f} (entry ${:.2f}, {:.1f}%)".format(
-            r["ticker"],
-            r["exit_reason"],
-            float(r["exit_price"]),
-            float(r.get("entry_price") or 0),
-            round((float(r["exit_price"]) - float(r.get("entry_price") or 0))
-                  / float(r.get("entry_price") or 1) * 100, 1)
-            if float(r.get("entry_price") or 0) else 0.0,
-        )
-        for r in portfolio
-        if r.get("exit_reason") in _STOP_REASONS
-    ]
-    stopped_section = "Stopped out:\n" + "\n".join(stopped_lines) if stopped_lines else ""
-    flips_section = (
-        "Signal flips detected:\n" + "\n".join("- " + f for f in signal_flips)
-    ) if signal_flips else ""
-    if stopped_section and flips_section:
-        rebalance_notes = stopped_section + "\n\n" + flips_section
-    elif stopped_section:
-        rebalance_notes = stopped_section
-    elif flips_section:
-        rebalance_notes = flips_section
-    else:
-        rebalance_notes = ""
+    rebalance_notes = _format_rebalance_notes(portfolio, signal_flips)
 
     # Persist the mutated portfolio so per-position current_price/current_value
     # are saved alongside the scan-level value.
@@ -1434,7 +1478,7 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
         "deployed": round(deployed, 2),
         "return_pct": round(return_pct, 2),
         "rebalance_notes": rebalance_notes,
-        "stopped": len(stopped_now),
+        "stopped": stopped,
         "realized": round(realized, 2),
     }
 

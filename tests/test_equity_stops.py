@@ -570,3 +570,139 @@ def test_refresh_all_includes_no_account_scan(tmp_db, monkeypatch):
 
     assert "unassigned" in result["scans"]
     assert _load_portfolio(scan_id)[0]["current_price"] == 90.0
+
+
+# --- direct unit tests for the extracted pure helpers -----------------------
+
+
+def test_apply_stops_hard_stop_fills_at_stop_level():
+    portfolio = [
+        {
+            "ticker": "TICK",
+            "action": "BUY",
+            "entry_price": 100.0,
+            "shares": 10,
+            "cost_basis": 1000.0,
+            "dollar_amount": 1000.0,
+            "signal": "BUY",
+            "current_price": 95.0,
+        }
+    ]
+    policy = spy_scanner.account_policy.StopPolicy("stop", 20)
+    result = spy_scanner.apply_stops_and_value(
+        portfolio, basis=10000.0, policy=policy, prices={"TICK": 70.0}
+    )
+    row = portfolio[0]
+    assert row["action"] == "EXITED"
+    assert row["exit_reason"] == "stop_loss"
+    assert row["exit_price"] == 80.0
+    assert row["exit_proceeds"] == 800.0
+    assert row["current_value"] == 0.0
+    assert result["stopped"] == 1
+
+
+def test_apply_stops_gap_through_fills_at_mark():
+    portfolio = [
+        {
+            "ticker": "TICK",
+            "action": "BUY",
+            "entry_price": 100.0,
+            "shares": 10,
+            "cost_basis": 1000.0,
+            "dollar_amount": 1000.0,
+            "signal": "BUY",
+            "current_price": 75.0,
+        }
+    ]
+    policy = spy_scanner.account_policy.StopPolicy("stop", 20)
+    result = spy_scanner.apply_stops_and_value(
+        portfolio, basis=10000.0, policy=policy, prices={"TICK": 70.0}
+    )
+    row = portfolio[0]
+    assert row["action"] == "EXITED"
+    assert row["exit_reason"] == "stop_loss"
+    assert row["exit_price"] == 70.0
+    assert row["exit_proceeds"] == 700.0
+    assert result["stopped"] == 1
+
+
+def test_apply_stops_absent_price_never_stops():
+    portfolio = [
+        {
+            "ticker": "TICK",
+            "action": "BUY",
+            "entry_price": 100.0,
+            "shares": 10,
+            "cost_basis": 1000.0,
+            "dollar_amount": 1000.0,
+            "signal": "BUY",
+            "current_price": 70.0,
+        }
+    ]
+    policy = spy_scanner.account_policy.StopPolicy("stop", 20)
+    result = spy_scanner.apply_stops_and_value(
+        portfolio, basis=10000.0, policy=policy, prices={}
+    )
+    row = portfolio[0]
+    assert row["action"] == "BUY"
+    assert "exit_proceeds" not in row
+    assert row["current_price"] == 70.0
+    assert result["stopped"] == 0
+
+
+def test_apply_stops_cash_equals_basis_minus_deployed_plus_realized():
+    portfolio = [
+        {
+            "ticker": "TICK",
+            "action": "BUY",
+            "entry_price": 100.0,
+            "shares": 10,
+            "cost_basis": 1000.0,
+            "dollar_amount": 1000.0,
+            "signal": "BUY",
+            "current_price": 95.0,
+        }
+    ]
+    policy = spy_scanner.account_policy.StopPolicy("stop", 20)
+    result = spy_scanner.apply_stops_and_value(
+        portfolio, basis=10000.0, policy=policy, prices={"TICK": 70.0}
+    )
+    assert result["realized"] == -200.0
+    assert result["deployed"] == 0.0
+    assert result["cash"] == 9800.0
+
+
+def test_apply_stops_second_call_leaves_exited_row_and_cash_unchanged():
+    portfolio = [
+        {
+            "ticker": "TICK",
+            "action": "BUY",
+            "entry_price": 100.0,
+            "shares": 10,
+            "cost_basis": 1000.0,
+            "dollar_amount": 1000.0,
+            "signal": "BUY",
+            "current_price": 95.0,
+        }
+    ]
+    policy = spy_scanner.account_policy.StopPolicy("stop", 20)
+    r1 = spy_scanner.apply_stops_and_value(
+        portfolio, basis=10000.0, policy=policy, prices={"TICK": 70.0}
+    )
+    assert r1["cash"] == 9800.0
+    assert r1["stopped"] == 1
+
+    r2 = spy_scanner.apply_stops_and_value(
+        portfolio, basis=10000.0, policy=policy, prices={"TICK": 65.0}
+    )
+    row = portfolio[0]
+    assert row["action"] == "EXITED"
+    assert row["exit_price"] == 80.0
+    assert row["exit_proceeds"] == 800.0
+    assert r2["cash"] == 9800.0
+    assert r2["realized"] == -200.0
+    assert r2["stopped"] == 0
+
+
+def test_format_rebalance_notes_empty_when_no_stops_or_flips():
+    assert spy_scanner._format_rebalance_notes([], []) == ""
