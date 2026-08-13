@@ -1272,6 +1272,9 @@ def apply_stops_and_value(
         if a.get("action") == "EXITED":
             continue
         t = a["ticker"]
+        if policy.stop_type != "stop_limit":
+            a.pop("pending_stop_limit", None)
+            a.pop("stop_limit_price", None)
         ep = float(a.get("entry_price") or 0)
         # Whole shares purchased at entry. Legacy scans (pre whole-share) have
         # no `shares` field — derive it from the dollar target / entry price.
