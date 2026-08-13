@@ -145,6 +145,7 @@ Rebalancing rules:
 - EXITED positions (SELL signal or dropped out of top candidates) free up capital.
 - Kept positions maintain their original entry_price for P&L tracking.
 - New positions use the current entry_price provided.
+- Positions listed under STOPPED OUT are already closed and their capital is already reflected in the starting capital, so re-entering one is a deliberate NEW position it should justify in its rationale.
 - Weight by conviction; BUY > HOLD in allocation size.
 - Trim HOLD positions to make room for high-conviction BUYs.
 - Return ONLY valid JSON — no prose, no markdown fences.
@@ -199,6 +200,84 @@ PER_TICKER_TEMPLATE = (
     "{ticker} | signal: {signal} | conviction: {conviction}/10 | "
     "entry_price: ${entry_price:.2f} | {excerpt}\n"
 )
+
+REBALANCE_STOPPED_HEADER = (
+    "\n=== STOPPED OUT SINCE LAST REBALANCE ({n_stopped} positions — closed "
+    "automatically by this account's stop policy, NOT by a prior allocation decision) ===\n"
+)
+
+STOPPED_TICKER_TEMPLATE = (
+    "{ticker} | closed: {exit_reason} | entry_price: ${entry_price:.2f} | "
+    "exit_price: ${exit_price:.2f}\n"
+)
+
+
+def build_rebalance_user_message(
+    candidates: list[dict[str, Any]],
+    previous_portfolio: list[dict[str, Any]] | None,
+    trade_date: str,
+    capital: float,
+) -> str:
+    """Build the rebalance user message exactly as the legacy inline code did.
+
+    Adds a STOPPED OUT section for mid-week stop exits so the LLM knows those
+    tickers were already closed by this account's stop policy and are not
+    current holdings.
+    """
+    live_prev = live_positions(previous_portfolio)
+    prev_map = {p["ticker"]: p for p in live_prev}
+    cand_map = {c["ticker"]: c for c in candidates}
+
+    held = [c for c in candidates if c["ticker"] in prev_map]
+    new_cands = [c for c in candidates if c["ticker"] not in prev_map]
+    exits = [p for p in live_prev if p["ticker"] not in cand_map]
+
+    user_msg = REBALANCE_USER_HEADER.format(
+        trade_date=trade_date, capital=capital, n_held=len(held) + len(exits)
+    )
+
+    for prev in live_prev:
+        cand = cand_map.get(prev["ticker"])
+        if cand:
+            sig = (cand.get("signal") or "—").upper()
+            conv = cand.get("conviction") or 0
+            excerpt = (cand.get("final_decision") or cand.get("reasoning") or "")[:200]
+        else:
+            sig = "SELL"
+            conv = 0
+            excerpt = "No longer in top candidates — consider exiting."
+        user_msg += PER_TICKER_TEMPLATE.format(
+            ticker=prev["ticker"],
+            signal=sig,
+            conviction=conv,
+            entry_price=prev.get("entry_price") or 0.0,
+            excerpt=excerpt,
+        )
+
+    if new_cands:
+        user_msg += REBALANCE_NEW_HEADER.format(n_new=len(new_cands))
+        for c in new_cands:
+            excerpt = (c.get("final_decision") or c.get("reasoning") or "")[:200]
+            user_msg += PER_TICKER_TEMPLATE.format(
+                ticker=c["ticker"],
+                signal=(c.get("signal") or "—").upper(),
+                conviction=c.get("conviction") or 0,
+                entry_price=c.get("entry_price") or 0.0,
+                excerpt=excerpt,
+            )
+
+    stopped = stopped_positions(previous_portfolio)
+    if stopped:
+        user_msg += REBALANCE_STOPPED_HEADER.format(n_stopped=len(stopped))
+        for row in stopped:
+            user_msg += STOPPED_TICKER_TEMPLATE.format(
+                ticker=row["ticker"],
+                exit_reason=row.get("exit_reason") or "",
+                entry_price=float(row.get("entry_price") or 0),
+                exit_price=float(row.get("exit_price") or 0),
+            )
+
+    return user_msg
 
 
 def _llm(config: dict[str, Any]):
@@ -322,50 +401,9 @@ def run(
         )
         fallback_fn = lambda: _fallback_fresh(candidates)
     else:
-        live_prev = live_positions(previous_portfolio)
-        prev_map = {p["ticker"]: p for p in live_prev}
-        cand_map = {c["ticker"]: c for c in candidates}
-
-        # Split candidates into held vs new
-        held = [c for c in candidates if c["ticker"] in prev_map]
-        new_cands = [c for c in candidates if c["ticker"] not in prev_map]
-        # Mark live previous holdings not in new candidates as exits
-        exits = [p for p in live_prev if p["ticker"] not in cand_map]
-
-        user_msg = REBALANCE_USER_HEADER.format(
-            trade_date=trade_date, capital=capital, n_held=len(held) + len(exits)
+        user_msg = build_rebalance_user_message(
+            candidates, previous_portfolio, trade_date, capital
         )
-        # Show current holdings with updated signals
-        for prev in live_prev:
-            cand = cand_map.get(prev["ticker"])
-            if cand:
-                sig = (cand.get("signal") or "—").upper()
-                conv = cand.get("conviction") or 0
-                excerpt = (cand.get("final_decision") or cand.get("reasoning") or "")[:200]
-            else:
-                sig = "SELL"
-                conv = 0
-                excerpt = "No longer in top candidates — consider exiting."
-            user_msg += PER_TICKER_TEMPLATE.format(
-                ticker=prev["ticker"],
-                signal=sig,
-                conviction=conv,
-                entry_price=prev.get("entry_price") or 0.0,
-                excerpt=excerpt,
-            )
-        # Show new candidates
-        if new_cands:
-            user_msg += REBALANCE_NEW_HEADER.format(n_new=len(new_cands))
-            for c in new_cands:
-                excerpt = (c.get("final_decision") or c.get("reasoning") or "")[:200]
-                user_msg += PER_TICKER_TEMPLATE.format(
-                    ticker=c["ticker"],
-                    signal=(c.get("signal") or "—").upper(),
-                    conviction=c.get("conviction") or 0,
-                    entry_price=c.get("entry_price") or 0.0,
-                    excerpt=excerpt,
-                )
-
         system = _REBALANCE_SYSTEM_TEMPLATE.format(
             max_pct=max_pct, min_cash_pct=min_cash_pct, bias_context=bias_context,
         )

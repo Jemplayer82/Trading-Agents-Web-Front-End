@@ -218,3 +218,104 @@ def test_carry_forward_state_none_values_not_copied():
     spy_allocator.carry_forward_state(allocations, previous)
     assert "peak_price" not in allocations[0]
     assert allocations[0]["entry_price"] == 100.0
+
+
+def test_build_rebalance_message_no_stopped_section_when_none():
+    candidates = [
+        {
+            "ticker": "AAPL",
+            "signal": "BUY",
+            "conviction": 8,
+            "entry_price": 150.0,
+            "final_decision": "Strong momentum.",
+        },
+    ]
+    previous = [
+        {"ticker": "AAPL", "action": "HOLD", "entry_price": 140.0},
+    ]
+    msg = spy_allocator.build_rebalance_user_message(
+        candidates, previous, "2024-01-01", 100_000.0
+    )
+    assert "STOPPED OUT" not in msg
+    assert "=== CURRENT HOLDINGS (1 positions) ===" in msg
+    assert "AAPL | signal: BUY | conviction: 8/10 | entry_price: $140.00" in msg
+
+
+def test_build_rebalance_message_shows_stopped_row():
+    candidates = [
+        {
+            "ticker": "NVDA",
+            "signal": "BUY",
+            "conviction": 9,
+            "entry_price": 700.0,
+            "final_decision": "Great setup.",
+        },
+    ]
+    previous = [
+        {
+            "ticker": "AAPL",
+            "action": "EXITED",
+            "exit_reason": "trail_stop",
+            "entry_price": 100.0,
+            "exit_price": 117.5,
+        },
+    ]
+    msg = spy_allocator.build_rebalance_user_message(
+        candidates, previous, "2024-01-02", 95_000.0
+    )
+    assert "=== STOPPED OUT SINCE LAST REBALANCE (1 positions" in msg
+    assert "AAPL | closed: trail_stop | entry_price: $100.00 | exit_price: $117.50" in msg
+
+
+def test_build_rebalance_message_weekly_exited_not_in_stopped_section():
+    previous = [
+        {"ticker": "TSLA", "action": "EXITED", "entry_price": 200.0, "exit_price": 180.0},
+    ]
+    msg = spy_allocator.build_rebalance_user_message(
+        [], previous, "2024-01-03", 90_000.0
+    )
+    assert "STOPPED OUT" not in msg
+    assert "TSLA" not in msg
+
+
+def test_build_rebalance_message_stopped_not_in_current_holdings():
+    previous = [
+        {
+            "ticker": "AMD",
+            "action": "EXITED",
+            "exit_reason": "stop_loss",
+            "entry_price": 150.0,
+            "exit_price": 140.0,
+        },
+    ]
+    msg = spy_allocator.build_rebalance_user_message(
+        [], previous, "2024-01-04", 100_000.0
+    )
+    holdings_part, _, stopped_part = msg.partition("=== STOPPED OUT")
+    assert "AMD" not in holdings_part
+    assert "AMD" in stopped_part
+
+
+def test_build_rebalance_message_missing_exit_price_formats_zero():
+    previous = [
+        {
+            "ticker": "META",
+            "action": "EXITED",
+            "exit_reason": "stop_limit",
+            "entry_price": 300.0,
+        },
+    ]
+    msg = spy_allocator.build_rebalance_user_message(
+        [], previous, "2024-01-05", 100_000.0
+    )
+    assert "META | closed: stop_limit | entry_price: $300.00 | exit_price: $0.00" in msg
+
+
+def test_build_rebalance_message_missing_entry_price_formats_zero():
+    previous = [
+        {"ticker": "XOM", "action": "EXITED", "exit_reason": "stop_loss", "exit_price": 50.0},
+    ]
+    msg = spy_allocator.build_rebalance_user_message(
+        [], previous, "2024-01-06", 100_000.0
+    )
+    assert "XOM | closed: stop_loss | entry_price: $0.00 | exit_price: $50.00" in msg
