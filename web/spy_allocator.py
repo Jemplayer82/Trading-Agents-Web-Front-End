@@ -8,6 +8,8 @@ scan never finishes without a portfolio.
 Allocation dict (persisted as spy_scans.portfolio_json; consumed by
 spy_scanner.refresh_portfolio_prices and /api/spy-account/compare):
     ticker, action, allocation_pct, dollar_amount, entry_price, rationale
+    peak_price, pending_stop_limit, stop_limit_price
+        stop-state carried across a rebalance by carry_forward_state()
     shares, cost_basis              added here post-LLM (whole-share conversion)
     current_price, current_value    added later by refresh_portfolio_prices
 
@@ -34,6 +36,8 @@ from .llm_helpers import llm_for
 log = logging.getLogger(__name__)
 
 STOP_EXIT_REASONS = frozenset({"stop_loss", "trail_stop", "stop_limit"})
+CARRIED_STOP_STATE_KEYS = ("peak_price", "pending_stop_limit", "stop_limit_price")
+RETAINED_ACTIONS = ("HOLD", "ADDED", "TRIMMED")
 
 
 def live_positions(portfolio: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -54,6 +58,37 @@ def stopped_positions(portfolio: list[dict[str, Any]] | None) -> list[dict[str, 
     stop_limit) are selected.
     """
     return [p for p in (portfolio or []) if p.get("exit_reason") in STOP_EXIT_REASONS]
+
+
+def carry_forward_state(
+    allocations: list[dict[str, Any]],
+    previous_portfolio: list[dict[str, Any]] | None,
+) -> None:
+    """Carry forward entry_price and stop-state for retained positions.
+
+    Mutates ``allocations`` in place. EXITED rows from the previous portfolio
+    are never used as a source. For positions whose action is HOLD/ADDED/TRIMMED
+    and that still have a live previous row, copy the original entry_price and
+    any present stop-state keys. The peak_price is then clamped to be at least
+    the carried entry_price so a trailing stop can never ratchet below cost.
+    """
+    prev_map = {p["ticker"]: p for p in live_positions(previous_portfolio)}
+    for alloc in allocations:
+        if alloc.get("action") not in RETAINED_ACTIONS:
+            continue
+        prev = prev_map.get(alloc["ticker"])
+        if not prev:
+            continue
+
+        if prev.get("entry_price"):
+            alloc["entry_price"] = prev["entry_price"]
+
+        for key in CARRIED_STOP_STATE_KEYS:
+            if key not in alloc and prev.get(key) is not None:
+                alloc[key] = prev[key]
+
+        if "peak_price" in alloc and "entry_price" in alloc:
+            alloc["peak_price"] = max(alloc["peak_price"], alloc["entry_price"])
 
 
 # ─── Fresh allocation (week 1 or first ever run) ──────────────────────────────
@@ -351,14 +386,9 @@ def run(
         log.exception("Allocator LLM call failed: %s", exc)
         allocations = fallback_fn()
 
-    # ── Patch entry_price for HOLD/ADDED/TRIMMED from previous portfolio ──────
-    if is_rebalance and previous_portfolio:
-        prev_map = {p["ticker"]: p for p in live_positions(previous_portfolio)}
-        for a in allocations:
-            if a.get("action") in ("HOLD", "ADDED", "TRIMMED"):
-                prev = prev_map.get(a["ticker"])
-                if prev and prev.get("entry_price"):
-                    a["entry_price"] = prev["entry_price"]
+    # ── Carry forward entry_price and stop-state for retained positions ───────
+    if is_rebalance:
+        carry_forward_state(allocations, previous_portfolio)
 
     # ── Convert dollar targets into WHOLE shares (real paper-trade fills) ─────
     # shares = floor(target $ / entry price); the rounding remainder stays cash.
