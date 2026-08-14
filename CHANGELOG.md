@@ -46,6 +46,10 @@ Breaking changes within the 0.x line are called out explicitly.
 
 - **Rebalance allocator prompt now surfaces positions stopped out mid-week.** `build_rebalance_user_message()` in `web/spy_allocator.py` now appends a `=== STOPPED OUT SINCE LAST REBALANCE ===` section (built with `REBALANCE_STOPPED_HEADER`, `STOPPED_TICKER_TEMPLATE`, and `stopped_positions()`) listing each stopped position's ticker, `exit_reason`, `entry_price`, and `exit_price`. The system prompt instructs the LLM that these positions are already closed and their capital is already reflected in starting capital, so re-entering one is a deliberate `NEW` position it should justify in its rationale. Previously the allocator never saw mid-week stop exits at all, which can change allocation decisions such as whether to re-enter a name that just stopped out.
 
+### Fixed
+
+- **Hourly equity price-refresh endpoint no longer treats empty portfolios as a total outage.** `POST /api/spy-scans/latest/refresh-prices` (called every weekday hour by `web/scheduler.py`) used to return HTTP 500 and fire an "all accounts failed" alert whenever every equity paper account simply had no portfolio yet — the normal state before the first weekly allocation or for an unallocated account. The root cause was that `web/spy_scanner.py::refresh_portfolio_prices` returned the same `{"error": ...}` shape both for genuine failures and for the benign "no portfolio yet" case, and the total-outage test `scans and all(isinstance(v, dict) and "error" in v for v in scans.values())` was duplicated in `web/spy_scanner.py::refresh_all_portfolio_prices` and in `web/spy_routes.py::refresh_spy_prices_latest`. The benign case now returns `{"skipped": "no portfolio yet"}` instead, and outage classification lives in a single helper, `web/spy_scanner.py::is_total_price_refresh_outage()`, used by both the fan-out alert path and the route's HTTP 500 decision. The helper returns True only when there is at least one account, none succeeded, and none of the non-successes were merely benign skips; a mix of one real error and one empty-portfolio account is correctly classified as a partial failure, not a total outage. `"scan not found"` still counts as a genuine error (not a skip): the fan-out selects scan ids from the database immediately beforehand, so a miss means the row vanished mid-run rather than representing a steady, benign state. A genuine total outage (every account's price refresh actually failing) still returns HTTP 500 and still fires the alert, unchanged. On the frontend, the S&P 500 tab no longer pops a spurious "Refresh failed: no portfolio yet" dialog when re-pricing a freshly-created scan, since that client-side check only fires on the `{"error": ...}` shape.
+
 ## [2.0.0] — 2026-08-09
 
 Major version: this release is a full efficiency and reliability overhaul of
@@ -446,9 +450,9 @@ for the full rationale.
 
 - Shipped refactor plans archived under `docs/history/`.
 - ⚠️ **`memory_log_max_entries` now defaults to `300` (was `None` = unbounded).**
-  Resolved decision-log entries beyond the cap are pruned oldest-first on the
-  next write; pending entries are never pruned. This matters on upgrade: the
-  new nightly outcome sweep resolves the backlog that previously sat pending
+  Resolved decision-log entries beyond the cap are pruned oldest-first on
+  the next write; pending entries are never pruned. This matters on upgrade:
+  the new nightly outcome sweep resolves the backlog that previously sat pending
   forever, so the first sweep on a long-running deployment can cross the cap
   and drop old history in one pass. Set `memory_log_max_entries: None` in the
   config to keep the old unbounded behaviour (there is no env-var override for
