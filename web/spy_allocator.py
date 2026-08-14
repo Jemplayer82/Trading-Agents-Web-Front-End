@@ -8,7 +8,7 @@ scan never finishes without a portfolio.
 Allocation dict (persisted as spy_scans.portfolio_json; consumed by
 spy_scanner.refresh_portfolio_prices and /api/spy-account/compare):
     ticker, action, allocation_pct, dollar_amount, entry_price, rationale
-    peak_price, pending_stop_limit, stop_limit_price
+    peak_price, pending_stop_limit, stop_limit_price, current_price
         stop-state carried across a rebalance by carry_forward_state()
     shares, cost_basis              added here post-LLM (whole-share conversion)
     current_price, current_value    added later by refresh_portfolio_prices
@@ -36,7 +36,12 @@ from .llm_helpers import llm_for
 log = logging.getLogger(__name__)
 
 STOP_EXIT_REASONS = frozenset({"stop_loss", "trail_stop", "stop_limit"})
-CARRIED_STOP_STATE_KEYS = ("peak_price", "pending_stop_limit", "stop_limit_price")
+CARRIED_STOP_STATE_KEYS = (
+    "peak_price",
+    "pending_stop_limit",
+    "stop_limit_price",
+    "current_price",
+)
 RETAINED_ACTIONS = ("HOLD", "ADDED", "TRIMMED")
 
 
@@ -69,8 +74,10 @@ def carry_forward_state(
     Mutates ``allocations`` in place. EXITED rows from the previous portfolio
     are never used as a source. For positions whose action is HOLD/ADDED/TRIMMED
     and that still have a live previous row, copy the original entry_price and
-    any present stop-state keys. The peak_price is then clamped to be at least
-    the carried entry_price so a trailing stop can never ratchet below cost.
+    any present stop-state keys (including ``current_price`` so the first post-
+    rebalance mark-to-market has a valid previous mark to evaluate against the
+    stop level). The peak_price is then clamped to be at least the carried
+    entry_price so a trailing stop can never ratchet below cost.
     """
     prev_map = {p["ticker"]: p for p in live_positions(previous_portfolio)}
     for alloc in allocations:
