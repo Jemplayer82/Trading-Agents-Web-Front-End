@@ -1,3 +1,4 @@
+import pandas as pd
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -5,6 +6,12 @@ from fastapi.testclient import TestClient
 from web import db, spy_routes, spy_scanner
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _no_yfinance_network(monkeypatch):
+    """Disable real yfinance downloads; tests inject prices via Schwab."""
+    monkeypatch.setattr(spy_scanner.yf, "download", lambda *a, **k: pd.DataFrame())
 
 
 @pytest.fixture()
