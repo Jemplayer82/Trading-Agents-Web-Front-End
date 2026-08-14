@@ -1035,6 +1035,16 @@ def test_outage_predicate_entry_with_both_keys_counts_as_an_error():
     assert spy_scanner.is_total_price_refresh_outage(scans) is True
 
 
+def test_outage_predicate_none_value_counts_as_an_error():
+    scans = {"1": None}
+    assert spy_scanner.is_total_price_refresh_outage(scans) is True
+
+
+def test_outage_predicate_string_value_counts_as_an_error():
+    scans = {"1": "error: boom"}
+    assert spy_scanner.is_total_price_refresh_outage(scans) is True
+
+
 def test_refresh_portfolio_prices_missing_scan_is_a_real_error(tmp_db, monkeypatch):
     # Calling the real production path with a scan id that does not exist must
     # return {"error": "scan not found"} -- not a "skipped" key. This is the
