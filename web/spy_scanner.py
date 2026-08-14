@@ -67,7 +67,7 @@ from tradingagents.dataflows.config import set_config
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.orchestrator import SwitchboardOrchestrator
 
-from . import account_policy, alerts, db, market_cache
+from . import account_policy, alerts, db, market_cache, spy_allocator
 from .llm_helpers import DynamicGate, _GateMonitor, _total_budget, llm_for
 
 log = logging.getLogger(__name__)
@@ -1367,10 +1367,9 @@ def _format_rebalance_notes(
     portfolio: list[dict[str, Any]], signal_flips: list[str]
 ) -> str:
     """Build the rebalance_notes string from stopped rows and signal flips."""
-    _STOP_REASONS = {"stop_loss", "trail_stop", "stop_limit"}
     stopped_lines = []
     for r in portfolio:
-        if r.get("exit_reason") in _STOP_REASONS:
+        if r.get("exit_reason") in spy_allocator.STOP_EXIT_REASONS:
             t = r.get("ticker", "UNKNOWN")
             exit_reason = r["exit_reason"]
             exit_price = float(r.get("exit_price") or 0)

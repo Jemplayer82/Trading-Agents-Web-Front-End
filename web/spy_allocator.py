@@ -14,9 +14,13 @@ spy_scanner.refresh_portfolio_prices and /api/spy-account/compare):
     current_price, current_value    added later by refresh_portfolio_prices
 
 `action` is "NEW" | "HOLD" | "ADDED" | "TRIMMED" | "EXITED". EXITED rows are
-kept (shares=0) as a paper trail; live_positions() below is now the single
-place that filters action != "EXITED" to find live positions, and downstream
-code should use it.
+kept (shares=0) as a paper trail; live_positions() below is the canonical
+filter for action != "EXITED", and downstream code that can import
+spy_allocator should prefer it. It is not literally the only place the
+comparison appears: web/scheduler.py inlines the same check because it ships
+at the base tier where spy_allocator is removed, and a couple of tight
+per-position loops in spy_scanner.py preserve the inline comparison by
+design (verbatim refactor, avoids a cross-module call in a hot loop).
 
 Two modes: fresh (week 1, $100k) vs rebalance (week 2+, capital = the previous
 scan's refreshed value; kept positions retain their original entry_price so

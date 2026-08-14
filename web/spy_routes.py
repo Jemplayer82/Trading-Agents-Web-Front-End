@@ -408,9 +408,7 @@ def spy_account_compare() -> dict[str, Any]:
     paper: dict[str, dict[str, Any]] = {}
     paper_value = 0.0
     if scan:
-        for a in scan.get("portfolio_json") or []:
-            if a.get("action") == "EXITED":
-                continue
+        for a in spy_allocator.live_positions(scan.get("portfolio_json") or []):
             shares = a.get("shares") or 0
             if shares <= 0:
                 continue
@@ -592,7 +590,7 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
         starting_value=alloc_result.get("starting_value", starting_value),
     )
     log.info("[spy %s] done — %d positions, capital $%s → deployed $%s", scan_id,
-             len([p for p in portfolio if p.get("action") != "EXITED"]),
+             len(spy_allocator.live_positions(portfolio)),
              f"{starting_value:,.0f}", f"{alloc_result.get('total', 0):,.0f}")
 
     # Mark the fresh portfolio to market immediately so the table shows live
