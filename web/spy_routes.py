@@ -295,11 +295,21 @@ def cancel_spy_scan(scan_id: int) -> dict[str, Any]:
 # (returning 422) if the parameterised route is declared first.
 @router.post("/api/spy-scans/latest/refresh-prices")
 def refresh_spy_prices_latest() -> dict[str, Any]:
+    """Hourly cron entry point: mark every equity paper account to market.
+
+    500s only on a genuine total outage. Accounts that merely had nothing to
+    re-price -- ``{"skipped": "no portfolio yet"}``, the normal state until an
+    account's first weekly allocation runs -- come back 200 with their
+    per-account entry intact in the body, and never trip the outage alert.
+    """
     result = spy_scanner.refresh_all_portfolio_prices(kind="equity")
     if not result.get("scans"):
         raise HTTPException(status_code=404, detail="no scans found")
-    scans = result.get("scans") or {}
-    if scans and all(isinstance(v, dict) and "error" in v for v in scans.values()):
+    # Outage classification is shared with spy_scanner.refresh_all_portfolio_prices,
+    # which calls the same predicate to decide whether to page the user. Do not
+    # re-derive it inline here -- a duplicated copy is how the 500 and the alert
+    # would drift apart.
+    if spy_scanner.is_total_price_refresh_outage(result.get("scans") or {}):
         raise HTTPException(status_code=500, detail=result)
     return result
 
