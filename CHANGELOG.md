@@ -450,9 +450,9 @@ for the full rationale.
 
 - Shipped refactor plans archived under `docs/history/`.
 - ⚠️ **`memory_log_max_entries` now defaults to `300` (was `None` = unbounded).**
-  Resolved decision-log entries beyond the cap are pruned oldest-first on
-  the next write; pending entries are never pruned. This matters on upgrade:
-  the new nightly outcome sweep resolves the backlog that previously sat pending
+  Resolved decision-log entries beyond the cap are pruned oldest-first on the
+  next write; pending entries are never pruned. This matters on upgrade: the
+  new nightly outcome sweep resolves the backlog that previously sat pending
   forever, so the first sweep on a long-running deployment can cross the cap
   and drop old history in one pass. Set `memory_log_max_entries: None` in the
   config to keep the old unbounded behaviour (there is no env-var override for
