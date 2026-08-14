@@ -227,6 +227,138 @@ def test_reconcile_survives_db_list_failure(tmp_db, monkeypatch):
     assert len(sched.get_jobs()) == 0
 
 
+# --- per-account scan job direct invocation ---
+
+class _FakeResponse:
+    def __init__(self, status_code, text=""):
+        self.status_code = status_code
+        self.text = text
+
+
+def test_job_spy_scan_account_posts_to_portfolio_url(monkeypatch):
+    account_id = 4242
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs))
+        return _FakeResponse(200, "ok")
+
+    monkeypatch.setattr("httpx.post", fake_post)
+    monkeypatch.setattr(scheduler.alerts, "notify", lambda *args, **kwargs: None)
+
+    scheduler.job_spy_scan_account(account_id)
+
+    assert len(calls) == 1
+    url, kwargs = calls[0]
+    assert url == f"{scheduler.PORTFOLIO_URL}/api/spy-scan"
+    assert kwargs.get("json") == {"account_id": account_id}
+    assert kwargs.get("timeout") == 60
+    assert isinstance(kwargs.get("headers"), dict)
+
+
+def test_job_options_scan_account_posts_to_portfolio_url(monkeypatch):
+    account_id = 4243
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs))
+        return _FakeResponse(200, "ok")
+
+    monkeypatch.setattr("httpx.post", fake_post)
+    monkeypatch.setattr(scheduler.alerts, "notify", lambda *args, **kwargs: None)
+
+    scheduler.job_options_scan_account(account_id)
+
+    assert len(calls) == 1
+    url, kwargs = calls[0]
+    assert url == f"{scheduler.PORTFOLIO_URL}/api/options-scan"
+    assert kwargs.get("json") == {"account_id": account_id}
+    assert kwargs.get("timeout") == 60
+    assert isinstance(kwargs.get("headers"), dict)
+
+
+def test_job_spy_scan_account_notifies_on_5xx(monkeypatch):
+    account_id = 4244
+    error_text = "database timeout in spy scan queue"
+
+    def fake_post(_url, **_kwargs):
+        return _FakeResponse(500, error_text)
+
+    notify_calls = []
+
+    def fake_notify(*args, **kwargs):
+        notify_calls.append((args, kwargs))
+
+    monkeypatch.setattr("httpx.post", fake_post)
+    monkeypatch.setattr(scheduler.alerts, "notify", fake_notify)
+
+    scheduler.job_spy_scan_account(account_id)
+
+    assert len(notify_calls) == 1
+    summary, detail = notify_calls[0][0]
+    assert str(account_id) in summary
+    assert "500" in summary
+    assert detail == error_text[: scheduler._ALERT_DETAIL_MAX]
+    assert notify_calls[0][1].get("link") == scheduler.DASHBOARD_URL
+
+
+def test_job_options_scan_account_notifies_on_5xx(monkeypatch):
+    account_id = 4245
+    error_text = "options chain provider unavailable"
+
+    def fake_post(_url, **_kwargs):
+        return _FakeResponse(502, error_text)
+
+    notify_calls = []
+
+    def fake_notify(*args, **kwargs):
+        notify_calls.append((args, kwargs))
+
+    monkeypatch.setattr("httpx.post", fake_post)
+    monkeypatch.setattr(scheduler.alerts, "notify", fake_notify)
+
+    scheduler.job_options_scan_account(account_id)
+
+    assert len(notify_calls) == 1
+    summary, detail = notify_calls[0][0]
+    assert str(account_id) in summary
+    assert "502" in summary
+    assert detail == error_text[: scheduler._ALERT_DETAIL_MAX]
+    assert notify_calls[0][1].get("link") == scheduler.DASHBOARD_URL
+
+
+def test_job_spy_scan_account_does_not_notify_on_2xx(monkeypatch):
+    account_id = 4246
+    notify_calls = []
+
+    monkeypatch.setattr("httpx.post", lambda *_a, **_k: _FakeResponse(200, "queued"))
+    monkeypatch.setattr(
+        scheduler.alerts,
+        "notify",
+        lambda *args, **kwargs: notify_calls.append((args, kwargs)),
+    )
+
+    scheduler.job_spy_scan_account(account_id)
+
+    assert len(notify_calls) == 0
+
+
+def test_job_options_scan_account_does_not_notify_on_2xx(monkeypatch):
+    account_id = 4247
+    notify_calls = []
+
+    monkeypatch.setattr("httpx.post", lambda *_a, **_k: _FakeResponse(200, "queued"))
+    monkeypatch.setattr(
+        scheduler.alerts,
+        "notify",
+        lambda *args, **kwargs: notify_calls.append((args, kwargs)),
+    )
+
+    scheduler.job_options_scan_account(account_id)
+
+    assert len(notify_calls) == 0
+
+
 # --- nightly scan reconciler branch ---
 
 def test_reconcile_updates_nightly_scan_time(tmp_db, monkeypatch):
