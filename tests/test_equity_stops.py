@@ -706,3 +706,35 @@ def test_apply_stops_second_call_leaves_exited_row_and_cash_unchanged():
 
 def test_format_rebalance_notes_empty_when_no_stops_or_flips():
     assert spy_scanner._format_rebalance_notes([], []) == ""
+
+
+def test_format_rebalance_notes_stop_includes_entry_and_pct():
+    portfolio = [
+        {
+            "ticker": "TICK",
+            "exit_reason": "stop_loss",
+            "exit_price": 80.0,
+            "entry_price": 100.0,
+        }
+    ]
+    result = spy_scanner._format_rebalance_notes(portfolio, [])
+    expected = "Stopped out:\n- TICK: stop_loss at $80.00 (entry $100.00, -20.0%)"
+    assert result == expected
+
+
+def test_format_rebalance_notes_stops_and_flips_joined_with_blank_line():
+    portfolio = [
+        {
+            "ticker": "TICK",
+            "exit_reason": "stop_loss",
+            "exit_price": 80.0,
+            "entry_price": 100.0,
+        }
+    ]
+    flips = ["FLIP: was BUY at entry, now SELL"]
+    result = spy_scanner._format_rebalance_notes(portfolio, flips)
+    expected = (
+        "Stopped out:\n- TICK: stop_loss at $80.00 (entry $100.00, -20.0%)\n\n"
+        "Signal flips detected:\n- FLIP: was BUY at entry, now SELL"
+    )
+    assert result == expected
