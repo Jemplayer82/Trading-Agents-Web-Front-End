@@ -5,7 +5,7 @@ ai-trading-desk ships at 4 cumulative feature tiers (see web/features.py):
   1 = single-ticker analysis only            -> branch tier-1-base
   2 = + Schwab brokerage                     -> branch tier-2-brokerage
   3 = + S&P 500 scanner                      -> branch tier-3-scanner
-  4 = + daily options paper trading (= master, the full product — this script is a
+  4 = + options paper trading (= master, the full product — this script is a
       no-op at tier 4 except for the two harmless substitutions below)
 
 Three mechanisms carry the split:
