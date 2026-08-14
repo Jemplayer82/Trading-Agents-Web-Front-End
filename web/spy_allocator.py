@@ -414,7 +414,7 @@ def run(
                 "starting_value": starting_value or 100_000}
 
     is_rebalance = bool(previous_portfolio)
-    capital = starting_value if (is_rebalance and starting_value) else 100_000.0
+    capital = starting_value if starting_value else 100_000.0
     max_pos, max_pct, min_cash_pct = _position_limits(aggressiveness, capital)
     bias_context = _BIAS_CONTEXT.get(bias, "")
 
