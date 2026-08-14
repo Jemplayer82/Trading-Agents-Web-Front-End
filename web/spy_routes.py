@@ -514,25 +514,25 @@ def _run_spy_scan(scan_id: int, trade_date: str) -> None:
 
     if prev_scan:
         prev_portfolio_raw = prev_scan.get("portfolio_json") or []
-        # Only use previous portfolio if it has active (non-exited) positions.
+        # Use the full previous portfolio (including EXITED/stopped rows) so the
+        # allocator enters rebalance mode; active_prev is only for fallback capital.
         active_prev = [
             p for p in spy_allocator.live_positions(prev_portfolio_raw)
             if p.get("dollar_amount", 0) > 0
         ]
-        if active_prev:
-            previous_portfolio = prev_portfolio_raw
-            previous_scan_id = int(prev_scan["id"])
-            # Use last refreshed value as capital; fall back to sum of allocations.
-            if prev_scan.get("current_value"):
-                starting_value = float(prev_scan["current_value"])
-            else:
-                starting_value = float(sum(
-                    p.get("dollar_amount", 0) for p in active_prev
-                )) or starting_value
-            log.info(
-                "[spy %s] rebalancing from scan #%s, capital $%s",
-                scan_id, previous_scan_id, f"{starting_value:,.0f}",
-            )
+        previous_portfolio = prev_portfolio_raw
+        previous_scan_id = int(prev_scan["id"])
+        # Use last refreshed value as capital; fall back to sum of live allocations.
+        if prev_scan.get("current_value"):
+            starting_value = float(prev_scan["current_value"])
+        elif active_prev:
+            starting_value = float(sum(
+                p.get("dollar_amount", 0) for p in active_prev
+            )) or starting_value
+        log.info(
+            "[spy %s] rebalancing from scan #%s, capital $%s",
+            scan_id, previous_scan_id, f"{starting_value:,.0f}",
+        )
 
     # Phase 1: quick scan all S&P 500
     with _phase("Couldn't fetch the S&P 500 ticker list"):
