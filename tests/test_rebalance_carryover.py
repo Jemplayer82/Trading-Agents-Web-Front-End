@@ -321,6 +321,26 @@ def test_build_rebalance_message_no_stopped_section_when_none():
     assert "AAPL | signal: BUY | conviction: 8/10 | entry_price: $140.00" in msg
 
 
+def test_build_rebalance_message_live_position_dropped_from_candidates():
+    """A still-LIVE previous position whose ticker is not in the new candidate
+    list must be shown under CURRENT HOLDINGS with a SELL/conviction 0 hint.
+    """
+    previous = [
+        {"ticker": "AAPL", "action": "HOLD", "entry_price": 140.0},
+    ]
+    candidates = []
+    msg = spy_allocator.build_rebalance_user_message(
+        candidates, previous, "2024-01-01", 100_000.0
+    )
+    assert "=== CURRENT HOLDINGS (1 positions) ===" in msg
+    assert (
+        "AAPL | signal: SELL | conviction: 0/10 | entry_price: $140.00 | "
+        "No longer in top candidates — consider exiting."
+    ) in msg
+    assert "STOPPED OUT" not in msg
+    assert "NEW CANDIDATES" not in msg
+
+
 def test_build_rebalance_message_shows_stopped_row():
     candidates = [
         {
