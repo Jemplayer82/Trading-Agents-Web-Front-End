@@ -369,3 +369,41 @@ def test_latest_refresh_prices_500_when_one_errors_and_one_is_empty(
     assert scans[str(acct_b["id"])]["error"] == "allocation produced no positions"
     assert "skipped" not in scans[str(acct_b["id"])]
     assert len(captured_alerts) == 1
+
+
+def test_latest_refresh_prices_500s_and_alerts_when_yfinance_download_fails_in_real_refresh(
+    client, captured_alerts, monkeypatch
+):
+    """Exercise the real refresh_portfolio_prices body, not a monkeypatched stand-in.
+
+    Complement to test_latest_refresh_prices_500s_and_alerts_when_every_account_errors,
+    which only covers the fan-out except path. Here we force the in-function
+    yfinance-download except branch (return {"error": str(exc)}) by disabling
+    Schwab quotes and making yf.download raise.
+    """
+    acct1 = _create_account(client, name="yf-fail-1")
+    acct2 = _create_account(client, name="yf-fail-2")
+
+    _completed_scan(acct1["id"], [_SAMPLE_PORTFOLIO_ROW])
+    _completed_scan(acct2["id"], [_SAMPLE_PORTFOLIO_ROW])
+
+    # Disable Schwab so the real refresh_portfolio_prices falls through to yfinance.
+    monkeypatch.setattr(
+        spy_scanner.schwab_mcp, "market_data_enabled", lambda: False
+    )
+
+    yf_error_message = "yfinance download failed in unit test"
+
+    def _boom(*_args, **_kwargs):
+        raise Exception(yf_error_message)
+
+    # Override the autouse _no_yfinance_network fixture with a real exception.
+    monkeypatch.setattr(spy_scanner.yf, "download", _boom)
+
+    resp = client.post("/api/spy-scans/latest/refresh-prices")
+    assert resp.status_code == 500
+    scans = resp.json()["detail"]["scans"]
+    assert len(scans) == 2
+    for entry in scans.values():
+        assert entry == {"error": yf_error_message}
+    assert len(captured_alerts) == 1
