@@ -393,13 +393,12 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, str]] = [
 # Backfills that run exactly once — on the boot where the column is added.
 # Keyed on the ALTER firing, NOT on a NULL check: a NULL check would re-fill a
 # schedule the user deliberately cleared, every boot, forever.
-_POST_MIGRATION_BACKFILLS: list[tuple[tuple[str, str], str]] = [
-    (("paper_accounts", "schedule_time"),
+_POST_MIGRATION_BACKFILLS: list[tuple[tuple[tuple[str, str], ...], str]] = [
+    ((("paper_accounts", "schedule_time"),),
      "UPDATE paper_accounts SET schedule_time = CASE WHEN kind = 'options' THEN '07:30' ELSE '00:00' END"),
-    (("paper_accounts", "stop_type"),
-     "UPDATE paper_accounts SET stop_type = 'stop' WHERE kind = 'options'"),
-    (("paper_accounts", "stop_value"),
-     "UPDATE paper_accounts SET stop_value = 60 WHERE kind = 'options'"),
+    # The paired stop policy columns must backfill together or not at all.
+    ((("paper_accounts", "stop_type"), ("paper_accounts", "stop_value")),
+     "UPDATE paper_accounts SET stop_type = 'stop', stop_value = 60 WHERE kind = 'options'"),
 ]
 
 
@@ -427,8 +426,9 @@ def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
         applied = _run_column_migrations(conn)
-        for (table, column), sql in _POST_MIGRATION_BACKFILLS:
-            if (table, column) in applied:
+        for key, sql in _POST_MIGRATION_BACKFILLS:
+            # key is a tuple of one or more (table, column) pairs; all must have been added.
+            if all((table, column) in applied for (table, column) in key):
                 conn.execute(sql)
         _encrypt_existing_secrets(conn)
     # The DB holds API keys, OAuth secrets and password hashes — keep it readable

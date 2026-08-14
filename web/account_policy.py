@@ -12,6 +12,7 @@ the two stop implementations provably identical.
 This module imports only the Python stdlib and nothing from `web/`.
 """
 
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -27,6 +28,8 @@ __all__ = [
     "evaluate",
     "describe_policy",
 ]
+
+log = logging.getLogger(__name__)
 
 STOP_TYPES = ("none", "stop", "stop_limit", "trailing_pct", "trailing_dollar")
 
@@ -66,21 +69,44 @@ class StopPolicy:
             return NONE
 
         raw_type = account.get("stop_type")
+        if raw_type is None:
+            return NONE
         if not isinstance(raw_type, str):
+            _warn_degraded_to_none(
+                account, raw_type, None, None, "stop_type is not a string"
+            )
             return NONE
+
         stop_type = raw_type.strip().lower()
-        if stop_type not in STOP_TYPES:
+        if stop_type == "" or stop_type == "none":
             return NONE
-        if stop_type == "none":
+        if stop_type not in STOP_TYPES:
+            _warn_degraded_to_none(
+                account, raw_type, None, None, f"unknown stop_type {raw_type!r}"
+            )
             return NONE
 
         value = _coerce_float(account.get("stop_value"))
         if value is None or value <= 0:
+            _warn_degraded_to_none(
+                account,
+                stop_type,
+                account.get("stop_value"),
+                None,
+                "stop_value missing or not a positive number",
+            )
             return NONE
 
         if stop_type == "stop_limit":
             offset = _coerce_float(account.get("stop_limit_offset"))
             if offset is None or offset <= 0:
+                _warn_degraded_to_none(
+                    account,
+                    stop_type,
+                    value,
+                    account.get("stop_limit_offset"),
+                    "stop_limit_offset missing or not a positive number",
+                )
                 return NONE
             return cls(stop_type=stop_type, stop_value=value, stop_limit_offset=offset)
 
@@ -248,3 +274,30 @@ def _coerce_float(value: object) -> float | None:
         return float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+
+
+def _warn_degraded_to_none(
+    account: Mapping[str, Any],
+    stop_type: object,
+    stop_value: object,
+    stop_limit_offset: object,
+    reason: str,
+) -> None:
+    """Log when a stored non-'none' stop policy cannot be honored at runtime."""
+    account_id = account.get("id")
+    if account_id is not None:
+        log.warning(
+            "[account_policy] account %r stop policy degraded to NONE: %s "
+            "(stop_type=%r, stop_value=%r, stop_limit_offset=%r)",
+            account_id,
+            reason,
+            stop_type,
+            stop_value,
+            stop_limit_offset,
+        )
+    else:
+        log.warning(
+            "[account_policy] stored stop policy degraded to NONE: %s "
+            "(stop_type=%r, stop_value=%r, stop_limit_offset=%r)",
+            reason, stop_type, stop_value, stop_limit_offset,
+        )
