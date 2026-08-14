@@ -707,7 +707,7 @@ def test_refresh_all_every_account_erroring_still_alerts(tmp_db, captured_alerts
     assert str(aid_b) in captured_alerts[0][1]
 
 
-def test_refresh_all_mixed_real_error_and_skip_does_not_alert(tmp_db, captured_alerts, monkeypatch):
+def test_refresh_all_mixed_real_error_and_skip_does_alert(tmp_db, captured_alerts, monkeypatch):
     portfolio = [
         {
             "ticker": "TICK",
@@ -743,7 +743,10 @@ def test_refresh_all_mixed_real_error_and_skip_does_not_alert(tmp_db, captured_a
     assert "error" in result["scans"][str(aid_a)]
     assert result["scans"][str(aid_b)]["skipped"] == "no portfolio yet"
     assert "error" not in result["scans"][str(aid_b)]
-    assert captured_alerts == []
+    assert len(captured_alerts) == 1
+    assert captured_alerts[0][0] == "All 2 equity account price refreshes failed"
+    assert str(aid_a) in captured_alerts[0][1]
+    assert str(aid_b) in captured_alerts[0][1]
 
 
 # --- direct unit tests for the extracted pure helpers -----------------------
@@ -980,9 +983,9 @@ def test_outage_predicate_all_skips_is_not_an_outage():
     assert spy_scanner.is_total_price_refresh_outage(scans) is False
 
 
-def test_outage_predicate_mixed_error_and_skip_is_not_an_outage():
+def test_outage_predicate_mixed_error_and_skip_is_an_outage():
     scans = {"1": {"error": "boom"}, "2": {"skipped": "no portfolio yet"}}
-    assert spy_scanner.is_total_price_refresh_outage(scans) is False
+    assert spy_scanner.is_total_price_refresh_outage(scans) is True
 
 
 def test_outage_predicate_mixed_error_and_success_is_not_an_outage():

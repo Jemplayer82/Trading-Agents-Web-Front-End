@@ -1528,19 +1528,24 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
 
 
 def is_total_price_refresh_outage(scans: dict[str, Any]) -> bool:
-    """True only when every account in a fan-out result failed for a real reason.
+    """True when nothing in the fan-out was re-priced AND at least one real failure occurred.
 
     ``refresh_portfolio_prices`` returns three distinguishable shapes: a
     success payload, ``{"skipped": ...}`` (nothing to re-price), and
     ``{"error": ...}`` (a genuine failure). Only the last counts here, so this
-    is True exactly when there is at least one account, none succeeded, and
-    none of the non-successes were merely benign skips.
+    is True exactly when ``errors >= 1 and successes == 0``:
+
+    * ``errors`` counts entries carrying an ``"error"`` key.
+    * ``skips`` counts entries carrying a ``"skipped"`` key but NO ``"error"`` key,
+      so an entry with both keys is counted only as an error.
+    * ``successes = len(scans) - errors - skips``.
 
     A brand-new paper account has no portfolio until its first weekly
     allocation runs, so an all-skipped result is an ordinary steady state --
-    it must not 500 the hourly cron endpoint and must not page anyone. A mix
-    of one real error and one empty-portfolio skip is likewise a partial
-    failure, not an outage.
+    it must not 500 the hourly cron endpoint and must not page anyone. But a
+    mix of one real error and one empty-portfolio skip, with zero successes,
+    means every refreshable account failed for real, so it IS an outage and
+    both the route and the alert must fire.
 
     Single source of truth: both the alert below and the HTTP 500 in
     web/spy_routes.py::refresh_spy_prices_latest call this, so the two can
@@ -1548,8 +1553,17 @@ def is_total_price_refresh_outage(scans: dict[str, Any]) -> bool:
     """
     if not scans:
         return False
-    errors = sum(1 for v in scans.values() if isinstance(v, dict) and "error" in v)
-    return errors == len(scans)
+    errors = 0
+    skips = 0
+    for v in scans.values():
+        if not isinstance(v, dict):
+            continue
+        if "error" in v:
+            errors += 1
+        elif "skipped" in v:
+            skips += 1
+    successes = len(scans) - errors - skips
+    return errors >= 1 and successes == 0
 
 
 def refresh_all_portfolio_prices(kind: str = "equity") -> dict[str, Any]:

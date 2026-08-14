@@ -336,7 +336,7 @@ def test_latest_refresh_prices_500s_and_alerts_when_every_account_errors(
     assert len(captured_alerts) == 1
 
 
-def test_latest_refresh_prices_200_when_one_errors_and_one_is_empty(
+def test_latest_refresh_prices_500_when_one_errors_and_one_is_empty(
     client, captured_alerts, monkeypatch
 ):
     acct_a = _create_account(client, name="partial-error")
@@ -355,10 +355,10 @@ def test_latest_refresh_prices_200_when_one_errors_and_one_is_empty(
     monkeypatch.setattr(spy_scanner, "refresh_portfolio_prices", _selective_fail)
 
     resp = client.post("/api/spy-scans/latest/refresh-prices")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert len(body["scans"]) == 2
-    assert "error" in body["scans"][str(acct_a["id"])]
-    assert body["scans"][str(acct_b["id"])]["skipped"] == "no portfolio yet"
-    assert "error" not in body["scans"][str(acct_b["id"])]
-    assert captured_alerts == []
+    assert resp.status_code == 500
+    scans = resp.json()["detail"]["scans"]
+    assert len(scans) == 2
+    assert "error" in scans[str(acct_a["id"])]
+    assert scans[str(acct_b["id"])]["skipped"] == "no portfolio yet"
+    assert "error" not in scans[str(acct_b["id"])]
+    assert len(captured_alerts) == 1
