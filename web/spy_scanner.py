@@ -1410,9 +1410,11 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
     Return shapes are mutually exclusive: on success, a mark-to-market payload
     with ``current_value``, ``positions_value``, ``cash``, ``deployed``,
     ``return_pct``, ``rebalance_notes``, ``stopped``, and ``realized``; when
-    there is simply nothing to re-price, ``{"skipped": "<reason>"}`` (benign and
-    never counted as a failure); and on a genuine failure,
-    ``{"error": "<message>"}`` -- the only shape that counts toward
+    the scan has not finished allocating yet (status is anything other than
+    ``"completed"``), an empty ``portfolio_json`` is benign and returns
+    ``{"skipped": "<reason>"}`` (never counted as a failure); and on a genuine
+    failure -- including a completed allocation that produced no positions --
+    ``{"error": "<message>"}`` is returned, the only shape that counts toward
     ``is_total_price_refresh_outage``. If an entry ever carries both
     ``"skipped"`` and ``"error"``, the ``"error"`` key wins and it is treated as
     a real failure.
@@ -1429,11 +1431,15 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
         return {"error": "scan not found"}
     portfolio = scan.get("portfolio_json")
     if not portfolio:
-        # Benign and expected: every paper account looks like this between
-        # creation and its first weekly allocation. Reusing the {"error": ...}
-        # shape here is what made the hourly cron's /latest/refresh-prices
-        # return a false 500 and fire a bogus "everything is broken" alert
-        # whenever no account had allocated yet.
+        # Two distinct cases. db.complete_spy_scan updates status to
+        # "completed" and persists portfolio_json atomically in one UPDATE,
+        # so a "completed" row with an empty portfolio means allocation ran and
+        # finished but produced zero positions -- a real failure mode. Any
+        # other status means allocation has not finished yet, which is benign
+        # and expected for a brand-new account before its first weekly
+        # allocation.
+        if scan.get("status") == "completed":
+            return {"error": "allocation produced no positions"}
         return {"skipped": "no portfolio yet"}
 
     tickers = [a["ticker"] for a in portfolio]

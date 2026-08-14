@@ -647,7 +647,11 @@ def captured_alerts(monkeypatch):
     return calls
 
 
-def test_refresh_all_empty_portfolios_skip_without_alerting(tmp_db, captured_alerts):
+def test_refresh_all_completed_empty_portfolios_alert_as_outage(tmp_db, captured_alerts):
+    # A completed scan with an empty portfolio is no longer "no portfolio yet".
+    # Because refresh_all_portfolio_prices only sees completed scans, both of
+    # these empty accounts must return the real allocation-failure error and
+    # together trigger the total-outage alert.
     aid_a = _account("acct-empty-a", stop_type="none")
     scan_a = db.create_spy_scan("2026-08-10", paper_account_id=aid_a)
     _seed_scan(scan_a, 10000, [])
@@ -662,11 +666,26 @@ def test_refresh_all_empty_portfolios_skip_without_alerting(tmp_db, captured_ale
     key_b = str(aid_b)
     assert key_a in result["scans"]
     assert key_b in result["scans"]
-    assert result["scans"][key_a]["skipped"] == "no portfolio yet"
-    assert result["scans"][key_b]["skipped"] == "no portfolio yet"
-    assert "error" not in result["scans"][key_a]
-    assert "error" not in result["scans"][key_b]
-    assert captured_alerts == []
+    assert result["scans"][key_a]["error"] == "allocation produced no positions"
+    assert result["scans"][key_b]["error"] == "allocation produced no positions"
+    assert "skipped" not in result["scans"][key_a]
+    assert "skipped" not in result["scans"][key_b]
+    assert len(captured_alerts) == 1
+    assert captured_alerts[0][0] == "All 2 equity account price refreshes failed"
+    assert str(aid_a) in captured_alerts[0][1]
+    assert str(aid_b) in captured_alerts[0][1]
+
+
+def test_refresh_portfolio_prices_unallocated_scan_skips_before_completed(tmp_db):
+    # The only legitimate "no portfolio yet" skip is a scan that has not yet
+    # reached status 'completed'. Verify the skip shape directly through the
+    # single-scan API before allocation has run.
+    aid = _account("acct-pending", stop_type="none")
+    scan_id = db.create_spy_scan("2026-08-10", paper_account_id=aid)
+
+    result = spy_scanner.refresh_portfolio_prices(scan_id)
+    assert result == {"skipped": "no portfolio yet"}
+    assert "error" not in result
 
 
 def test_refresh_all_every_account_erroring_still_alerts(tmp_db, captured_alerts, monkeypatch):
@@ -707,7 +726,7 @@ def test_refresh_all_every_account_erroring_still_alerts(tmp_db, captured_alerts
     assert str(aid_b) in captured_alerts[0][1]
 
 
-def test_refresh_all_mixed_real_error_and_skip_does_alert(tmp_db, captured_alerts, monkeypatch):
+def test_refresh_all_mixed_real_error_and_empty_completed_alert_as_outage(tmp_db, captured_alerts, monkeypatch):
     portfolio = [
         {
             "ticker": "TICK",
@@ -741,8 +760,8 @@ def test_refresh_all_mixed_real_error_and_skip_does_alert(tmp_db, captured_alert
     result = spy_scanner.refresh_all_portfolio_prices(kind="equity")
 
     assert "error" in result["scans"][str(aid_a)]
-    assert result["scans"][str(aid_b)]["skipped"] == "no portfolio yet"
-    assert "error" not in result["scans"][str(aid_b)]
+    assert result["scans"][str(aid_b)]["error"] == "allocation produced no positions"
+    assert "skipped" not in result["scans"][str(aid_b)]
     assert len(captured_alerts) == 1
     assert captured_alerts[0][0] == "All 2 equity account price refreshes failed"
     assert str(aid_a) in captured_alerts[0][1]

@@ -302,15 +302,15 @@ def test_latest_refresh_prices_fans_out_across_accounts(client, captured_alerts)
     acct1 = _create_account(client, name="fan-out-1")
     acct2 = _create_account(client, name="fan-out-2")
 
-    _completed_scan(acct1["id"], [])
-    _completed_scan(acct2["id"], [])
+    _completed_scan(acct1["id"], [_SAMPLE_PORTFOLIO_ROW])
+    _completed_scan(acct2["id"], [_SAMPLE_PORTFOLIO_ROW])
 
     resp = client.post("/api/spy-scans/latest/refresh-prices")
     assert resp.status_code == 200
     body = resp.json()
     assert len(body["scans"]) == 2
     for entry in body["scans"].values():
-        assert entry["skipped"] == "no portfolio yet"
+        assert "current_value" in entry
         assert "error" not in entry
     assert captured_alerts == []
 
@@ -366,6 +366,6 @@ def test_latest_refresh_prices_500_when_one_errors_and_one_is_empty(
     scans = resp.json()["detail"]["scans"]
     assert len(scans) == 2
     assert "error" in scans[str(acct_a["id"])]
-    assert scans[str(acct_b["id"])]["skipped"] == "no portfolio yet"
-    assert "error" not in scans[str(acct_b["id"])]
+    assert scans[str(acct_b["id"])]["error"] == "allocation produced no positions"
+    assert "skipped" not in scans[str(acct_b["id"])]
     assert len(captured_alerts) == 1
