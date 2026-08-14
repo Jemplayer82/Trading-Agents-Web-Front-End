@@ -704,6 +704,55 @@ def test_apply_stops_second_call_leaves_exited_row_and_cash_unchanged():
     assert r2["stopped"] == 0
 
 
+def test_apply_stops_derives_shares_and_cost_basis_for_legacy_row():
+    portfolio = [
+        {
+            "ticker": "LEG",
+            "action": "BUY",
+            "entry_price": 100.0,
+            "dollar_amount": 950.0,
+            "signal": "BUY",
+        }
+    ]
+    policy = spy_scanner.account_policy.StopPolicy("none")
+    result = spy_scanner.apply_stops_and_value(
+        portfolio, basis=10000.0, policy=policy, prices={"LEG": 105.0}
+    )
+    row = portfolio[0]
+    assert row["shares"] == 9
+    assert row["cost_basis"] == 900.0
+    assert row["current_price"] == 105.0
+    assert row["current_value"] == 945.0
+    assert result["deployed"] == 900.0
+    assert result["cash"] == 9100.0
+
+
+def test_apply_stops_zero_shares_row_is_skipped():
+    portfolio = [
+        {
+            "ticker": "ZERO",
+            "action": "BUY",
+            "entry_price": 100.0,
+            "shares": 0,
+            "dollar_amount": 1000.0,
+            "signal": "BUY",
+        }
+    ]
+    policy = spy_scanner.account_policy.StopPolicy("none")
+    result = spy_scanner.apply_stops_and_value(
+        portfolio, basis=10000.0, policy=policy, prices={"ZERO": 50.0}
+    )
+    row = portfolio[0]
+    assert row["shares"] == 0
+    assert "cost_basis" not in row
+    assert "current_value" not in row
+    assert "current_price" not in row
+    assert result["deployed"] == 0.0
+    assert result["positions_value"] == 0.0
+    assert result["cash"] == 10000.0
+    assert result["stopped"] == 0
+
+
 def test_format_rebalance_notes_empty_when_no_stops_or_flips():
     assert spy_scanner._format_rebalance_notes([], []) == ""
 
