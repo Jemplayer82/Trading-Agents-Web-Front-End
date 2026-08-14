@@ -182,7 +182,8 @@ def test_carry_forward_state_entry_price_patch_for_added_and_trimmed():
         assert allocations[0]["peak_price"] == 110.0
 
 
-def test_carry_forward_state_does_not_overwrite_existing_stop_state():
+def test_carry_forward_state_overwrites_existing_stop_state():
+    """Trusted previous-row state must always win over any model-supplied value."""
     previous = [
         {
             "ticker": "X",
@@ -204,10 +205,10 @@ def test_carry_forward_state_does_not_overwrite_existing_stop_state():
         },
     ]
     spy_allocator.carry_forward_state(allocations, previous)
-    assert allocations[0]["entry_price"] == 50.0  # entry_price is always overwritten
-    assert allocations[0]["peak_price"] == 70.0
-    assert allocations[0]["pending_stop_limit"] is False
-    assert allocations[0]["stop_limit_price"] == 40.0
+    assert allocations[0]["entry_price"] == 50.0
+    assert allocations[0]["peak_price"] == 60.0
+    assert allocations[0]["pending_stop_limit"] is True
+    assert allocations[0]["stop_limit_price"] == 45.0
 
 
 def test_carry_forward_state_none_values_not_copied():

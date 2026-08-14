@@ -42,6 +42,15 @@ CARRIED_STOP_STATE_KEYS = (
     "stop_limit_price",
     "current_price",
 )
+# These keys are owned by the portfolio scanner/refresher and must never be
+# authored by the allocator's LLM or fallback output.
+UNTRUSTED_LLM_KEYS = (
+    *CARRIED_STOP_STATE_KEYS,
+    "exit_reason",
+    "exit_price",
+    "exit_proceeds",
+    "current_value",
+)
 RETAINED_ACTIONS = ("HOLD", "ADDED", "TRIMMED")
 
 
@@ -65,6 +74,20 @@ def stopped_positions(portfolio: list[dict[str, Any]] | None) -> list[dict[str, 
     return [p for p in (portfolio or []) if p.get("exit_reason") in STOP_EXIT_REASONS]
 
 
+def _strip_untrusted_keys(allocations: list[dict[str, Any]] | None) -> None:
+    """Remove system-owned stop/exit/current keys from LLM/fallback output.
+
+    Mutates ``allocations`` in place. These keys must only be written by the
+    portfolio scanner/refresher, never carried straight through from the
+    allocator's JSON output.
+    """
+    for alloc in allocations or []:
+        if not isinstance(alloc, dict):
+            continue
+        for key in UNTRUSTED_LLM_KEYS:
+            alloc.pop(key, None)
+
+
 def carry_forward_state(
     allocations: list[dict[str, Any]],
     previous_portfolio: list[dict[str, Any]] | None,
@@ -76,8 +99,10 @@ def carry_forward_state(
     and that still have a live previous row, copy the original entry_price and
     any present stop-state keys (including ``current_price`` so the first post-
     rebalance mark-to-market has a valid previous mark to evaluate against the
-    stop level). The peak_price is then clamped to be at least the carried
-    entry_price so a trailing stop can never ratchet below cost.
+    stop level). The previous row's value always wins for these keys, even if
+    the incoming allocation dict already contained different values.
+    The peak_price is then clamped to be at least the carried entry_price so a
+    trailing stop can never ratchet below cost.
     """
     prev_map = {p["ticker"]: p for p in live_positions(previous_portfolio)}
     for alloc in allocations:
@@ -91,7 +116,7 @@ def carry_forward_state(
             alloc["entry_price"] = prev["entry_price"]
 
         for key in CARRIED_STOP_STATE_KEYS:
-            if key not in alloc and prev.get(key) is not None:
+            if prev.get(key) is not None:
                 alloc[key] = prev[key]
 
         if "peak_price" in alloc and "entry_price" in alloc:
@@ -173,7 +198,6 @@ Output format (array of objects, include EXITED positions with dollar_amount 0):
   ...
 ]
 """
-
 _BIAS_CONTEXT = {
     "bullish": "\nMarket stance: BULLISH — prefer larger positions on high-conviction BUYs. "
                "Deploy more capital when signals are strong. In borderline Buy/Hold cases, lean Buy.\n",
@@ -430,6 +454,9 @@ def run(
     except Exception as exc:
         log.exception("Allocator LLM call failed: %s", exc)
         allocations = fallback_fn()
+
+    # ── Strip system-owned keys that the LLM or fallback must never author ─────
+    _strip_untrusted_keys(allocations)
 
     # ── Carry forward entry_price and stop-state for retained positions ───────
     if is_rebalance:
