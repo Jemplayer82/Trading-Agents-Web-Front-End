@@ -1531,14 +1531,22 @@ def is_total_price_refresh_outage(scans: dict[str, Any]) -> bool:
     """True when nothing in the fan-out was re-priced AND at least one real failure occurred.
 
     ``refresh_portfolio_prices`` returns three distinguishable shapes: a
-    success payload, ``{"skipped": ...}`` (nothing to re-price), and
-    ``{"error": ...}`` (a genuine failure). Only the last counts here, so this
-    is True exactly when ``errors >= 1 and successes == 0``:
+    success payload (dict carrying ``"current_value"``), ``{"skipped": ...}``
+    (nothing to re-price), and ``{"error": ...}`` (a genuine failure). This
+    function classifies by POSITIVE identification instead of assuming every
+    unrecognized value is a success:
 
-    * ``errors`` counts entries carrying an ``"error"`` key.
-    * ``skips`` counts entries carrying a ``"skipped"`` key but NO ``"error"`` key,
-      so an entry with both keys is counted only as an error.
-    * ``successes = len(scans) - errors - skips``.
+    * ``successes`` counts dicts that carry ``"current_value"`` and do NOT
+      carry an ``"error"`` key.
+    * ``skips`` counts dicts that carry a lone ``"skipped"`` key (no
+      ``"error"`` key and no ``"current_value"`` key).
+    * ``errors`` counts EVERYTHING else: non-dict values (``None``, lists,
+      strings, ...), dicts with an ``"error"`` key, dicts missing both
+      ``"current_value"`` and ``"skipped"``, and dicts with only unrecognized
+      keys. An entry carrying both ``"error"`` and ``"skipped"`` keys is an
+      error (error wins).
+
+    The outage condition is still exactly ``errors >= 1 and successes == 0``.
 
     A brand-new paper account has no portfolio until its first weekly
     allocation runs, so an all-skipped result is an ordinary steady state --
@@ -1549,20 +1557,23 @@ def is_total_price_refresh_outage(scans: dict[str, Any]) -> bool:
 
     Single source of truth: both the alert below and the HTTP 500 in
     web/spy_routes.py::refresh_spy_prices_latest call this, so the two can
-    never drift apart. An entry carrying both keys counts as an error.
+    never drift apart.
     """
     if not scans:
         return False
     errors = 0
     skips = 0
+    successes = 0
     for v in scans.values():
-        if not isinstance(v, dict):
-            continue
-        if "error" in v:
+        if isinstance(v, dict) and "error" not in v:
+            if "current_value" in v:
+                successes += 1
+            elif "skipped" in v:
+                skips += 1
+            else:
+                errors += 1
+        else:
             errors += 1
-        elif "skipped" in v:
-            skips += 1
-    successes = len(scans) - errors - skips
     return errors >= 1 and successes == 0
 
 
