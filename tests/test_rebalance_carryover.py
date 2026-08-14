@@ -92,7 +92,12 @@ def test_fallback_rebalance_stopped_out_then_recandidated_is_new():
     assert aapl_rows[0]["entry_price"] == 95.0
 
 
-def test_fallback_rebalance_no_duplicate_exited_for_already_exited():
+def test_fallback_rebalance_already_exited_rows_never_reach_exit_marking_loop():
+    """Previously-EXITED rows are stripped by ``live_positions()`` before the
+    fallback rebalance's exit-marking loop is ever reached. This test guards
+    that upstream filtering behavior — the loop never sees TSLA — rather than
+    the exit-marking logic itself.
+    """
     previous = [
         {"ticker": "MSFT", "action": "HOLD", "entry_price": 200.0, "dollar_amount": 5000},
         {"ticker": "TSLA", "action": "EXITED", "entry_price": 300.0, "dollar_amount": 0},
@@ -107,6 +112,52 @@ def test_fallback_rebalance_no_duplicate_exited_for_already_exited():
     assert len(msft_rows) == 1
     assert msft_rows[0]["action"] == "HOLD"
     assert tsla_rows == []
+
+
+def test_fallback_rebalance_emits_exited_for_live_position_dropped_from_candidates():
+    """A still-LIVE previous position whose ticker is absent from the new
+    candidate list must produce a fresh EXITED row in the fallback result.
+    """
+    previous = [
+        {"ticker": "AAPL", "action": "HOLD", "entry_price": 100.0, "dollar_amount": 5000},
+    ]
+    candidates = [
+        {"ticker": "MSFT", "entry_price": 200.0, "signal": "BUY", "conviction": 8},
+    ]
+    result = spy_allocator._fallback_rebalance(candidates, previous, 100_000.0)
+
+    aapl_rows = [r for r in result if r["ticker"] == "AAPL"]
+    assert len(aapl_rows) == 1
+    assert aapl_rows[0]["action"] == "EXITED"
+    assert aapl_rows[0]["allocation_pct"] == 0
+    assert aapl_rows[0]["dollar_amount"] == 0
+    assert aapl_rows[0]["entry_price"] == 100.0
+
+
+def test_fallback_rebalance_emits_exited_for_live_position_present_but_not_active():
+    """A still-LIVE previous position whose ticker is in the candidate list but
+    not among the allocated BUY/top-20 positions must also produce a fresh
+    EXITED row.
+    """
+    previous = [
+        {"ticker": "AAPL", "action": "HOLD", "entry_price": 150.0, "dollar_amount": 5000},
+    ]
+    candidates = [
+        {"ticker": "AAPL", "entry_price": 160.0, "signal": "HOLD", "conviction": 5},
+        {"ticker": "MSFT", "entry_price": 200.0, "signal": "BUY", "conviction": 8},
+    ]
+    result = spy_allocator._fallback_rebalance(candidates, previous, 100_000.0)
+
+    aapl_rows = [r for r in result if r["ticker"] == "AAPL"]
+    assert len(aapl_rows) == 1
+    assert aapl_rows[0]["action"] == "EXITED"
+    assert aapl_rows[0]["allocation_pct"] == 0
+    assert aapl_rows[0]["dollar_amount"] == 0
+    assert aapl_rows[0]["entry_price"] == 150.0
+
+    msft_rows = [r for r in result if r["ticker"] == "MSFT"]
+    assert len(msft_rows) == 1
+    assert msft_rows[0]["action"] == "NEW"
 
 
 def test_fallback_rebalance_live_position_still_hold_at_original_entry():
