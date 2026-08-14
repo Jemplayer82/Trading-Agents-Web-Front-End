@@ -38,6 +38,14 @@ Breaking changes within the 0.x line are called out explicitly.
   keep trailing-stop behavior. This remains simulation-only: no
   order-placement code exists anywhere in the stack, for either feature.
 
+### Changed
+
+- **Stopped-out tickers that reappear in candidates are now classified NEW instead of resurrected HOLD.** In `web/spy_allocator.py`, `run()` and `build_rebalance_user_message()` used to match candidates against a `prev_map` built from the raw previous portfolio, which still included `EXITED` rows. A ticker that was stopped out mid-week but appeared again in the current candidate list would therefore match as a `HOLD` at its stale pre-stop `entry_price`. The helper now builds `prev_map` from `live_positions(previous_portfolio)`, which drops `EXITED` rows; the ticker no longer matches, falls into `new_cands`, and is classified as `NEW` at the candidate's current price. This changes reported cost basis and realized P&L for that position going forward.
+
+- **Stop-state now survives weekly equity rebalance via `carry_forward_state()`.** Previously, `web/spy_allocator.py` carried only `entry_price` (and later `current_price`) across a weekly rebalance for `HOLD`/`ADDED`/`TRIMMED` positions, while `peak_price`, `pending_stop_limit`, and `stop_limit_price` were reset each cycle. `carry_forward_state()` now also copies `peak_price`, `pending_stop_limit`, and `stop_limit_price` from the previous live row for every retained position (`CARRIED_STOP_STATE_KEYS`), and clamps `peak_price` to be at least the carried `entry_price`. Trailing stops now keep their ratchet high-water mark across rebalance weeks instead of resetting, and armed stop-limit orders stay armed instead of silently disarming.
+
+- **Rebalance allocator prompt now surfaces positions stopped out mid-week.** `build_rebalance_user_message()` in `web/spy_allocator.py` now appends a `=== STOPPED OUT SINCE LAST REBALANCE ===` section (built with `REBALANCE_STOPPED_HEADER`, `STOPPED_TICKER_TEMPLATE`, and `stopped_positions()`) listing each stopped position's ticker, `exit_reason`, `entry_price`, and `exit_price`. The system prompt instructs the LLM that these positions are already closed and their capital is already reflected in starting capital, so re-entering one is a deliberate `NEW` position it should justify in its rationale. Previously the allocator never saw mid-week stop exits at all, which can change allocation decisions such as whether to re-enter a name that just stopped out.
+
 ## [2.0.0] — 2026-08-09
 
 Major version: this release is a full efficiency and reliability overhaul of
