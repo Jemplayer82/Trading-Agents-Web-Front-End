@@ -894,7 +894,7 @@ def test_intraday_stops_use_per_account_policy_in_one_batch(account_id, monkeypa
     # The real scheduler calls refresh_positions(paper_account_id=None).
     summary = options_engine.refresh_positions(paper_account_id=None)
 
-    assert captured["policy_lookup_calls"] <= 1
+    assert captured["policy_lookup_calls"] == 1
     assert summary["stopped"] == 2
 
     row1 = db.get_options_position(pid1)
