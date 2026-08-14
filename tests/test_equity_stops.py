@@ -548,6 +548,69 @@ def test_refresh_all_stops_every_account_not_just_the_newest_scan(tmp_db, monkey
     assert set(result["scans"].keys()) == {str(aid_a), str(aid_b)}
 
 
+def test_refresh_all_portfolio_prices_exception_isolation_continues_to_other_accounts(
+    tmp_db, monkeypatch,
+):
+    # Account A: created first -> lower paper_account_id, so it is processed
+    # first. Its per-account refresh will blow up.
+    aid_a = _account("acct-a-fail", stop_type="none")
+    scan_a = db.create_spy_scan("2026-08-10", paper_account_id=aid_a)
+    portfolio_a = [
+        {
+            "ticker": "TICK-A",
+            "action": "BUY",
+            "entry_price": 100.0,
+            "shares": 10,
+            "cost_basis": 1000.0,
+            "dollar_amount": 1000.0,
+            "signal": "BUY",
+            "current_price": 95.0,
+        }
+    ]
+    _seed_scan(scan_a, 10000, portfolio_a)
+
+    # Account B: created second; has a hard stop that the mocked price will hit.
+    aid_b = _account("acct-b-stop", stop_type="stop", stop_value=20)
+    scan_b = db.create_spy_scan("2026-08-10", paper_account_id=aid_b)
+    portfolio_b = [
+        {
+            "ticker": "TICK-B",
+            "action": "BUY",
+            "entry_price": 100.0,
+            "shares": 10,
+            "cost_basis": 1000.0,
+            "dollar_amount": 1000.0,
+            "signal": "BUY",
+            "current_price": 95.0,
+        }
+    ]
+    _seed_scan(scan_b, 10000, portfolio_b)
+
+    _mock_schwab_prices(monkeypatch, {"TICK-B": 70.0})
+
+    original_refresh = spy_scanner.refresh_portfolio_prices
+
+    def _patched_refresh(scan_id):
+        if scan_id == scan_a:
+            raise RuntimeError("simulated refresh failure for account A")
+        return original_refresh(scan_id)
+
+    monkeypatch.setattr(spy_scanner, "refresh_portfolio_prices", _patched_refresh)
+
+    result = spy_scanner.refresh_all_portfolio_prices(kind="equity")
+
+    # The loop did not raise; the failing account is recorded as an error.
+    assert "error" in result["scans"][str(aid_a)]
+
+    # The loop continued and evaluated account B's stop policy.
+    row_b = _load_portfolio(scan_b)[0]
+    assert row_b["action"] == "EXITED"
+    assert row_b["exit_reason"] == "stop_loss"
+
+    # Both accounts are represented in the result.
+    assert set(result["scans"].keys()) == {str(aid_a), str(aid_b)}
+
+
 def test_refresh_all_includes_no_account_scan(tmp_db, monkeypatch):
     scan_id = db.create_spy_scan("2026-08-10")
     portfolio = [
