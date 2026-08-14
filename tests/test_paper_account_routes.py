@@ -2,7 +2,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from web import db, spy_routes
+from web import db, spy_routes, spy_scanner
 
 pytestmark = pytest.mark.unit
 
@@ -256,30 +256,109 @@ def test_put_stop_limit_without_offset_rejected(client):
     assert row["stop_value"] == 60.0
 
 
-def test_latest_refresh_prices_fans_out_across_accounts(client):
+_SAMPLE_PORTFOLIO_ROW = {
+    "ticker": "TICK",
+    "action": "BUY",
+    "entry_price": 100.0,
+    "shares": 10,
+    "cost_basis": 1000.0,
+    "dollar_amount": 1000.0,
+    "signal": "BUY",
+    "current_price": 95.0,
+}
+
+
+def _completed_scan(account_id, portfolio):
+    """Create a completed spy scan for the account with the given portfolio."""
+    scan_id = db.create_spy_scan("2026-08-10", paper_account_id=account_id)
+    db.update_spy_scan_prices(
+        scan_id, current_value=0.0, rebalance_notes="", portfolio_json=portfolio
+    )
+    with db.connect() as conn:
+        conn.execute("UPDATE spy_scans SET status = 'completed' WHERE id = ?", (scan_id,))
+    return scan_id
+
+
+@pytest.fixture
+def captured_alerts(monkeypatch):
+    """Intercept the outage page instead of delivering it over webhook/email."""
+    calls = []
+
+    def _record(summary, detail="", *, link=None):
+        calls.append((summary, detail, link))
+
+    monkeypatch.setattr(spy_scanner.alerts, "notify", _record)
+    return calls
+
+
+def test_latest_refresh_prices_fans_out_across_accounts(client, captured_alerts):
     acct1 = _create_account(client, name="fan-out-1")
     acct2 = _create_account(client, name="fan-out-2")
 
-    scan1 = db.create_spy_scan("2026-08-10", paper_account_id=acct1["id"])
-    db.update_spy_scan_prices(
-        scan1, current_value=0.0, rebalance_notes="", portfolio_json=[]
-    )
-    scan2 = db.create_spy_scan("2026-08-10", paper_account_id=acct2["id"])
-    db.update_spy_scan_prices(
-        scan2, current_value=0.0, rebalance_notes="", portfolio_json=[]
-    )
-
-    with db.connect() as conn:
-        conn.execute(
-            "UPDATE spy_scans SET status = 'completed' WHERE id IN (?, ?)",
-            (scan1, scan2),
-        )
+    _completed_scan(acct1["id"], [])
+    _completed_scan(acct2["id"], [])
 
     resp = client.post("/api/spy-scans/latest/refresh-prices")
     assert resp.status_code == 200
-    assert len(resp.json()["scans"]) == 2
+    body = resp.json()
+    assert len(body["scans"]) == 2
+    for entry in body["scans"].values():
+        assert entry["skipped"] == "no portfolio yet"
+        assert "error" not in entry
+    assert captured_alerts == []
 
 
 def test_latest_refresh_prices_404_when_no_scans(client):
     resp = client.post("/api/spy-scans/latest/refresh-prices")
     assert resp.status_code == 404
+
+
+def test_latest_refresh_prices_500s_and_alerts_when_every_account_errors(
+    client, captured_alerts, monkeypatch
+):
+    acct1 = _create_account(client, name="error-1")
+    acct2 = _create_account(client, name="error-2")
+
+    _completed_scan(acct1["id"], [_SAMPLE_PORTFOLIO_ROW])
+    _completed_scan(acct2["id"], [_SAMPLE_PORTFOLIO_ROW])
+
+    def _always_fail(_scan_id):
+        return {"error": "quote provider exploded"}
+
+    monkeypatch.setattr(spy_scanner, "refresh_portfolio_prices", _always_fail)
+
+    resp = client.post("/api/spy-scans/latest/refresh-prices")
+    assert resp.status_code == 500
+    scans = resp.json()["detail"]["scans"]
+    assert len(scans) == 2
+    for entry in scans.values():
+        assert "error" in entry
+    assert len(captured_alerts) == 1
+
+
+def test_latest_refresh_prices_200_when_one_errors_and_one_is_empty(
+    client, captured_alerts, monkeypatch
+):
+    acct_a = _create_account(client, name="partial-error")
+    acct_b = _create_account(client, name="partial-empty")
+
+    scan_a = _completed_scan(acct_a["id"], [_SAMPLE_PORTFOLIO_ROW])
+    _completed_scan(acct_b["id"], [])
+
+    original = spy_scanner.refresh_portfolio_prices
+
+    def _selective_fail(scan_id):
+        if scan_id == scan_a:
+            return {"error": "quote provider exploded"}
+        return original(scan_id)
+
+    monkeypatch.setattr(spy_scanner, "refresh_portfolio_prices", _selective_fail)
+
+    resp = client.post("/api/spy-scans/latest/refresh-prices")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["scans"]) == 2
+    assert "error" in body["scans"][str(acct_a["id"])]
+    assert body["scans"][str(acct_b["id"])]["skipped"] == "no portfolio yet"
+    assert "error" not in body["scans"][str(acct_b["id"])]
+    assert captured_alerts == []
