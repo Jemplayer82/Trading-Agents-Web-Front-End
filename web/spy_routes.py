@@ -117,11 +117,24 @@ def update_paper_account(account_id: int, body: dict[str, Any]) -> dict[str, Any
         raise HTTPException(status_code=400, detail="bias must be bullish, neutral, or bearish")
     fields: dict[str, Any] = {}
     if "name" in body:
-        fields["name"] = body["name"]
+        name = (body["name"] or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name is required")
+        fields["name"] = name
     if "starting_capital" in body:
-        fields["starting_capital"] = float(body["starting_capital"])
+        if body["starting_capital"] is None:
+            raise HTTPException(status_code=400, detail="starting_capital is required")
+        try:
+            fields["starting_capital"] = float(body["starting_capital"])
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail="starting_capital must be a number") from exc
     if "aggressiveness" in body:
-        fields["aggressiveness"] = int(body["aggressiveness"])
+        if body["aggressiveness"] is None:
+            raise HTTPException(status_code=400, detail="aggressiveness is required")
+        try:
+            fields["aggressiveness"] = int(body["aggressiveness"])
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail="aggressiveness must be an integer") from exc
     if "bias" in body:
         fields["bias"] = body["bias"]
     if "schedule_time" in body:
@@ -136,7 +149,12 @@ def update_paper_account(account_id: int, body: dict[str, Any]) -> dict[str, Any
         fields["stop_type"] = policy.stop_type
         fields["stop_value"] = policy.stop_value
         fields["stop_limit_offset"] = policy.stop_limit_offset
-    db.update_paper_account(account_id=account_id, **fields)
+    try:
+        db.update_paper_account(account_id=account_id, **fields)
+    except Exception as exc:
+        if "UNIQUE" in str(exc):
+            raise HTTPException(status_code=409, detail=f"Account '{fields.get('name')}' already exists") from exc
+        raise
     return {"account": db.get_paper_account(account_id)}
 
 
