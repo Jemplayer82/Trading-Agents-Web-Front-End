@@ -83,8 +83,8 @@ class TestRegisterJobs:
         scheduler.register_jobs(sched)
         job = sched.get_job("nightly_scan")
         trigger_str = str(job.trigger)
-        assert "6" in trigger_str
-        assert "45" in trigger_str
+        assert "hour='6'" in trigger_str
+        assert "minute='45'" in trigger_str
         assert "mon-fri" in trigger_str
 
     def test_nightly_scan_time_defaults_to_2200_when_unset(self, monkeypatch):
@@ -93,8 +93,8 @@ class TestRegisterJobs:
         scheduler.register_jobs(sched)
         job = sched.get_job("nightly_scan")
         trigger_str = str(job.trigger)
-        assert "22" in trigger_str
-        assert "0" in trigger_str
+        assert "hour='22'" in trigger_str
+        assert "minute='0'" in trigger_str
         assert "mon-fri" in trigger_str
 
     def test_nightly_scan_time_defaults_to_2200_on_garbage_setting(self, monkeypatch):
@@ -104,5 +104,5 @@ class TestRegisterJobs:
         scheduler.register_jobs(sched)  # must not raise
         job = sched.get_job("nightly_scan")
         trigger_str = str(job.trigger)
-        assert "22" in trigger_str
-        assert "0" in trigger_str
+        assert "hour='22'" in trigger_str
+        assert "minute='0'" in trigger_str
