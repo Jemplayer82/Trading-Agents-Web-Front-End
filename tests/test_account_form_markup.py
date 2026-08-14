@@ -80,21 +80,30 @@ def test_options_markup_absent_when_options_tier_stripped():
         assert "opt-new-stop-type" not in html
 
 
+def _stop_type_select_option_values(html, select_id):
+    match = re.search(
+        rf'<select[^>]*id="{re.escape(select_id)}"[^>]*>(.*?)</select>',
+        html,
+        re.DOTALL,
+    )
+    assert match is not None, f"{select_id} select not found in index.html"
+    return re.findall(r'<option value="([^"]+)"', match.group(1))
+
+
 def test_stop_type_option_values():
     html = (ROOT / "web/static/index.html").read_text(encoding="utf-8")
     expected = ["none", "stop", "stop_limit", "trailing_pct", "trailing_dollar"]
-    blocks = []
+    select_ids = []
     if (ROOT / "web/static/spy.js").exists():
-        ranges = _tier_blocks(html, 3)
-        blocks.extend(html[begin:end] for begin, end in ranges)
+        select_ids.append("new-acct-stop-type")
     if (ROOT / "web/static/options.js").exists():
-        ranges = _tier_blocks(html, 4)
-        blocks.extend(html[begin:end] for begin, end in ranges)
-    if not blocks:
+        select_ids.append("opt-new-stop-type")
+    if not select_ids:
         pytest.skip("no account modals present at this tier")
     all_values = []
-    for block in blocks:
-        all_values.extend(re.findall(r'<option value="([^"]+)"', block))
+    for select_id in select_ids:
+        all_values.extend(_stop_type_select_option_values(html, select_id))
+    assert all_values, "stop-type options missing"
     assert all_values == expected * (len(all_values) // len(expected)), "unexpected stop-type option values"
 
 
