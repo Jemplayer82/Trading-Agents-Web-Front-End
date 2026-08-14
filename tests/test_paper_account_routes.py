@@ -298,12 +298,20 @@ def captured_alerts(monkeypatch):
     return calls
 
 
-def test_latest_refresh_prices_fans_out_across_accounts(client, captured_alerts):
+def test_latest_refresh_prices_fans_out_across_accounts(client, captured_alerts, monkeypatch):
     acct1 = _create_account(client, name="fan-out-1")
     acct2 = _create_account(client, name="fan-out-2")
 
     _completed_scan(acct1["id"], [_SAMPLE_PORTFOLIO_ROW])
     _completed_scan(acct2["id"], [_SAMPLE_PORTFOLIO_ROW])
+
+    monkeypatch.setattr(spy_scanner.schwab_mcp, "market_data_enabled", lambda: True)
+    monkeypatch.setattr(
+        spy_scanner.schwab_mcp,
+        "get_quotes",
+        lambda ts: {t: {"last": 95.0} for t in ts},
+    )
+    monkeypatch.setattr(spy_scanner.schwab_mcp, "quote_price", lambda q: q.get("last"))
 
     resp = client.post("/api/spy-scans/latest/refresh-prices")
     assert resp.status_code == 200

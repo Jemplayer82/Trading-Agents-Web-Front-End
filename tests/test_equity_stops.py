@@ -399,14 +399,28 @@ def test_freshness_gate_no_quote_no_stop(tmp_db, monkeypatch):
             "dollar_amount": 1000.0,
             "signal": "BUY",
             "current_price": 70.0,
-        }
+        },
+        {
+            "ticker": "PRICED",
+            "action": "BUY",
+            "entry_price": 100.0,
+            "shares": 10,
+            "cost_basis": 1000.0,
+            "dollar_amount": 1000.0,
+            "signal": "BUY",
+            "current_price": 95.0,
+        },
     ]
     _seed_scan(scan_id, 10000, portfolio)
-    result = _refresh(scan_id, {}, monkeypatch)
-    row = _load_portfolio(scan_id)[0]
+    result = _refresh(scan_id, {"PRICED": 90.0}, monkeypatch)
+    rows = _load_portfolio(scan_id)
+    row = rows[0]
+    priced = rows[1]
     assert row["action"] == "BUY"
     assert "exit_proceeds" not in row
     assert row["current_price"] == 70.0
+    assert priced["action"] == "BUY"
+    assert priced["current_price"] == 90.0
     assert result["stopped"] == 0
 
 

@@ -1477,6 +1477,14 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
             log.exception("Price refresh failed for scan %s: %s", scan_id, exc)
             return {"error": str(exc)}
 
+    # Total quote outage: at least one live position needs a mark but no price
+    # source produced any prices. This covers the empty-DataFrame yfinance
+    # failure mode as well as a Schwab outage, without treating partial data
+    # (some tickers priced, some not) as a total failure.
+    if any(a.get("action") != "EXITED" for a in portfolio) and not current_prices:
+        log.error("[spy %s] total price refresh outage: no live prices for active positions", scan_id)
+        return {"error": "no live prices available for active positions"}
+
     # Basis = the capital this scan started with (100k for week 1, the prior
     # week's value for a rebalance). Anything not deployed is held as cash.
     basis = float(scan.get("starting_value") or 100_000)
