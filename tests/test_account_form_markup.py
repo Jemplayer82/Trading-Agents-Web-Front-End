@@ -100,6 +100,8 @@ def test_stop_type_option_values():
 
 def test_simulated_stop_wording_in_modals():
     html = (ROOT / "web/static/index.html").read_text(encoding="utf-8")
+    if not (ROOT / "web/static/spy.js").exists() and not (ROOT / "web/static/options.js").exists():
+        pytest.skip("no account modals present at this tier")
     found = False
     if (ROOT / "web/static/spy.js").exists():
         ranges = _tier_blocks(html, 3)
@@ -113,8 +115,6 @@ def test_simulated_stop_wording_in_modals():
             if re.search(r"simulated", html[begin:end], re.IGNORECASE):
                 found = True
                 break
-    if not found:
-        pytest.skip("no account modals present at this tier")
     assert found, "simulated stop wording missing"
 
 
