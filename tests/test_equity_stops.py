@@ -1009,3 +1009,21 @@ def test_outage_predicate_single_error_account_is_an_outage():
 def test_outage_predicate_entry_with_both_keys_counts_as_an_error():
     scans = {"1": {"error": "boom", "skipped": "x"}}
     assert spy_scanner.is_total_price_refresh_outage(scans) is True
+
+
+def test_refresh_portfolio_prices_missing_scan_is_a_real_error(tmp_db, monkeypatch):
+    # Calling the real production path with a scan id that does not exist must
+    # return {"error": "scan not found"} -- not a "skipped" key. This is the
+    # regression class that produced the bug this branch fixed: an overloaded
+    # return key silently reclassified as benign. A missing scan is an anomaly
+    # worth counting toward the outage check.
+    monkeypatch.setattr(spy_scanner.schwab_mcp, "market_data_enabled", lambda: True)
+    monkeypatch.setattr(
+        spy_scanner.schwab_mcp,
+        "get_quotes",
+        lambda ts: {},
+    )
+    result = spy_scanner.refresh_portfolio_prices(999999)
+    assert result == {"error": "scan not found"}
+    assert "skipped" not in result
+    assert spy_scanner.is_total_price_refresh_outage({"999999": result}) is True
