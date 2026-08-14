@@ -1406,13 +1406,35 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
     quick-scan signal and records flips in rebalance_notes — that's the
     signal-flip surface the dashboard and the weekly rebalance read. Called
     hourly on weekdays by the scheduler and once right after a scan completes.
+
+    Return shapes are mutually exclusive: on success, a mark-to-market payload
+    with ``current_value``, ``positions_value``, ``cash``, ``deployed``,
+    ``return_pct``, ``rebalance_notes``, ``stopped``, and ``realized``; when
+    there is simply nothing to re-price, ``{"skipped": "<reason>"}`` (benign and
+    never counted as a failure); and on a genuine failure,
+    ``{"error": "<message>"}`` -- the only shape that counts toward
+    ``is_total_price_refresh_outage``. If an entry ever carries both
+    ``"skipped"`` and ``"error"``, the ``"error"`` key wins and it is treated as
+    a real failure.
     """
     scan = db.get_spy_scan(scan_id)
     if not scan:
+        # Deliberately a real error, not a skip: refresh_all_portfolio_prices
+        # only ever passes ids it SELECTed as completed scans moments earlier,
+        # so a miss here means the row vanished mid-run (e.g. a concurrent
+        # DELETE /api/spy-scans) or the DB is inconsistent. The other caller is
+        # the single-scan route, where a bad id is a real client error. Either
+        # way it is an anomaly worth counting toward the outage check, unlike
+        # an empty portfolio, which is an ordinary steady state.
         return {"error": "scan not found"}
     portfolio = scan.get("portfolio_json")
     if not portfolio:
-        return {"error": "no portfolio yet"}
+        # Benign and expected: every paper account looks like this between
+        # creation and its first weekly allocation. Reusing the {"error": ...}
+        # shape here is what made the hourly cron's /latest/refresh-prices
+        # return a false 500 and fire a bogus "everything is broken" alert
+        # whenever no account had allocated yet.
+        return {"skipped": "no portfolio yet"}
 
     tickers = [a["ticker"] for a in portfolio]
 
@@ -1505,6 +1527,31 @@ def refresh_portfolio_prices(scan_id: int) -> dict[str, Any]:
     }
 
 
+def is_total_price_refresh_outage(scans: dict[str, Any]) -> bool:
+    """True only when every account in a fan-out result failed for a real reason.
+
+    ``refresh_portfolio_prices`` returns three distinguishable shapes: a
+    success payload, ``{"skipped": ...}`` (nothing to re-price), and
+    ``{"error": ...}`` (a genuine failure). Only the last counts here, so this
+    is True exactly when there is at least one account, none succeeded, and
+    none of the non-successes were merely benign skips.
+
+    A brand-new paper account has no portfolio until its first weekly
+    allocation runs, so an all-skipped result is an ordinary steady state --
+    it must not 500 the hourly cron endpoint and must not page anyone. A mix
+    of one real error and one empty-portfolio skip is likewise a partial
+    failure, not an outage.
+
+    Single source of truth: both the alert below and the HTTP 500 in
+    web/spy_routes.py::refresh_spy_prices_latest call this, so the two can
+    never drift apart. An entry carrying both keys counts as an error.
+    """
+    if not scans:
+        return False
+    errors = sum(1 for v in scans.values() if isinstance(v, dict) and "error" in v)
+    return errors == len(scans)
+
+
 def refresh_all_portfolio_prices(kind: str = "equity") -> dict[str, Any]:
     """Mark every completed equity scan's paper portfolio to market.
 
@@ -1516,6 +1563,9 @@ def refresh_all_portfolio_prices(kind: str = "equity") -> dict[str, Any]:
     the options side's fan-out in ``options_engine.refresh_positions`` by
     finding the newest completed scan PER paper_account_id (including the
     NULL / unassigned bucket) and refreshing each one independently.
+
+    Benign per-account skips never count toward the total-outage alert; only
+    entries carrying an ``"error"`` key do.
     """
     with db.connect() as conn:
         rows = conn.execute(
@@ -1545,7 +1595,7 @@ def refresh_all_portfolio_prices(kind: str = "equity") -> dict[str, Any]:
             )
             scans[key] = {"error": str(exc)}
 
-    if scans and all(isinstance(v, dict) and "error" in v for v in scans.values()):
+    if is_total_price_refresh_outage(scans):
         count = len(scans)
         detail = "\n".join(f"{k}: {v.get('error')}" for k, v in scans.items())
         summary = f"All {count} {kind} account price refreshes failed"
