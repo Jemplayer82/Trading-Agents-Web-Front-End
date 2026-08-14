@@ -494,7 +494,9 @@ def test_rebalance_notes_stopped_persists_and_flips_unchanged(tmp_db, monkeypatc
     assert r3["rebalance_notes"] == expected
 
 
-def test_refresh_all_stops_every_account_not_just_the_newest_scan(tmp_db, monkeypatch):
+def test_refresh_all_stops_every_account_not_just_the_newest_scan(
+    tmp_db, monkeypatch, captured_alerts
+):
     # Account A: created first -> lower scan id, but still must get its stop evaluated.
     aid_a = _account("acct-a-stop", stop_type="stop", stop_value=20)
     scan_a = db.create_spy_scan("2026-08-10", paper_account_id=aid_a)
@@ -546,10 +548,11 @@ def test_refresh_all_stops_every_account_not_just_the_newest_scan(tmp_db, monkey
     assert row_b["current_price"] == 70.0
 
     assert set(result["scans"].keys()) == {str(aid_a), str(aid_b)}
+    assert captured_alerts == []
 
 
 def test_refresh_all_portfolio_prices_exception_isolation_continues_to_other_accounts(
-    tmp_db, monkeypatch,
+    tmp_db, monkeypatch, captured_alerts,
 ):
     # Account A: created first -> lower paper_account_id, so it is processed
     # first. Its per-account refresh will blow up.
@@ -609,9 +612,10 @@ def test_refresh_all_portfolio_prices_exception_isolation_continues_to_other_acc
 
     # Both accounts are represented in the result.
     assert set(result["scans"].keys()) == {str(aid_a), str(aid_b)}
+    assert captured_alerts == []
 
 
-def test_refresh_all_includes_no_account_scan(tmp_db, monkeypatch):
+def test_refresh_all_includes_no_account_scan(tmp_db, monkeypatch, captured_alerts):
     scan_id = db.create_spy_scan("2026-08-10")
     portfolio = [
         {
@@ -633,9 +637,10 @@ def test_refresh_all_includes_no_account_scan(tmp_db, monkeypatch):
 
     assert "unassigned" in result["scans"]
     assert _load_portfolio(scan_id)[0]["current_price"] == 90.0
+    assert captured_alerts == []
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def captured_alerts(monkeypatch):
     """Intercept spy_scanner's total-outage page so tests can assert fired/not-fired."""
     calls = []
