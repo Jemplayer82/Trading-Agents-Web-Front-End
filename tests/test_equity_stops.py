@@ -635,6 +635,117 @@ def test_refresh_all_includes_no_account_scan(tmp_db, monkeypatch):
     assert _load_portfolio(scan_id)[0]["current_price"] == 90.0
 
 
+@pytest.fixture
+def captured_alerts(monkeypatch):
+    """Intercept spy_scanner's total-outage page so tests can assert fired/not-fired."""
+    calls = []
+
+    def _record(summary, detail="", *, link=None):
+        calls.append((summary, detail, link))
+
+    monkeypatch.setattr(spy_scanner.alerts, "notify", _record)
+    return calls
+
+
+def test_refresh_all_empty_portfolios_skip_without_alerting(tmp_db, captured_alerts):
+    aid_a = _account("acct-empty-a", stop_type="none")
+    scan_a = db.create_spy_scan("2026-08-10", paper_account_id=aid_a)
+    _seed_scan(scan_a, 10000, [])
+
+    aid_b = _account("acct-empty-b", stop_type="none")
+    scan_b = db.create_spy_scan("2026-08-10", paper_account_id=aid_b)
+    _seed_scan(scan_b, 10000, [])
+
+    result = spy_scanner.refresh_all_portfolio_prices(kind="equity")
+
+    key_a = str(aid_a)
+    key_b = str(aid_b)
+    assert key_a in result["scans"]
+    assert key_b in result["scans"]
+    assert result["scans"][key_a]["skipped"] == "no portfolio yet"
+    assert result["scans"][key_b]["skipped"] == "no portfolio yet"
+    assert "error" not in result["scans"][key_a]
+    assert "error" not in result["scans"][key_b]
+    assert captured_alerts == []
+
+
+def test_refresh_all_every_account_erroring_still_alerts(tmp_db, captured_alerts, monkeypatch):
+    portfolio = [
+        {
+            "ticker": "TICK",
+            "action": "BUY",
+            "entry_price": 100.0,
+            "shares": 10,
+            "cost_basis": 1000.0,
+            "dollar_amount": 1000.0,
+            "signal": "BUY",
+            "current_price": 95.0,
+        }
+    ]
+
+    aid_a = _account("acct-err-a", stop_type="none")
+    scan_a = db.create_spy_scan("2026-08-10", paper_account_id=aid_a)
+    _seed_scan(scan_a, 10000, portfolio)
+
+    aid_b = _account("acct-err-b", stop_type="none")
+    scan_b = db.create_spy_scan("2026-08-10", paper_account_id=aid_b)
+    _seed_scan(scan_b, 10000, portfolio)
+
+    def _boom(scan_id):
+        raise RuntimeError("simulated total outage")
+
+    monkeypatch.setattr(spy_scanner, "refresh_portfolio_prices", _boom)
+
+    result = spy_scanner.refresh_all_portfolio_prices(kind="equity")
+
+    for entry in result["scans"].values():
+        assert "error" in entry
+
+    assert len(captured_alerts) == 1
+    assert captured_alerts[0][0] == "All 2 equity account price refreshes failed"
+    assert str(aid_a) in captured_alerts[0][1]
+    assert str(aid_b) in captured_alerts[0][1]
+
+
+def test_refresh_all_mixed_real_error_and_skip_does_not_alert(tmp_db, captured_alerts, monkeypatch):
+    portfolio = [
+        {
+            "ticker": "TICK",
+            "action": "BUY",
+            "entry_price": 100.0,
+            "shares": 10,
+            "cost_basis": 1000.0,
+            "dollar_amount": 1000.0,
+            "signal": "BUY",
+            "current_price": 95.0,
+        }
+    ]
+
+    aid_a = _account("acct-mix-a", stop_type="none")
+    scan_a = db.create_spy_scan("2026-08-10", paper_account_id=aid_a)
+    _seed_scan(scan_a, 10000, portfolio)
+
+    aid_b = _account("acct-mix-b", stop_type="none")
+    scan_b = db.create_spy_scan("2026-08-10", paper_account_id=aid_b)
+    _seed_scan(scan_b, 10000, [])
+
+    original_refresh = spy_scanner.refresh_portfolio_prices
+
+    def _patched_refresh(scan_id):
+        if scan_id == scan_a:
+            raise RuntimeError("simulated refresh failure for account A")
+        return original_refresh(scan_id)
+
+    monkeypatch.setattr(spy_scanner, "refresh_portfolio_prices", _patched_refresh)
+
+    result = spy_scanner.refresh_all_portfolio_prices(kind="equity")
+
+    assert "error" in result["scans"][str(aid_a)]
+    assert result["scans"][str(aid_b)]["skipped"] == "no portfolio yet"
+    assert "error" not in result["scans"][str(aid_b)]
+    assert captured_alerts == []
+
+
 # --- direct unit tests for the extracted pure helpers -----------------------
 
 
@@ -850,3 +961,48 @@ def test_format_rebalance_notes_stops_and_flips_joined_with_blank_line():
         "Signal flips detected:\n- FLIP: was BUY at entry, now SELL"
     )
     assert result == expected
+
+
+# --- outage predicate ------------------------------------------------------
+
+
+def test_outage_predicate_empty_dict_is_not_an_outage():
+    assert spy_scanner.is_total_price_refresh_outage({}) is False
+
+
+def test_outage_predicate_all_real_errors_is_an_outage():
+    scans = {"1": {"error": "boom"}, "2": {"error": "scan not found"}}
+    assert spy_scanner.is_total_price_refresh_outage(scans) is True
+
+
+def test_outage_predicate_all_skips_is_not_an_outage():
+    scans = {"1": {"skipped": "no portfolio yet"}, "2": {"skipped": "no portfolio yet"}}
+    assert spy_scanner.is_total_price_refresh_outage(scans) is False
+
+
+def test_outage_predicate_mixed_error_and_skip_is_not_an_outage():
+    scans = {"1": {"error": "boom"}, "2": {"skipped": "no portfolio yet"}}
+    assert spy_scanner.is_total_price_refresh_outage(scans) is False
+
+
+def test_outage_predicate_mixed_error_and_success_is_not_an_outage():
+    scans = {"1": {"error": "boom"}, "2": {"current_value": 10000.0, "cash": 0.0, "stopped": 0}}
+    assert spy_scanner.is_total_price_refresh_outage(scans) is False
+
+
+def test_outage_predicate_all_successes_is_not_an_outage():
+    scans = {
+        "1": {"current_value": 10000.0, "cash": 0.0, "stopped": 0},
+        "2": {"current_value": 20000.0, "cash": 500.0, "stopped": 1},
+    }
+    assert spy_scanner.is_total_price_refresh_outage(scans) is False
+
+
+def test_outage_predicate_single_error_account_is_an_outage():
+    scans = {"unassigned": {"error": "boom"}}
+    assert spy_scanner.is_total_price_refresh_outage(scans) is True
+
+
+def test_outage_predicate_entry_with_both_keys_counts_as_an_error():
+    scans = {"1": {"error": "boom", "skipped": "x"}}
+    assert spy_scanner.is_total_price_refresh_outage(scans) is True
