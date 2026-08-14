@@ -280,6 +280,9 @@ def refresh_spy_prices_latest() -> dict[str, Any]:
     result = spy_scanner.refresh_all_portfolio_prices(kind="equity")
     if not result.get("scans"):
         raise HTTPException(status_code=404, detail="no scans found")
+    scans = result.get("scans") or {}
+    if scans and all(isinstance(v, dict) and "error" in v for v in scans.values()):
+        raise HTTPException(status_code=500, detail=result)
     return result
 
 

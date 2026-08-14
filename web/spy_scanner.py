@@ -67,7 +67,7 @@ from tradingagents.dataflows.config import set_config
 from tradingagents.llm_clients import create_llm_client
 from tradingagents.orchestrator import SwitchboardOrchestrator
 
-from . import account_policy, db, market_cache
+from . import account_policy, alerts, db, market_cache
 from .llm_helpers import DynamicGate, _GateMonitor, _total_budget, llm_for
 
 log = logging.getLogger(__name__)
@@ -1255,6 +1255,18 @@ def run_deep_dives(
     return enriched
 
 
+def _coerce_float(value: Any, default: float | None = None) -> float | None:
+    """Return float(value) when possible; otherwise return default.
+
+    Defensive coercion for snapshot rows that may contain malformed or
+    legacy string values (e.g. 'n/a') instead of a numeric field.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def apply_stops_and_value(
     portfolio: list[dict[str, Any]], *, basis: float, policy, prices: dict[str, float]
 ) -> dict[str, Any]:
@@ -1328,11 +1340,19 @@ def apply_stops_and_value(
     # outcome and makes the gain/loss survive every subsequent refresh. Only rows
     # carrying exit_proceeds count, so rows the weekly rebalance EXITED (which have
     # none) behave exactly as they do today.
-    realized = sum(
-        float(r["exit_proceeds"]) - float(r.get("cost_basis") or 0)
-        for r in portfolio
-        if r.get("exit_proceeds") is not None
-    )
+    realized = 0.0
+    for r in portfolio:
+        if r.get("exit_proceeds") is None:
+            continue
+        proceeds = _coerce_float(r["exit_proceeds"])
+        if proceeds is None:
+            log.warning(
+                "Skipping malformed exit_proceeds for %s: %r",
+                r.get("ticker", "UNKNOWN"),
+                r.get("exit_proceeds"),
+            )
+            continue
+        realized += proceeds - float(r.get("cost_basis") or 0)
     cash = max(0.0, basis - deployed + realized)
     return {
         "positions_value": positions_value,
@@ -1351,9 +1371,9 @@ def _format_rebalance_notes(
     stopped_lines = []
     for r in portfolio:
         if r.get("exit_reason") in _STOP_REASONS:
-            t = r["ticker"]
+            t = r.get("ticker", "UNKNOWN")
             exit_reason = r["exit_reason"]
-            exit_price = float(r["exit_price"])
+            exit_price = float(r.get("exit_price") or 0)
             ep = float(r.get("entry_price") or 0)
             pct = (
                 round((exit_price - ep) / ep * 100, 1)
@@ -1525,5 +1545,15 @@ def refresh_all_portfolio_prices(kind: str = "equity") -> dict[str, Any]:
                 "[spy %s] refresh_all_portfolio_prices failed for account %s", scan_id, key
             )
             scans[key] = {"error": str(exc)}
+
+    if scans and all(isinstance(v, dict) and "error" in v for v in scans.values()):
+        count = len(scans)
+        detail = "\n".join(f"{k}: {v.get('error')}" for k, v in scans.items())
+        summary = f"All {count} {kind} account price refreshes failed"
+        dashboard_url = os.environ.get("DASHBOARD_URL", "https://trading.txferguson.net").rstrip("/")
+        try:
+            alerts.notify(summary, detail, link=dashboard_url)
+        except Exception:
+            log.exception("[spy] alert failed for all-account price refresh failure")
 
     return {"scans": scans}
