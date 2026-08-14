@@ -307,7 +307,7 @@ def test_refresh_spy_prices_error_alerts_and_returns_early():
     assert not any(c[0] == "loadSpyHistory" for c in result["calls"])
 
 
-def test_refresh_active_spy_skipped_reports_prices_refreshed():
+def test_refresh_active_spy_skipped_reports_skip_reason():
     result = _run_refresh(
         """
         globalThis.__refreshPricesResponse = { skipped: "no portfolio yet" };
@@ -327,5 +327,6 @@ def test_refresh_active_spy_skipped_reports_prices_refreshed():
     )
     assert result["alerts"] == []
     assert ["loadSpyScan", 123] in result["calls"]
-    assert result["status"] == "Prices refreshed."
+    assert result["status"] != "Prices refreshed."
+    assert "no portfolio yet" in result["status"]
     assert result["btnText"] == "Refresh"

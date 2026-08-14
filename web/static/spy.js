@@ -794,6 +794,7 @@ async function refreshSpyPrices(scanId) {
   if (data.error) { alert("Refresh failed: " + data.error); return; }
   await loadSpyHistory();
   loadSpyScan(scanId);
+  return data;
 }
 
 // ===== Tab lifecycle + wiring =====
@@ -830,8 +831,12 @@ async function refreshActiveSpy() {
       }
       scanId = scans[0].id;
     }
-    await refreshSpyPrices(scanId);
-    if (status) status.textContent = "Prices refreshed.";
+    const data = await refreshSpyPrices(scanId);
+    if (status) {
+      status.textContent = (data && data.skipped)
+        ? ("Refresh skipped: " + data.skipped)
+        : "Prices refreshed.";
+    }
   } catch (e) {
     if (status) status.textContent = "Refresh failed: " + e;
   } finally {
