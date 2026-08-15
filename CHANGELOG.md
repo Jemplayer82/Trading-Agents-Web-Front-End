@@ -8,6 +8,13 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ## [Unreleased]
 
+## [2.1.0] — 2026-08-14
+
+Per-account automation scheduling and configurable paper stop-loss policies
+for the S&P 500 and Options paper accounts, plus the Portfolio tab's nightly
+Schwab scan time. Along the way, several real correctness bugs around
+weekly equity rebalancing and stop-loss state were found and fixed.
+
 ### Added
 
 - **Per-account scan scheduling.** Each paper account now carries its own
